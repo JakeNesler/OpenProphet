@@ -16,7 +16,7 @@ Replace OpenCode CLI with Claude Code (`claude -p` headless mode). All changes t
 
 | Step | Description | Status | Date | Commit |
 |------|-------------|--------|------|--------|
-| 1.1 | Create branch `feature/ibkr-porting`, add `CLAUDE.md` and `PROGRESS.md` to repo | ⬜ | | |
+| 1.1 | Create branch `feature/ibkr-porting`, add `CLAUDE.md` and `PROGRESS.md` to repo | ✅ | 2026-03-22 | 2149d18 |
 | 1.2 | Create `.mcp.json` (replaces `opencode.jsonc`) | ⬜ | | |
 | 1.3 | Update `harness.js` — spawn command only (`opencode run` → `claude -p`, argument mapping) | ⬜ | | |
 | 1.4 | Update `harness.js` — session handling (`--session` → `--resume`, capture `session_id`) | ⬜ | | |
