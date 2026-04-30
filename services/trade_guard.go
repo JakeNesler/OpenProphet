@@ -32,6 +32,11 @@ type TradeGuardConfig struct {
 
 	// PennyMaxPositionDollars is the maximum dollar size of a single penny trade.
 	PennyMaxPositionDollars float64 `json:"penny_max_position_dollars"`
+
+	// MaxDailyLossPct is the daily loss circuit breaker as a positive percentage
+	// of previous session equity (e.g. 5.0 = block new entries when intraday
+	// loss reaches -5%). Zero or negative disables the check.
+	MaxDailyLossPct float64 `json:"max_daily_loss_pct"`
 }
 
 // positionLister is the subset of PositionManager needed by the guard.
@@ -78,11 +83,40 @@ func NewTradeGuard(positions positionLister, ts interfaces.TradingService, cfg T
 // CheckBuy validates a buy order against all guard rules.
 // allocationDollars is the intended spend; pass 0 when the dollar value is unknown
 // (capital-cap check is skipped).
+//
+// At most one tradingService.GetAccount() call is made per invocation: the result
+// is fetched lazily (only when daily-loss or capital-cap checks need it) and shared
+// between the two checks for penny buys.
 func (g *TradeGuard) CheckBuy(ctx context.Context, agent AgentSource, symbol string, allocationDollars float64) error {
 	if agent == "" {
 		agent = AgentMain
 	}
 	opponent := g.opponentOf(agent)
+
+	// Lazily fetch account at most once per CheckBuy. Both the value and any
+	// fetch error are cached so each downstream helper can apply its own policy:
+	//   - checkDailyLoss treats fetch errors as "data missing, fail-open"
+	//   - checkPennyCapCap treats fetch errors as fail-closed (preserves prior behavior)
+	var acct *interfaces.Account
+	var acctErr error
+	var acctFetched bool
+	getAcct := func() (*interfaces.Account, error) {
+		if acctFetched {
+			return acct, acctErr
+		}
+		acctFetched = true
+		if g.tradingService == nil {
+			return nil, nil
+		}
+		acct, acctErr = g.tradingService.GetAccount(ctx)
+		return acct, acctErr
+	}
+
+	// Daily-loss circuit breaker applies to BOTH agents.
+	dailyAcct, _ := getAcct()
+	if err := g.checkDailyLoss(dailyAcct); err != nil {
+		return err
+	}
 
 	if g.agentOwnsSymbol(opponent, symbol) {
 		return fmt.Errorf("guard: %s agent holds %s — %s agent cannot open a position in the same symbol", opponent, symbol, agent)
@@ -93,7 +127,8 @@ func (g *TradeGuard) CheckBuy(ctx context.Context, agent AgentSource, symbol str
 			return fmt.Errorf("guard: penny position $%.2f exceeds per-position cap of $%.2f", allocationDollars, g.cfg.PennyMaxPositionDollars)
 		}
 		if allocationDollars > 0 {
-			if err := g.checkPennyCapCap(ctx, allocationDollars); err != nil {
+			capAcct, capErr := getAcct()
+			if err := g.checkPennyCapCap(capAcct, capErr, allocationDollars); err != nil {
 				return err
 			}
 		}
@@ -198,13 +233,41 @@ func (g *TradeGuard) symbolsFor(agent AgentSource) map[string]struct{} {
 	return result
 }
 
-func (g *TradeGuard) checkPennyCapCap(ctx context.Context, additionalDollars float64) error {
-	if g.tradingService == nil {
+// checkDailyLoss returns an error if intraday equity is down beyond MaxDailyLossPct.
+// Disabled when MaxDailyLossPct <= 0, when acct is nil (no data available),
+// or when LastEquity/PortfolioValue is zero (fail-open to avoid bricking new accounts).
+// The caller is responsible for fetching the account; passing nil makes this a no-op.
+func (g *TradeGuard) checkDailyLoss(acct *interfaces.Account) error {
+	if g.cfg.MaxDailyLossPct <= 0 || acct == nil {
 		return nil
 	}
-	acct, err := g.tradingService.GetAccount(ctx)
-	if err != nil {
-		return fmt.Errorf("guard: failed to fetch account for capital check: %w", err)
+	if acct.LastEquity <= 0 || acct.PortfolioValue <= 0 {
+		return nil
+	}
+	lossPct := (acct.LastEquity - acct.PortfolioValue) / acct.LastEquity * 100
+	if lossPct >= g.cfg.MaxDailyLossPct {
+		return fmt.Errorf(
+			"guard: daily loss circuit breaker — down %.2f%% from previous close ($%.2f → $%.2f), exceeds %.2f%% limit",
+			lossPct, acct.LastEquity, acct.PortfolioValue, g.cfg.MaxDailyLossPct,
+		)
+	}
+	return nil
+}
+
+// checkPennyCapCap enforces the aggregate penny exposure cap.
+//   - acct == nil && acctErr == nil: trading service unavailable (e.g. tests) — skip check (no-op).
+//   - acct == nil && acctErr != nil: fetch failed — fail-closed, return wrapped error.
+//   - acct != nil: run the cap check normally.
+//
+// The fail-closed behavior on fetch errors is intentional and matches the original
+// pre-refactor semantics: a flaky API call should NOT silently let a penny buy
+// bypass the capital cap.
+func (g *TradeGuard) checkPennyCapCap(acct *interfaces.Account, acctErr error, additionalDollars float64) error {
+	if acctErr != nil {
+		return fmt.Errorf("guard: failed to fetch account for capital check: %w", acctErr)
+	}
+	if acct == nil {
+		return nil
 	}
 
 	exposure := g.currentPennyExposure()

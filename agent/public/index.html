@@ -2327,6 +2327,8 @@ async function applyProfileFromSandboxPage(sandboxId) {
     });
   }
   showToast('Profile applied', 'success');
+  const termSel = document.querySelector(`[data-stat="${sandboxId}-hb-profile"]`);
+  if (termSel) termSel.value = select.value;
 }
 
 async function saveSbxHb(sandboxId) {
@@ -2484,6 +2486,7 @@ function ensureSandboxTerminal(sandboxId, label) {
               <option value="earnings_season">Earnings Season</option>
               <option value="overnight">Overnight Hold</option>
               <option value="scalp">Scalp Mode</option>
+              <option value="penny_stock">Penny Stock</option>
             </select>
           </div>
           <div style="margin-top:4px;display:flex;gap:4px">
@@ -2763,6 +2766,7 @@ function filterTerminalFor(sandboxId) {
 
 async function applyProfile(sandboxId, profile) {
   if (!profile) return;
+  let ok = false;
   try {
     const r = await fetch('/api/heartbeat/apply-profile', {
       method: 'POST',
@@ -2771,7 +2775,11 @@ async function applyProfile(sandboxId, profile) {
     });
     const d = await r.json();
     if (d.ok) {
+      ok = true;
       logToSandbox(sandboxId, `<div class="log-entry success"><span class="time">${fmtTime()}</span>Applied heartbeat profile: ${esc(profile)}</div>`);
+      _sbxActiveProfile[sandboxId] = profile;
+      const sbxSel = document.getElementById('sbx-profile-' + sandboxId);
+      if (sbxSel) sbxSel.value = profile;
     } else {
       logToSandbox(sandboxId, `<div class="log-entry error"><span class="time">${fmtTime()}</span>Failed: ${esc(d.error)}</div>`);
     }
@@ -2779,7 +2787,7 @@ async function applyProfile(sandboxId, profile) {
     logToSandbox(sandboxId, `<div class="log-entry error"><span class="time">${fmtTime()}</span>Error: ${esc(e.message)}</div>`);
   }
   const sel = document.querySelector(`[data-stat="${sandboxId}-hb-profile"]`);
-  if (sel) sel.value = '';
+  if (sel && !ok) sel.value = '';
 }
 
 async function overrideHb(sandboxId) {
@@ -3236,6 +3244,7 @@ function renderAccounts() {
       + '<div class="config-card-actions" style="display:flex;flex-wrap:wrap;gap:8px;margin-top:10px">'
       + '<button class="btn sm" onclick="switchSandboxTab(\'' + sandboxId + '\');switchTab(\'terminal\')">View</button>'
       + '<button class="btn sm" onclick="configureSandbox(\'' + sandboxId + '\')">Configure</button>'
+      + '<button class="btn sm" onclick="showModal(\'account-edit\', config.accounts.find(x=>x.id===\'' + a.id + '\'))">Edit</button>'
       + '<button class="btn sm danger" onclick="deleteAccount(\'' + a.id + '\')">Delete</button>'
       + '</div></div>';
   }).join('');
@@ -3353,6 +3362,14 @@ function showModal(type, data) {
   else if(type === 'account-create') {
     modal.innerHTML = '<h3>Add Trading Account</h3><div class="form-group"><label>Account Name</label><input type="text" id="f-acc-name" placeholder="e.g. Paper Trading"></div><div class="form-row"><div class="form-group"><label>Public Key</label><input type="text" id="f-acc-pk" placeholder="AKXXXXXXXXXX"></div><div class="form-group"><label>Secret Key</label><input type="password" id="f-acc-sk" placeholder="Your secret key"></div></div><div class="form-group"><label>Base URL</label><input type="text" id="f-acc-url" placeholder="https://paper-api.alpaca.markets"><div class="form-hint">Leave blank for auto-detection based on paper/live selection</div></div><div class="form-group"><label><input type="checkbox" id="f-acc-paper" checked> Paper Trading</label></div><div class="modal-actions"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn primary" onclick="submitAccount()">Add Account</button></div>';
   }
+  else if(type === 'account-edit') {
+    const a = data || {};
+    modal.innerHTML = '<h3>Edit Account</h3>'
+      + '<div class="form-group"><label>Account Name</label><input type="text" id="f-eacc-name" value="'+esc(a.name||'')+'"></div>'
+      + '<div class="form-group"><label>API Endpoint (Base URL)</label><input type="text" id="f-eacc-url" value="'+esc(a.baseUrl||'')+'" placeholder="https://paper-api.alpaca.markets"></div>'
+      + '<div class="form-group"><label><input type="checkbox" id="f-eacc-paper"'+(a.paper?' checked':'')+'> Paper Trading</label></div>'
+      + '<div class="modal-actions"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn primary" onclick="submitEditAccount(\''+esc(a.id||'')+'\')">Save</button></div>';
+  }
   else if(type === 'agent-create' || type === 'agent-edit') {
     const a = data || { name:'', description:'', systemPromptTemplate:'default', customSystemPrompt:'', strategyId:'default', model: config.activeModel, heartbeatOverrides:{} };
     const stratOpts = (config.strategies||[]).map(s => '<option value="'+s.id+'"'+(s.id===a.strategyId?' selected':'')+'>'+esc(s.name)+'</option>').join('');
@@ -3387,6 +3404,16 @@ async function submitAccount() {
   const body = { name: v('f-acc-name'), publicKey: v('f-acc-pk'), secretKey: v('f-acc-sk'), baseUrl: v('f-acc-url'), paper: document.getElementById('f-acc-paper').checked };
   try {
     const r = await fetch('/api/accounts', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
+    const d = await r.json();
+    if (d.error) { alert('Error: ' + d.error); return; }
+    closeModal();
+  } catch (e) { alert('Error: ' + e.message); }
+}
+
+async function submitEditAccount(id) {
+  const body = { name: v('f-eacc-name'), baseUrl: v('f-eacc-url'), paper: document.getElementById('f-eacc-paper').checked };
+  try {
+    const r = await fetch('/api/accounts/' + encodeURIComponent(id), {method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
     const d = await r.json();
     if (d.error) { alert('Error: ' + d.error); return; }
     closeModal();

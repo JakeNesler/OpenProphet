@@ -121,6 +121,7 @@ func main() {
 		services.TradeGuardConfig{
 			PennyMaxCapitalPct:      cfg.PennyMaxCapitalPct,
 			PennyMaxPositionDollars: cfg.PennyMaxPositionDollars,
+			MaxDailyLossPct:         cfg.MaxDailyLossPct,
 		},
 	)
 	positionManager.SetGuard(tradeGuard)
@@ -130,6 +131,7 @@ func main() {
 	logger.WithFields(logrus.Fields{
 		"penny_max_capital_pct":      cfg.PennyMaxCapitalPct,
 		"penny_max_position_dollars": cfg.PennyMaxPositionDollars,
+		"max_daily_loss_pct":         cfg.MaxDailyLossPct,
 	}).Info("Trade guard initialized")
 
 	// Create activity logger

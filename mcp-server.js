@@ -21,6 +21,16 @@ const TRADING_BOT_URL = process.env.TRADING_BOT_URL || 'http://localhost:4534';
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const OPENPROPHET_ACCOUNT_ID = process.env.OPENPROPHET_ACCOUNT_ID || 'default';
 const OPENPROPHET_SANDBOX_ID = process.env.OPENPROPHET_SANDBOX_ID || `sbx_${OPENPROPHET_ACCOUNT_ID}`;
+
+// Per-agent tool allowlist. When set (comma-separated tool names), the ListTools
+// response is filtered to only those tools — saves prompt tokens by not exposing
+// schemas for tools this agent never uses. Unset/empty = all tools (default).
+const TOOL_ALLOWLIST = new Set(
+  (process.env.OPENPROPHET_TOOL_ALLOWLIST || '')
+    .split(',')
+    .map(s => s.trim())
+    .filter(Boolean)
+);
 const SANDBOX_DATA_DIR = path.join(process.cwd(), 'data', 'sandboxes', OPENPROPHET_ACCOUNT_ID);
 const SUMMARIES_DIR = path.join(SANDBOX_DATA_DIR, 'news_summaries');
 const DECISIONS_DIR = path.join(SANDBOX_DATA_DIR, 'decisive_actions');
@@ -32,6 +42,142 @@ const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash-exp' });
 // Ensure directories exist
 await fs.mkdir(SUMMARIES_DIR, { recursive: true });
 await fs.mkdir(DECISIONS_DIR, { recursive: true });
+
+// ── News deduplication (entity + event bucketing) ─────────────────────────────
+// Prevents the same story from appearing across multiple news tool calls in one
+// heartbeat. Buckets by (ticker, event_type) so "Google surges on earnings" and
+// "Alphabet jumps after Q1 results" both map to GOOG:earnings and the second is dropped.
+
+const NEWS_DEDUP_TTL_MS = 30 * 60 * 1000; // reset every 30 min (one heartbeat window)
+
+const newsDedup = {
+  seen: new Set(),
+  resetAt: Date.now() + NEWS_DEDUP_TTL_MS,
+  checkAndReset() {
+    if (Date.now() > this.resetAt) {
+      this.seen.clear();
+      this.resetAt = Date.now() + NEWS_DEDUP_TTL_MS;
+    }
+  },
+};
+
+// Longer aliases first so "goldman sachs" matches before "goldman".
+// Each alias is compiled to a word-boundary regex to avoid substring false matches
+// (e.g. "intel" matching "intelligence", "meta" matching "metals").
+const TICKER_ALIASES = Object.entries({
+  'goldman sachs': 'GS', 'j.p. morgan': 'JPM', 'bank of america': 'BAC',
+  'morgan stanley': 'MS', 'microstrategy': 'MSTR', 'marathon digital': 'MARA',
+  alphabet: 'GOOG', google: 'GOOG',
+  facebook: 'META', meta: 'META',
+  microsoft: 'MSFT', apple: 'AAPL', amazon: 'AMZN', tesla: 'TSLA',
+  nvidia: 'NVDA', netflix: 'NFLX', intel: 'INTC', palantir: 'PLTR',
+  coinbase: 'COIN', marathon: 'MARA', walmart: 'WMT', disney: 'DIS',
+  salesforce: 'CRM', berkshire: 'BRK', jpmorgan: 'JPM', goldman: 'GS',
+})
+  .sort((a, b) => b[0].length - a[0].length)
+  .map(([alias, ticker]) => [new RegExp(`\\b${alias.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`), ticker]);
+
+const EVENT_KEYWORDS = {
+  earnings:  ['earnings', 'revenue', 'profit', 'eps', ' q1 ', ' q2 ', ' q3 ', ' q4 ', 'quarterly', 'quarter results', 'better-than-expected', 'beat', 'miss', 'guidance', 'forecast', 'outlook'],
+  analyst:   ['upgrade', 'downgrade', 'price target', 'overweight', 'underweight', 'outperform', 'underperform', 'buy rating', 'sell rating', 'raises target', 'cuts target'],
+  ma:        ['merger', 'acquisition', 'acquires', 'buyout', 'takeover', 'to buy ', 'to acquire'],
+  fda:       ['fda ', 'clinical trial', 'drug approval'],
+  layoff:    ['layoff', 'layoffs', 'job cuts', 'restructur', 'downsiz', 'workforce reduction'],
+  ipo:       ['ipo', 'goes public', 'public debut'],
+  fed:       ['fomc', 'federal reserve', 'interest rate', 'rate hike', 'rate cut', 'powell', 'fed funds', 'basis point'],
+  cpi:       ['consumer price index', 'cpi report', 'pce', 'ppi report', 'inflation data', 'inflation report'],
+  jobs:      ['nfp', 'jobs report', 'payrolls', 'unemployment rate', 'jobless claims', 'labor market'],
+  gdp:       ['gdp', 'gross domestic product'],
+  tariff:    ['tariff', 'trade war', 'export ban', 'import duty'],
+  legal:     ['lawsuit', 'sec charges', 'antitrust', 'fraud charges'],
+};
+
+// Common ALL-CAPS words in financial headlines that are not ticker symbols.
+// Intentionally broad to prevent false dedup keys from words like RALLY, CHINA, OPEC.
+const NON_TICKERS = new Set([
+  'CEO', 'CFO', 'COO', 'CTO', 'IPO', 'ETF', 'SEC', 'FDA', 'DOJ', 'FED',
+  'GDP', 'CPI', 'NFP', 'PCE', 'PPI', 'AI', 'US', 'UK', 'EU', 'NY', 'DC',
+  'AM', 'PM', 'ET', 'EST', 'PST',
+  // Common English words and abbreviations that appear ALL-CAPS in headlines
+  'FOR', 'THE', 'AND', 'NOT', 'BUT', 'NEW', 'TOP', 'BIG', 'ALL', 'OUT',
+  'UP', 'ON', 'IN', 'AT', 'BY', 'TO', 'AS', 'OR', 'AN',
+  // Countries / regions
+  'CHINA', 'JAPAN', 'INDIA', 'OPEC', 'NATO', 'BRICS', 'ECB', 'BOJ', 'BOE', 'IMF',
+  // News-ese
+  'BREAKING', 'UPDATE', 'WATCH', 'LIVE', 'NEWS', 'ALERT', 'REPORT', 'SAYS', 'SEES',
+  'RALLY', 'BEATS', 'JUMPS', 'FALLS', 'RISES', 'SLUMP', 'CRASH', 'STOCK', 'BONDS',
+  'CLOSE', 'OPENS', 'HIGHS', 'LOWER', 'MIXED', 'WORLD', 'FIRST', 'AFTER',
+  // Regulators / agencies not already listed
+  'FBI', 'CIA', 'IRS', 'EPA', 'FAA', 'TSA', 'WHO', 'CDC', 'GOP', 'DNC',
+  // Media outlets (appear in "via CNBC" style suffixes)
+  'WSJ', 'NYT', 'CNBC', 'BBC', 'WSJ', 'ESG', 'UAW',
+  // Finance jargon all-caps
+  'WTI', 'OIL', 'GAS', 'USD', 'EUR', 'YEN', 'GBP',
+]);
+
+function extractEntity(title) {
+  const lower = title.toLowerCase();
+  // Word-boundary regex per alias prevents "intel" → "intelligence" false matches
+  for (const [re, ticker] of TICKER_ALIASES) {
+    if (re.test(lower)) return ticker;
+  }
+  // Fall back to $AAPL cashtag or standalone 2-5 char ALL-CAPS words
+  const matches = title.match(/\$([A-Z]{1,5})\b|\b([A-Z]{2,5})\b/g) || [];
+  for (const m of matches) {
+    const clean = m.replace('$', '');
+    if (!NON_TICKERS.has(clean)) return clean;
+  }
+  return null;
+}
+
+function extractEvent(title) {
+  const lower = ` ${title.toLowerCase()} `;
+  for (const [event, keywords] of Object.entries(EVENT_KEYWORDS)) {
+    if (keywords.some(kw => lower.includes(kw))) return event;
+  }
+  return 'general';
+}
+
+function deduplicateArticles(articles) {
+  newsDedup.checkAndReset();
+  const kept = [];
+  for (const article of articles) {
+    const title = article.title || article.headline || article.summary || '';
+    if (!title) { kept.push(article); continue; }
+    const entity = extractEntity(title);
+    const event  = extractEvent(title);
+    // If we can't identify either a specific entity OR a specific event, the story is
+    // too ambiguous to bucket safely — keep it rather than risk collapsing unrelated articles
+    // into a single "macro:general" slot.
+    if (!entity && event === 'general') {
+      kept.push(article);
+      continue;
+    }
+    const key = entity ? `${entity}:${event}` : `macro:${event}`;
+    if (!newsDedup.seen.has(key)) {
+      newsDedup.seen.add(key);
+      kept.push(article);
+    }
+  }
+  return kept;
+}
+
+// Applies dedup to whichever array field a news response uses
+function applyNewsDedup(data) {
+  const fields = ['news', 'articles', 'bulletins', 'stories', 'items', 'results'];
+  if (Array.isArray(data)) {
+    const filtered = deduplicateArticles(data);
+    return filtered;
+  }
+  for (const field of fields) {
+    if (Array.isArray(data[field])) {
+      const before = data[field].length;
+      const filtered = deduplicateArticles(data[field]);
+      return { ...data, [field]: filtered, _dedup_dropped: before - filtered.length };
+    }
+  }
+  return data; // unknown shape — return as-is
+}
 
 // Helper to call trading bot API - resolves correct port per sandbox
 async function getTradingBotUrl() {
@@ -87,8 +233,7 @@ const server = new Server(
 
 // List available tools
 server.setRequestHandler(ListToolsRequestSchema, async () => {
-  return {
-    tools: [
+  const allTools = [
       {
         name: 'get_account',
         description: 'Get trading account information including cash, buying power, and portfolio value',
@@ -1095,13 +1240,13 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: 'read_latest_report',
-        description: "Read the most recently generated analysis report from data/reports/. Use after background screeners finish, or to load the daily briefing and weekly regime report at the start of each pre-market beat.",
+        description: "Read the most recently generated analysis report from data/reports/. Use after background screeners finish, or to load the daily briefing and weekly regime report at the start of each pre-market beat. Use type='market_alert' to read the latest intra-day breaking news alert written by the mid-session scanner.",
         inputSchema: {
           type: 'object',
           properties: {
             type: {
               type: 'string',
-              enum: ['vcp', 'pead', 'market_top', 'ftd', 'daily_brief', 'weekly_regime', 'uptrend', 'scenario', 'review'],
+              enum: ['vcp', 'pead', 'market_top', 'ftd', 'daily_brief', 'weekly_regime', 'uptrend', 'scenario', 'review', 'market_alert'],
               description: 'Report type to read',
             },
           },
@@ -1110,13 +1255,17 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: 'get_penny_candidates',
-        description: 'Get penny stock candidates scored above a threshold by the real-time signal pipeline. Returns composite score (0–100), dominant signal type (technical/regulatory/social), and context. Use min_score=60 for tradeable signals.',
+        description: 'Get penny stock candidates scored above a threshold by the real-time signal pipeline. Returns ticker, scores (composite, technical, regulatory, social), and dominant_signal type (technical/regulatory/social). Per-candidate context strings are omitted by default to keep the list compact — call get_penny_signal_detail for full context on the specific tickers you intend to trade. Use min_score=60 for tradeable signals.',
         inputSchema: {
           type: 'object',
           properties: {
             min_score: {
               type: 'number',
               description: 'Minimum composite score (0–100). Default: 60. Scores 60–79 → 2–3% position size; 80–100 → 5–7% position size.',
+            },
+            detail: {
+              type: 'boolean',
+              description: 'When true, includes full context strings (technical_context, regulatory_event, social_context) inline for every candidate. Default false — prefer fetching context per-ticker via get_penny_signal_detail to save tokens.',
             },
           },
         },
@@ -1151,8 +1300,12 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           properties: {},
         },
       },
-    ],
-  };
+    ];
+
+  const tools = TOOL_ALLOWLIST.size > 0
+    ? allTools.filter(t => TOOL_ALLOWLIST.has(t.name))
+    : allTools;
+  return { tools };
 });
 
 // ── Permission Enforcement ──────────────────────────────────────────
@@ -1445,7 +1598,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case 'get_news': {
         const limit = args.limit || 20;
-        const data = await callTradingBot(`/news?limit=${limit}`);
+        const data = applyNewsDedup(await callTradingBot(`/news?limit=${limit}`));
         return {
           content: [
             {
@@ -1458,7 +1611,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case 'get_news_by_topic': {
         // Use compact mode to reduce token usage
-        const data = await callTradingBot(`/news/topic/${args.topic}?compact=true`);
+        const data = applyNewsDedup(await callTradingBot(`/news/topic/${args.topic}?compact=true`));
         return {
           content: [
             {
@@ -1471,6 +1624,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case 'search_news': {
         const limit = args.limit || 20;
+        // No dedup applied — this is a targeted query; the agent expects specific results.
         const data = await callTradingBot(`/news/search?q=${encodeURIComponent(args.query)}&limit=${limit}`);
         return {
           content: [
@@ -1486,7 +1640,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const endpoint = args.symbols
           ? `/news/market?symbols=${encodeURIComponent(args.symbols)}`
           : '/news/market';
-        const data = await callTradingBot(endpoint);
+        const data = applyNewsDedup(await callTradingBot(endpoint));
         return {
           content: [
             {
@@ -1625,7 +1779,7 @@ ${allNews.map((article, i) =>
       }
 
       case 'get_marketwatch_topstories': {
-        const data = await callTradingBot('/news/marketwatch/topstories');
+        const data = applyNewsDedup(await callTradingBot('/news/marketwatch/topstories'));
         return {
           content: [
             {
@@ -1637,7 +1791,7 @@ ${allNews.map((article, i) =>
       }
 
       case 'get_marketwatch_realtime': {
-        const data = await callTradingBot('/news/marketwatch/realtime');
+        const data = applyNewsDedup(await callTradingBot('/news/marketwatch/realtime'));
         return {
           content: [
             {
@@ -1649,7 +1803,7 @@ ${allNews.map((article, i) =>
       }
 
       case 'get_marketwatch_bulletins': {
-        const data = await callTradingBot('/news/marketwatch/bulletins');
+        const data = applyNewsDedup(await callTradingBot('/news/marketwatch/bulletins'));
         return {
           content: [
             {
@@ -1661,7 +1815,7 @@ ${allNews.map((article, i) =>
       }
 
       case 'get_marketwatch_marketpulse': {
-        const data = await callTradingBot('/news/marketwatch/marketpulse');
+        const data = applyNewsDedup(await callTradingBot('/news/marketwatch/marketpulse'));
         return {
           content: [
             {
@@ -1673,7 +1827,7 @@ ${allNews.map((article, i) =>
       }
 
       case 'get_marketwatch_all': {
-        const data = await callTradingBot('/news/marketwatch/all');
+        const data = applyNewsDedup(await callTradingBot('/news/marketwatch/all'));
         return {
           content: [
             {
@@ -1744,7 +1898,7 @@ ${allNews.map((article, i) =>
           symbols: args.symbols || [],
           max_articles_per_source: args.max_articles_per_source || 10,
         };
-        const data = await callTradingBot('/intelligence/cleaned-news', 'POST', requestBody);
+        const data = applyNewsDedup(await callTradingBot('/intelligence/cleaned-news', 'POST', requestBody));
         return {
           content: [
             {
@@ -2479,6 +2633,7 @@ Worst Trade: ${stats.worst_result_pct.toFixed(1)}% ($${stats.worst_result_dollar
           uptrend: 'uptrend_analysis_',
           scenario: 'scenario_',
           review: 'review_',
+          market_alert: 'market_alert_',
         };
         const prefix = prefixMap[reportType];
         if (!prefix) return { content: [{ type: 'text', text: `Unknown report type: ${reportType}. Valid: ${Object.keys(prefixMap).join(', ')}` }], isError: true };
@@ -2491,7 +2646,14 @@ Worst Trade: ${stats.worst_result_pct.toFixed(1)}% ($${stats.worst_result_dollar
           return { content: [{ type: 'text', text: 'data/reports/ not found. No reports generated yet.' }] };
         }
 
-        if (files.length === 0) return { content: [{ type: 'text', text: `No ${reportType} reports found in data/reports/. Run the corresponding screener first.` }] };
+        if (files.length === 0) {
+          // Check if the report is currently being generated (lock file present)
+          const lockFiles = (await fs.readdir(REPORTS_DIR).catch(() => [])).filter(f => f.startsWith(prefix) && f.endsWith('.running'));
+          if (lockFiles.length > 0) {
+            return { content: [{ type: 'text', text: `BRIEFING_IN_PROGRESS: The ${reportType} report is currently being generated by another agent. Call wait(60) then retry read_latest_report("${reportType}").` }] };
+          }
+          return { content: [{ type: 'text', text: `No ${reportType} reports found in data/reports/. Run the corresponding screener first.` }] };
+        }
 
         const content = await fs.readFile(path.join(REPORTS_DIR, files[0]), 'utf-8');
         const truncated = content.length > 8000 ? content.slice(0, 8000) + '\n... [truncated]' : content;
@@ -2500,7 +2662,8 @@ Worst Trade: ${stats.worst_result_pct.toFixed(1)}% ($${stats.worst_result_dollar
 
       case 'get_penny_candidates': {
         const min_score = args?.min_score ?? 60;
-        const data = await callTradingBot(`/penny/candidates?min_score=${min_score}`);
+        const detail = args?.detail === true ? '&detail=true' : '';
+        const data = await callTradingBot(`/penny/candidates?min_score=${min_score}${detail}`);
         return {
           content: [{ type: 'text', text: JSON.stringify(data, null, 2) }],
         };

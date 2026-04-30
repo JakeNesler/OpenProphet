@@ -83,6 +83,43 @@ func TestAggregator_MinScoreFilter(t *testing.T) {
 	}
 }
 
+func TestAggregator_GetCandidateSummaries_StripsContext(t *testing.T) {
+	agg := aggregatorForTest(0, 0, 0, []string{"ABC"})
+	agg.candidates["ABC"] = CandidateScore{
+		Ticker:           "ABC",
+		CompositeScore:   75,
+		TechnicalScore:   30,
+		RegulatoryScore:  25,
+		SocialScore:      20,
+		DominantSignal:   "technical",
+		TechnicalContext: "RSI 72, volume 4.2x",
+		RegulatoryEvent:  "8-K filed 09:32 ET",
+		SocialContext:    "3.2x mention velocity, 71% bullish",
+	}
+
+	summaries := agg.GetCandidateSummaries(60)
+	if len(summaries) != 1 {
+		t.Fatalf("expected 1 candidate, got %d", len(summaries))
+	}
+	c := summaries[0]
+	if c.Ticker != "ABC" || c.CompositeScore != 75 {
+		t.Errorf("scalar fields should be preserved, got ticker=%s score=%v", c.Ticker, c.CompositeScore)
+	}
+	if c.DominantSignal != "technical" {
+		t.Errorf("dominant_signal should be preserved (load-bearing for routing), got %q", c.DominantSignal)
+	}
+	if c.TechnicalContext != "" || c.RegulatoryEvent != "" || c.SocialContext != "" {
+		t.Errorf("context strings should be cleared, got tech=%q reg=%q soc=%q",
+			c.TechnicalContext, c.RegulatoryEvent, c.SocialContext)
+	}
+
+	// Confirm the internal cache was NOT mutated — the full-detail call must still return context.
+	full := agg.GetCandidates(60)
+	if len(full) != 1 || full[0].TechnicalContext != "RSI 72, volume 4.2x" {
+		t.Errorf("GetCandidateSummaries must not mutate the underlying cache; full[0]=%+v", full[0])
+	}
+}
+
 func TestAggregator_GetSignalDetail(t *testing.T) {
 	agg := aggregatorForTest(30.0, 20.0, 10.0, []string{"TICK"})
 	agg.aggregate()

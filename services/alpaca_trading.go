@@ -178,6 +178,7 @@ func (s *AlpacaTradingService) GetAccount(ctx context.Context) (*interfaces.Acco
 		BuyingPower:      alpacaAccount.BuyingPower.InexactFloat64(),
 		DayTradeCount:    int(alpacaAccount.DaytradeCount),
 		PatternDayTrader: alpacaAccount.PatternDayTrader,
+		LastEquity:       alpacaAccount.LastEquity.InexactFloat64(),
 	}, nil
 }
 

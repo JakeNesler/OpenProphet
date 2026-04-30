@@ -2,6 +2,7 @@ package services
 
 import (
 	"context"
+	"errors"
 	"prophet-trader/interfaces"
 	"testing"
 	"time"
@@ -18,11 +19,18 @@ func (s *stubLister) ListManagedPositions(_ string) []*ManagedPosition {
 }
 
 type stubTrading struct {
-	portfolio float64
+	portfolio    float64
+	lastEquity   float64
+	getAcctCalls int
+	getAcctErr   error
 }
 
 func (s *stubTrading) GetAccount(_ context.Context) (*interfaces.Account, error) {
-	return &interfaces.Account{PortfolioValue: s.portfolio}, nil
+	s.getAcctCalls++
+	if s.getAcctErr != nil {
+		return nil, s.getAcctErr
+	}
+	return &interfaces.Account{PortfolioValue: s.portfolio, LastEquity: s.lastEquity}, nil
 }
 func (s *stubTrading) PlaceOrder(_ context.Context, _ *interfaces.Order) (*interfaces.OrderResult, error) {
 	return nil, nil
@@ -202,5 +210,112 @@ func TestGuard_EmptyAgentSourceDefaultsToMain(t *testing.T) {
 	err := g.CheckBuy(context.Background(), "", "GOOG", 500)
 	if err == nil {
 		t.Fatal("expected error: empty agent treated as main, cannot buy penny symbol")
+	}
+}
+
+func TestGuard_DailyLossCircuitBreakerTriggers(t *testing.T) {
+	cfg := defaultConfig()
+	cfg.MaxDailyLossPct = 5.0
+	// Down 6% from previous close: 100000 → 94000
+	g := NewTradeGuard(&stubLister{}, &stubTrading{portfolio: 94000, lastEquity: 100000}, cfg)
+	if err := g.CheckBuy(context.Background(), AgentMain, "AAPL", 500); err == nil {
+		t.Fatal("expected error: daily loss circuit breaker should block at -6% with 5% limit")
+	}
+	if err := g.CheckBuy(context.Background(), AgentPenny, "ABCD", 100); err == nil {
+		t.Fatal("expected error: circuit breaker also applies to penny agent")
+	}
+}
+
+func TestGuard_DailyLossWithinLimitAllowed(t *testing.T) {
+	cfg := defaultConfig()
+	cfg.MaxDailyLossPct = 5.0
+	// Down 3% — within limit
+	g := NewTradeGuard(&stubLister{}, &stubTrading{portfolio: 97000, lastEquity: 100000}, cfg)
+	if err := g.CheckBuy(context.Background(), AgentMain, "AAPL", 500); err != nil {
+		t.Fatalf("unexpected error within daily-loss limit: %v", err)
+	}
+}
+
+func TestGuard_DailyLossDisabledWhenZero(t *testing.T) {
+	cfg := defaultConfig() // MaxDailyLossPct defaults to 0
+	g := NewTradeGuard(&stubLister{}, &stubTrading{portfolio: 50000, lastEquity: 100000}, cfg)
+	// Down 50%, but check is disabled — should pass
+	if err := g.CheckBuy(context.Background(), AgentMain, "AAPL", 500); err != nil {
+		t.Fatalf("daily loss check should be disabled when MaxDailyLossPct is 0: %v", err)
+	}
+}
+
+func TestGuard_DailyLossSkippedWhenLastEquityMissing(t *testing.T) {
+	cfg := defaultConfig()
+	cfg.MaxDailyLossPct = 5.0
+	// LastEquity = 0 (e.g. brand-new account); fail-open
+	g := NewTradeGuard(&stubLister{}, &stubTrading{portfolio: 50000, lastEquity: 0}, cfg)
+	if err := g.CheckBuy(context.Background(), AgentMain, "AAPL", 500); err != nil {
+		t.Fatalf("daily loss check should fail-open when LastEquity is unknown: %v", err)
+	}
+}
+
+func TestGuard_DailyLossSkippedWhenTradingServiceNil(t *testing.T) {
+	cfg := defaultConfig()
+	cfg.MaxDailyLossPct = 5.0
+	// No trading service available — must not block trades
+	g := NewTradeGuard(&stubLister{}, nil, cfg)
+	if err := g.CheckBuy(context.Background(), AgentMain, "AAPL", 0); err != nil {
+		t.Fatalf("daily loss check should be skipped when tradingService is nil: %v", err)
+	}
+}
+
+func TestGuard_PennyCheckBuyFetchesAccountAtMostOnce(t *testing.T) {
+	cfg := defaultConfig()
+	cfg.MaxDailyLossPct = 5.0
+	stub := &stubTrading{portfolio: 100000, lastEquity: 100000}
+	g := NewTradeGuard(&stubLister{}, stub, cfg)
+	// Penny buy goes through both checkDailyLoss AND checkPennyCapCap — without
+	// the single-fetch refactor, this would call GetAccount twice.
+	if err := g.CheckBuy(context.Background(), AgentPenny, "ABCD", 100); err != nil {
+		t.Fatalf("unexpected error on healthy penny buy: %v", err)
+	}
+	if stub.getAcctCalls != 1 {
+		t.Errorf("expected exactly 1 GetAccount call per CheckBuy, got %d", stub.getAcctCalls)
+	}
+}
+
+func TestGuard_MainCheckBuyFetchesAccountAtMostOnce(t *testing.T) {
+	cfg := defaultConfig()
+	cfg.MaxDailyLossPct = 5.0
+	stub := &stubTrading{portfolio: 100000, lastEquity: 100000}
+	g := NewTradeGuard(&stubLister{}, stub, cfg)
+	// Main buy only triggers checkDailyLoss — no penny-cap check, so 1 fetch.
+	if err := g.CheckBuy(context.Background(), AgentMain, "AAPL", 1000); err != nil {
+		t.Fatalf("unexpected error on healthy main buy: %v", err)
+	}
+	if stub.getAcctCalls != 1 {
+		t.Errorf("expected exactly 1 GetAccount call per main CheckBuy, got %d", stub.getAcctCalls)
+	}
+}
+
+func TestGuard_PennyCapCapFailsClosedOnFetchError(t *testing.T) {
+	// Preserve the pre-refactor semantics: when the trading service errors during
+	// the capital-cap check, the buy must be BLOCKED. Allowing it through would
+	// silently let a penny position bypass the cap on a flaky network.
+	cfg := defaultConfig()
+	cfg.MaxDailyLossPct = 0 // disable daily-loss check so we exercise capital-cap path alone
+	stub := &stubTrading{getAcctErr: errors.New("alpaca timeout")}
+	g := NewTradeGuard(&stubLister{}, stub, cfg)
+	err := g.CheckBuy(context.Background(), AgentPenny, "ABCD", 100)
+	if err == nil {
+		t.Fatal("expected error: penny capital-cap check must fail-closed on fetch error")
+	}
+}
+
+func TestGuard_DailyLossFailsOpenOnFetchError(t *testing.T) {
+	// Daily-loss check is fail-open on fetch errors (transient API hiccup
+	// shouldn't block all trading). Verify a fetch error doesn't block a main buy.
+	cfg := defaultConfig()
+	cfg.MaxDailyLossPct = 5.0
+	stub := &stubTrading{getAcctErr: errors.New("alpaca timeout")}
+	g := NewTradeGuard(&stubLister{}, stub, cfg)
+	if err := g.CheckBuy(context.Background(), AgentMain, "AAPL", 0); err != nil {
+		t.Fatalf("daily-loss check should fail-open on fetch error, got: %v", err)
 	}
 }

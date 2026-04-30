@@ -20,7 +20,12 @@ func NewPennyController(aggregator *services.PennySignalAggregator) *PennyContro
 }
 
 // HandleGetCandidates returns scored penny stock candidates above a minimum score.
-// GET /api/v1/penny/candidates?min_score=60
+// GET /api/v1/penny/candidates?min_score=60[&detail=true]
+//
+// By default the response omits per-candidate context strings (technical_context,
+// regulatory_event, social_context) to keep the list payload small — call
+// GET /api/v1/penny/signal/:ticker to retrieve full context for a single ticker.
+// Pass detail=true to include all context strings inline (legacy/debug behavior).
 func (pc *PennyController) HandleGetCandidates(c *gin.Context) {
 	minScoreStr := c.DefaultQuery("min_score", "60")
 	minScore, err := strconv.ParseFloat(minScoreStr, 64)
@@ -28,7 +33,13 @@ func (pc *PennyController) HandleGetCandidates(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid min_score"})
 		return
 	}
-	candidates := pc.aggregator.GetCandidates(minScore)
+	detail := c.Query("detail") == "true"
+	var candidates []services.CandidateScore
+	if detail {
+		candidates = pc.aggregator.GetCandidates(minScore)
+	} else {
+		candidates = pc.aggregator.GetCandidateSummaries(minScore)
+	}
 	c.JSON(http.StatusOK, gin.H{
 		"count":      len(candidates),
 		"min_score":  minScore,

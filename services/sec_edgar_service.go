@@ -4,13 +4,13 @@ import (
 	"context"
 	"encoding/xml"
 	"fmt"
-	"io"
 	"net/http"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/sirupsen/logrus"
+	"golang.org/x/net/html/charset"
 )
 
 const regulatoryRefreshInterval = 30 * time.Second
@@ -34,7 +34,7 @@ type SECEdgarService struct {
 // NewSECEdgarService creates the service.
 func NewSECEdgarService(universe *PennyUniverseService, httpClient *http.Client) *SECEdgarService {
 	if httpClient == nil {
-		httpClient = &http.Client{Timeout: 15 * time.Second}
+		httpClient = &http.Client{Timeout: 30 * time.Second}
 	}
 	logger := logrus.New()
 	logger.SetFormatter(&logrus.TextFormatter{FullTimestamp: true})
@@ -119,12 +119,10 @@ func (s *SECEdgarService) fetchAtom(url string) ([]atomEntry, error) {
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("HTTP %d from %s", resp.StatusCode, url)
 	}
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, err
-	}
 	var feed atomFeed
-	if err := xml.Unmarshal(body, &feed); err != nil {
+	dec := xml.NewDecoder(resp.Body)
+	dec.CharsetReader = charset.NewReaderLabel
+	if err := dec.Decode(&feed); err != nil {
 		return nil, fmt.Errorf("atom parse: %w", err)
 	}
 	return feed.Entries, nil
@@ -144,12 +142,10 @@ func (s *SECEdgarService) fetchRSS(url string) ([]rssItem, error) {
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("HTTP %d from %s", resp.StatusCode, url)
 	}
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, err
-	}
 	var feed rssFeed
-	if err := xml.Unmarshal(body, &feed); err != nil {
+	dec := xml.NewDecoder(resp.Body)
+	dec.CharsetReader = charset.NewReaderLabel
+	if err := dec.Decode(&feed); err != nil {
 		return nil, fmt.Errorf("rss parse: %w", err)
 	}
 	return feed.Channel.Items, nil

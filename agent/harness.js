@@ -17,7 +17,7 @@ export const PHASE_DEFAULTS = {
   midday:       { seconds: 600,  label: 'Midday',        range: [630, 900]  },
   market_close: { seconds: 120,  label: 'Market Close',  range: [900, 960]  },
   after_hours:  { seconds: 1800, label: 'After Hours',   range: [960, 1200] },
-  closed:       { seconds: 3600, label: 'Markets Closed', range: null },
+  closed:       { seconds: 14400, label: 'Markets Closed', range: null },
 };
 
 export function getCurrentPhase() {
@@ -69,15 +69,7 @@ export async function buildSystemPrompt(agentConfig, options = {}) {
   // Layer 3: System Instructions (tools, heartbeat, operational)
   const systemInstructions = `## Available Tools
 
-**Trading**: get_account, get_positions, get_orders, place_buy_order, place_sell_order, place_managed_position, get_managed_positions, close_managed_position, cancel_order
-**Options**: place_options_order, get_options_positions, get_options_position, get_options_chain
-**Market Data**: get_quote, get_latest_bar, get_historical_bars, analyze_stocks
-**News**: get_news, search_news, get_market_news, get_quick_market_intelligence, get_cleaned_news, get_marketwatch_topstories
-**Agent Config**: update_agent_prompt, update_strategy_rules, get_agent_config, set_heartbeat, update_permissions, set_session_mode, create_agent, create_strategy, assign_agent_to_sandbox
-**Heartbeat**: get_heartbeat_profiles, apply_heartbeat_profile, get_heartbeat_phases, update_heartbeat_phase
-**Logging**: log_decision, log_activity, get_activity_log
-**Trade History**: find_similar_setups, store_trade_setup, get_trade_stats
-**Utility**: get_datetime, wait
+Use your registered MCP tools — your tool list is already loaded. Do NOT call get_agent_config to discover them. \`read_latest_report\` accepts type = "daily_brief" | "weekly_regime" | "vcp" | "pead" | "scenario" | "review" | "market_alert".
 
 ## Heartbeat Behavior
 
@@ -85,11 +77,11 @@ Each heartbeat you should:
 1. Check time and market status
 2. Review account and positions
 3. Decide and act based on phase:
-   - Pre-market: Gather intelligence, plan
+   - Pre-market: ALWAYS (a) read_latest_report("daily_brief") for macro context and market posture, then (b) call get_marketwatch_bulletins AND get_quick_market_intelligence to scan for breaking news — sector contagion, earnings surprises, executive commentary, macro shocks, or any news about companies you hold or plan to trade. Only proceed to trade planning after news is reviewed.
    - Market open: Execute, monitor
-   - Midday: Monitor positions, check stops
+   - Midday: Monitor positions, check stops; if any major news broke since open, reassess immediately
    - Market close: Review, decide holds
-   - After hours: Review, log activity
+   - After hours: Call get_marketwatch_bulletins for any after-hours earnings or macro releases; review, log activity
 4. Follow your strategy rules
 5. Summarize what you did
 
@@ -218,6 +210,8 @@ export class AgentHarness {
     this._interrupted = false;
     this._beatTimeout = null;
     this._sessionEpoch = 0;
+    this._emergencyQueued = null;
+    this._emergencyReason = null;
   }
 
   _resolveSandbox() {
@@ -363,6 +357,14 @@ export class AgentHarness {
     this.state.emit('agent_log', { message: 'Agent resumed.', level: 'success' });
   }
 
+  emergencyWake(reason) {
+    if (!this.state.running || this.state.paused) return;
+    this._emergencyQueued = reason;
+    if (this._beating) return;
+    if (this._timer) { clearTimeout(this._timer); this._timer = null; }
+    setImmediate(() => this._runBeatCycle());
+  }
+
   /**
    * Send a user message to the agent.
    * - If idle: triggers an immediate ad-hoc beat with the message.
@@ -487,18 +489,9 @@ export class AgentHarness {
 
 The user/operator is sending you a direct message. Read it carefully and respond with a complete answer. You MUST respond with useful output - never just ask questions back without providing value first.
 
-## Your Available Tools (DO NOT call get_agent_config to discover these)
+## Available Tools
 
-**Trading**: get_account, get_positions, get_orders, place_buy_order, place_sell_order, place_managed_position, get_managed_positions, close_managed_position, cancel_order
-**Options**: place_options_order, get_options_positions, get_options_position, get_options_chain
-**Market Data**: get_quote, get_latest_bar, get_historical_bars, analyze_stocks
-**News**: get_news, search_news, get_market_news, get_quick_market_intelligence, get_cleaned_news, get_marketwatch_topstories, get_marketwatch_realtime
-**Intelligence**: aggregate_and_summarize_news, list_news_summaries, get_news_summary
-**Agent Config**: update_agent_prompt, update_strategy_rules, get_agent_config, set_heartbeat, update_permissions, set_session_mode, create_agent, create_strategy, assign_agent_to_sandbox
-**Heartbeat**: get_heartbeat_profiles, apply_heartbeat_profile, get_heartbeat_phases, update_heartbeat_phase
-**Logging**: log_decision, log_activity, get_activity_log
-**Trade History**: find_similar_setups, store_trade_setup, get_trade_stats
-**Utility**: get_datetime, wait
+Use your registered MCP tools — your tool list is already loaded. Do NOT call get_agent_config to discover them.
 
 ## Instructions
 - If the user asks to create a new agent: use create_agent to create it, then optionally create_strategy for its rules, then assign_agent_to_sandbox to activate it.
@@ -553,17 +546,30 @@ ${userBlock}`;
     this.state.heartbeatSeconds = seconds;
     this.state.nextBeatTime = new Date(Date.now() + seconds * 1000).toISOString();
     this.state.emit('schedule', { seconds, nextBeat: this.state.nextBeatTime, phase: this.state.phase });
+    this._timer = setTimeout(() => this._runBeatCycle(), seconds * 1000);
+  }
 
-    this._timer = setTimeout(async () => {
-      if (!this.state.running) return;
-      if (this.state.paused) {
-        this.state.emit('agent_log', { message: 'Beat skipped (paused)', level: 'info' });
-        this._scheduleNext();
-        return;
-      }
-      await this._beat();
+  async _runBeatCycle() {
+    if (!this.state.running) return;
+    if (this.state.paused) {
+      this.state.emit('agent_log', { message: 'Beat skipped (paused)', level: 'info' });
       this._scheduleNext();
-    }, seconds * 1000);
+      return;
+    }
+    const reason = this._emergencyQueued;
+    this._emergencyQueued = null;
+    this._emergencyReason = reason;
+    try {
+      await this._beat();
+    } finally {
+      this._emergencyReason = null;
+    }
+    if (this._emergencyQueued) {
+      if (this._timer) { clearTimeout(this._timer); this._timer = null; }
+      setImmediate(() => this._runBeatCycle());
+    } else {
+      this._scheduleNext();
+    }
   }
 
   async _beat() {
@@ -598,7 +604,10 @@ ${userBlock}`;
     if (perms.blockedTools?.length) permLines.push(`Blocked tools (do NOT call): ${perms.blockedTools.join(', ')}.`);
     const permStr = permLines.length ? '\n\nGUARDRAILS:\n' + permLines.join('\n') : '';
 
-    const prompt = `[HEARTBEAT #${beatNum}] Phase: ${PHASE_DEFAULTS[phase].label}. Time: ${new Date().toLocaleString('en-US', { timeZone: 'America/New_York' })} ET. Current heartbeat interval: ${this.state.heartbeatSeconds}s.${permStr}\n\nPerform your duties for this phase.`;
+    const emergencyPrefix = this._emergencyReason
+      ? `\n\n[EMERGENCY ALERT] The mid-session market scanner detected a breaking development that requires your immediate attention:\n${this._emergencyReason}\n\nReview this alert and assess whether it requires immediate position action before your routine duties.`
+      : '';
+    const prompt = `[HEARTBEAT #${beatNum}] Phase: ${PHASE_DEFAULTS[phase].label}. Time: ${new Date().toLocaleString('en-US', { timeZone: 'America/New_York' })} ET. Current heartbeat interval: ${this.state.heartbeatSeconds}s.${permStr}${emergencyPrefix}\n\nPerform your duties for this phase.`;
 
     try {
       const result = await this._runClaude(prompt, model);
@@ -685,6 +694,9 @@ ${userBlock}`;
         });
       }
 
+      // Per-agent MCP tool allowlist. Empty array = no filtering (backwards compatible).
+      const allowedTools = Array.isArray(perms.allowedTools) ? perms.allowedTools.filter(Boolean) : [];
+
       const proc = spawn(OPENCODE_BIN, [...OPENCODE_WIN_PREFIX, ...args], {
         cwd: process.cwd(),
         env: {
@@ -695,6 +707,7 @@ ${userBlock}`;
           ...this.opencodeEnv,
           OPENPROPHET_SANDBOX_ID: this.sandboxId || '',
           OPENPROPHET_ACCOUNT_ID: this.state.activeAccountId || this.accountId || '',
+          ...(allowedTools.length > 0 ? { OPENPROPHET_TOOL_ALLOWLIST: allowedTools.join(',') } : {}),
         },
         stdio: ['pipe', 'pipe', 'pipe'],
       });

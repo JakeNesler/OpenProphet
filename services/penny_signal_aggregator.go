@@ -74,6 +74,36 @@ func (a *PennySignalAggregator) GetCandidates(minScore float64) []CandidateScore
 	return out
 }
 
+// GetCandidateSummaries returns the same data as GetCandidates but with the
+// human-readable context strings (technical_context, regulatory_event,
+// social_context) cleared. Scores and dominant_signal are preserved so callers
+// can still rank, filter, and route by signal type. Use GetSignalDetail to
+// fetch the context strings for a specific ticker.
+//
+// Empty context strings are omitted from JSON output via the `omitempty` tags,
+// so this version of the payload is significantly smaller than GetCandidates.
+func (a *PennySignalAggregator) GetCandidateSummaries(minScore float64) []CandidateScore {
+	full := a.GetCandidates(minScore)
+	for i := range full {
+		full[i].TechnicalContext = ""
+		full[i].RegulatoryEvent = ""
+		full[i].SocialContext = ""
+	}
+	return full
+}
+
+// SeedCandidateForTest inserts a candidate directly into the aggregator's cache.
+// Intended for tests in other packages (e.g. controllers) that need to populate
+// the aggregator without running the full aggregate() pipeline.
+func SeedCandidateForTest(a *PennySignalAggregator, c CandidateScore) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.candidates == nil {
+		a.candidates = make(map[string]CandidateScore)
+	}
+	a.candidates[c.Ticker] = c
+}
+
 // GetSignalDetail returns the full CandidateScore for one ticker, or nil if not tracked.
 func (a *PennySignalAggregator) GetSignalDetail(ticker string) *CandidateScore {
 	a.mu.RLock()

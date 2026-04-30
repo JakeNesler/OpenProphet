@@ -158,6 +158,11 @@ export class AgentOrchestrator extends EventEmitter {
     await this._ensureBinary();
     await fs.mkdir(path.dirname(this.getSandboxDbPath(sandboxId)), { recursive: true });
 
+    // Pass per-sandbox guardrail values to the Go bot so its TradeGuard honors them.
+    // permissions.maxDailyLoss is a positive percent (e.g. 5 = -5% circuit breaker).
+    const sandboxPerms = getPermissionsForSandbox(sandboxId) || {};
+    const maxDailyLossPct = Number(sandboxPerms.maxDailyLoss);
+
     const env = {
       ...process.env,
       ALPACA_API_KEY: account.publicKey,
@@ -169,6 +174,7 @@ export class AgentOrchestrator extends EventEmitter {
       ACTIVITY_LOG_DIR: path.join(this.projectRoot, 'data', 'sandboxes', account.id, 'activity_logs'),
       OPENPROPHET_SANDBOX_ID: sandboxId,
       OPENPROPHET_ACCOUNT_ID: account.id,
+      ...(Number.isFinite(maxDailyLossPct) && maxDailyLossPct > 0 ? { MAX_DAILY_LOSS_PCT: String(maxDailyLossPct) } : {}),
     };
 
     const binaryName = process.platform === 'win32' ? 'prophet_bot.exe' : 'prophet_bot';
@@ -181,9 +187,12 @@ export class AgentOrchestrator extends EventEmitter {
 
     runtime.goReady = false;
 
+    // Filter GIN's access logs and debug/startup messages — visible in CMD only
+    const isGinAccessLog = (line) => /^\[GIN(?:-debug)?\]/.test(line);
+
     runtime.goProc.stdout.on('data', chunk => {
       const message = chunk.toString().trim();
-      if (message) {
+      if (message && !isGinAccessLog(message)) {
         this.emit('agent_log', {
           sandboxId,
           level: 'info',
@@ -194,7 +203,7 @@ export class AgentOrchestrator extends EventEmitter {
 
     runtime.goProc.stderr.on('data', chunk => {
       const message = chunk.toString().trim();
-      if (message) {
+      if (message && !isGinAccessLog(message)) {
         this.emit('agent_log', {
           sandboxId,
           level: 'warning',
@@ -283,6 +292,13 @@ export class AgentOrchestrator extends EventEmitter {
   getState(sandboxId) {
     const runtime = this.ensureRuntime(sandboxId);
     return runtime.harness.state.toJSON();
+  }
+
+  triggerEmergencyHeartbeat(reason) {
+    for (const [, runtime] of this.runtimes) {
+      if (!runtime.harness.state.running || runtime.harness.state.paused) continue;
+      runtime.harness.emergencyWake(reason);
+    }
   }
 
   async shutdown() {

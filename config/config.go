@@ -23,6 +23,7 @@ type Config struct {
 	// Trade guard limits
 	PennyMaxCapitalPct      float64 // fraction of portfolio, e.g. 0.20
 	PennyMaxPositionDollars float64 // max dollars per single penny trade, e.g. 500
+	MaxDailyLossPct         float64 // daily loss circuit breaker as positive percent, e.g. 5.0; 0 disables
 }
 
 var AppConfig *Config
@@ -46,6 +47,7 @@ func Load() error {
 
 		PennyMaxCapitalPct:      parseFloat(getEnvOrDefault("PENNY_MAX_CAPITAL_PCT", "0.20")),
 		PennyMaxPositionDollars: parseFloat(getEnvOrDefault("PENNY_MAX_POSITION_DOLLARS", "500")),
+		MaxDailyLossPct:         parseFloat(getEnvOrDefault("MAX_DAILY_LOSS_PCT", "5")),
 	}
 
 	return nil

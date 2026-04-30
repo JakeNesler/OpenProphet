@@ -19,7 +19,7 @@ import AgentOrchestrator from './orchestrator.js';
 import { migrateLegacyDataForAccount } from './data-migration.js';
 import {
   loadConfig, getConfig, saveConfig,
-  addAccount, removeAccount, setActiveAccount, setActiveSandbox, getActiveAccount, getAccountById,
+  addAccount, updateAccount, removeAccount, setActiveAccount, setActiveSandbox, getActiveAccount, getAccountById,
   addAgent, updateAgent, removeAgent, setActiveAgent, getActiveAgent, getAgentById, getResolvedAgentForSandbox,
   addStrategy, updateStrategy, removeStrategy,
   setActiveModel, getStrategyById,
@@ -342,7 +342,13 @@ for (const evt of EVENTS) {
 }
 
 // ── Analysis Scheduler ─────────────────────────────────────────────
-const scheduler = new AnalysisScheduler({ model: getConfig().activeModel || 'anthropic/claude-sonnet-4-6' });
+const scheduler = new AnalysisScheduler({
+  model: getConfig().activeModel || 'anthropic/claude-sonnet-4-6',
+  onEmergencyWake: (reason) => {
+    if (harness?.state?.running && !harness?.state?.paused) harness.emergencyWake(reason);
+    orchestrator.triggerEmergencyHeartbeat(reason);
+  },
+});
 scheduler.on('agent_log', (data) => broadcast('agent_log', data));
 scheduler.on('scheduler_job_start', ({ job, date }) => broadcast('agent_log', {
   message: `[Scheduler] Job started: ${job} for ${date}`, level: 'info', timestamp: new Date().toISOString(),
@@ -1041,6 +1047,15 @@ app.put('/api/sandboxes/:id/agent', async (req, res) => {
     if (model !== undefined) updates.model = model;
     if (Object.keys(overrides).length) updates.overrides = overrides;
     const sandbox = await updateSandboxAgentSelection(req.params.id, updates);
+    // Apply the agent's default heartbeat profile when the agent changes
+    if (activeAgentId !== undefined) {
+      const agent = getAgentById(activeAgentId);
+      if (agent?.defaultHeartbeatProfile) {
+        await applyHeartbeatProfile(req.params.id, agent.defaultHeartbeatProfile).catch(() => {});
+        const targetHarness = getHarnessForSandbox(req.params.id);
+        if (targetHarness?.state.running) targetHarness._scheduleNext();
+      }
+    }
     await refreshHarnessConfigForSandbox(req.params.id, { resetSession: true });
     broadcast('config', safeConfig());
     res.json({ ok: true, sandbox, agent: getResolvedAgentForSandbox(req.params.id) });
@@ -1163,6 +1178,14 @@ app.post('/api/accounts', async (req, res) => {
     const account = await addAccount(req.body);
     broadcast('config', safeConfig());
     res.json({ ok: true, account: { ...account, secretKey: '****' } });
+  } catch (err) { res.status(400).json({ error: err.message }); }
+});
+
+app.put('/api/accounts/:id', async (req, res) => {
+  try {
+    const account = await updateAccount(req.params.id, req.body);
+    broadcast('config', safeConfig());
+    res.json({ ok: true, account: { ...account, secretKey: '****' + account.secretKey.slice(-4) } });
   } catch (err) { res.status(400).json({ error: err.message }); }
 });
 
@@ -1400,6 +1423,10 @@ app.post('/api/heartbeat/apply-profile', async (req, res) => {
     const targetSandbox = sandboxId || getActiveSandbox()?.id;
     if (!targetSandbox) throw new Error('No active sandbox');
     await applyHeartbeatProfile(targetSandbox, profile);
+    // Reschedule the live harness immediately so the new interval takes effect now
+    // rather than waiting for the current timer to expire naturally.
+    const targetHarness = getHarnessForSandbox(targetSandbox);
+    if (targetHarness?.state.running) targetHarness._scheduleNext();
     broadcast('config', safeConfig());
     res.json({ ok: true, profile, sandboxId: targetSandbox });
   } catch (err) { res.status(400).json({ error: err.message }); }
