@@ -68,6 +68,9 @@ GME, January 27–28, 2021 (case date: Jan 27–28, 2021). CNBC ran live coverag
 **Positive example 2:**
 MSTR, November 2024 (case date: Nov 10–22, 2024). During Bitcoin's ATH run, MSTR's BTC accumulation strategy saturated financial media. Michael Saylor appearing on CNBC repeatedly. Reddit crypto-adjacent subreddits, X/Twitter crypto accounts, and StockTwits all at Full breadth. Mainstream Bloomberg and Reuters coverage. Long premium holders who bought during Early (October–early November) were sitting on large gains; new entrants at Peak faced unfavorable risk/reward. IV was elevated. Correct classification: Peak/Saturating.
 
+**Negative example — looked like Peak, was actually still Early:**
+SMCI (Super Micro Computer), late January 2024 (case date: Jan 22–30, 2024). As SMCI began appearing in broader financial media in late January 2024, an observer might have classified it as Peak/Saturating — Bloomberg mentions, some CNBC segments, moderately elevated volume. However, checking the actual social signals: thesis quality on r/stocks and X/Twitter was still deepening with new data (forward revenue pipeline estimates, NVIDIA partnership expansion, AI server rack capacity numbers) rather than merely repeating. Velocity was still accelerating, not parabolic-then-declining. YouTube and Discord saturation had not occurred. Q4 FY2024 earnings on February 5, 2024 brought a further +30% gap-up — the thesis still had room. **Lesson:** Media mentions alone are not sufficient for Peak classification. Peak requires parabolic velocity AND thesis content that is merely repeating prior information rather than adding new analytical depth. When thesis quality is still deepening, classify as Early with high visibility, not Peak.
+
 ---
 
 ### State 4: Decaying-elevated
@@ -87,6 +90,9 @@ GME, February 4–20, 2021 (case date: Feb 4–20, 2021). Price was $40–100 (s
 
 **Key diagnostic for Decaying-elevated vs. Peak:** In Peak, the narrative is uniform and amplifying. In Decaying-elevated, the narrative has fractured — you can find both "this is the top" and "hold for X" posts simultaneously, and the bears are getting upvotes.
 
+**Negative example — looked like Decaying-elevated, was actually a secondary Peak forming:**
+AMC, June 1, 2021 (case date: Jun 1–3, 2021). After the first AMC squeeze in late May 2021 (AMC peaked around $72 on May 28), "I sold at the top" posts mixed with "hold for $100" posts — a textbook Decaying-elevated fragmentation pattern. However, this was not true thesis dissolution: AMC management announced that day that retail shareholders could participate in a new share offering, reigniting a specific "retail owns this company" narrative with new data. AMC retraced to the upper $60s by June 2. Those who classified June 1 as Decaying-elevated and closed positions missed the secondary peak. **Lesson:** True Decaying-elevated shows the *original mechanism failing* — the short squeeze thesis loses its specific data anchor (short interest %, gamma mechanics). Fragmentation around "sell vs. hold" alone is not sufficient if a new specific catalyst or fresh thesis angle is emerging simultaneously. Check whether any new information is being introduced or whether posts are purely reactive.
+
 ---
 
 ### State 5: Decayed / Capitulated
@@ -105,6 +111,9 @@ GME, March 2021 (case date: Mar 1–31, 2021). Price settled around $40–60. WS
 
 **Positive example 2:**
 MARA/RIOT, December 2021 – January 2022 (case date: Dec 2021 – Jan 2022). After Bitcoin's peak at ~$69K, the crypto mining stock narrative died rapidly. Retail chatter on all platforms collapsed. MARA and RIOT lost 70%+ from peak over the following months. IV compressed significantly. Correct classification: Decayed/Capitulated. New long premium at this stage without a fresh catalyst had asymmetric downside.
+
+**Negative example — looked like Decayed, was actually Early (fresh catalyst reset):**
+MSTR, early October 2024 (case date: Oct 1–14, 2024). After Bitcoin stagnated sideways from July–September 2024, MSTR social media chatter had gone quiet for weeks. The stock had pulled back significantly from prior highs, StockTwits showed minimal activity, and WSB posts were absent. Surface classification: Decayed/Capitulated. However, Bitcoin was quietly building above $60K driven by US spot ETF inflows and the post-halving supply reduction, and informed accounts on X/Twitter and Telegram were beginning to reconstruct the BTC-accumulation thesis around Saylor's continued purchasing at sub-$60K prices. Thesis quality was high (specific BTC supply data, ETF flow numbers, cost-basis analysis) even at low volume. Cross-source breadth was Insufficient (1/3 Tier 1) but thesis quality was exceptional for the volume. By mid-October MSTR entered confirmed Early/Gaining; the stock went on to 3x by late November. **Lesson:** Low chatter volume alone does not confirm Decayed/Capitulated. When (a) the underlying asset is recovering, (b) low-volume posts have high thesis quality rather than "I told you so" tone, and (c) the accounts are informed-retail rather than pump accounts, you may be at the inflection point of a fresh Early/Gaining cycle. Apply the checklist: if thesis quality is high and velocity is accelerating from zero, classify as Early with Low confidence rather than Decayed.
 
 ---
 
