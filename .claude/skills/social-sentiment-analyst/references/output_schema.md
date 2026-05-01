@@ -4,11 +4,11 @@ Last refreshed: 2026-Q2
 
 # Output Schema
 
-This file defines the exact output contract for the social-sentiment-analyst skill. All 13 fields must appear in every invocation in the order specified. Use the null-output path when source data is insufficient.
+This file defines the exact output contract for the social-sentiment-analyst skill. All 13 output sections (some with sub-fields) must appear in every invocation in the order specified. Use the null-output path when source data is insufficient.
 
 ## Null-Output Path
 
-If Search Yield = Low AND fewer than 5 substantive posts found across all tiers, skip regime classification and output exactly:
+If fewer than 5 substantive posts found across all tiers (which produces Search Yield = Low), skip regime classification and output exactly:
 
 ```
 ══════════════════════════════════════════════
@@ -38,9 +38,9 @@ SOCIAL SENTIMENT ANALYSIS: $[TICKER]
 ──────────────────────────────────────────────
 REGIME
 ──────────────────────────────────────────────
-[FIELD 3] State: [Pre-emergent/Noise | Early/Gaining | Peak/Saturating | Decaying-elevated | Decayed/Capitulated]
-[FIELD 3] Trajectory: [Stable | Transitioning-up | Transitioning-down]
-[FIELD 3] Confidence: [Low | Medium | High]
+[FIELD 3a] State: [Pre-emergent/Noise | Early/Gaining | Peak/Saturating | Decaying-elevated | Decayed/Capitulated]
+[FIELD 3b] Trajectory: [Stable | Transitioning-up | Transitioning-down]
+[FIELD 3c] Confidence: [Low | Medium | High]
 → Justification: [1–2 sentences citing specific evidence from searched sources.
    Classifications without justification are INVALID OUTPUT.]
 
@@ -61,8 +61,9 @@ FRESHNESS
 ──────────────────────────────────────────────
 DOMINANT THESIS
 ──────────────────────────────────────────────
-[FIELD 6] Type: [one of the 10 types from thesis_patterns.md]
-→ Summary: [1–2 sentence narrative fingerprint of the specific thesis driving chatter]
+[FIELD 6] Type: [one of the 10 types from thesis_patterns.md — see list in thesis_patterns.md]
+→ Summary: [1–2 sentence narrative fingerprint of the specific thesis driving chatter.
+   If no recognizable thesis, use "Vague / undefined thesis" — do not fabricate a category.]
 
 ──────────────────────────────────────────────
 SOURCE BREAKDOWN
@@ -79,7 +80,7 @@ SOURCE BREAKDOWN
 ──────────────────────────────────────────────
 VELOCITY
 ──────────────────────────────────────────────
-[FIELD 9] Assessment: [qualitative description of mention acceleration rate and timeframe covered]
+[FIELD 9] Assessment: [1–2 sentences describing mention acceleration rate and timeframe. Include a rough time window, e.g., "rising sharply over the past 6 hours" or "stable over 48 hours with no acceleration."]
 
 ──────────────────────────────────────────────
 OPTIONS CONTEXT
@@ -109,22 +110,27 @@ OVERALL CONFIDENCE
 
 ## Alert Tier Logic
 
-**Emergency:**
+Waterfall evaluation: evaluate tiers in order and assign the first tier whose conditions are met.
+
+**1. Emergency (check first):**
 (Regime = Early/Gaining OR Trajectory = Transitioning-up) AND Freshness = Active AND Causal Scenario = 1 AND Cross-Source Breadth = Full (3/3)
 
-**Standard:**
-Ticker newly entering Early/Gaining regime AND Cross-Source Breadth = Partial or Full (≥2/3)
-
-**Daily Digest:**
-- Regime transition detected on a watched ticker
-- Peak/Saturating warning on any ticker
-- Decaying-elevated state on a held position
-
-**Suppress:**
+**2. Suppress (check second — skip to next tier if none apply):**
 - Causal Scenario = 3 AND Freshness = Stale
 - Regime = Pre-emergent/Noise AND no red-flag override
-- Regime = Decayed/Capitulated (move is over, no actionable signal)
+- Regime = Decayed/Capitulated
 - Causal Scenario = 4 AND Overall Confidence = Low
+
+**3. Standard (check third):**
+Regime = Early/Gaining AND Cross-Source Breadth = Partial or Full (≥2/3) AND not already assigned Emergency or Suppress
+
+**4. Daily Digest (default for remaining cases with signal):**
+- Regime transition detected
+- Peak/Saturating regime
+- Decaying-elevated state on a held position
+
+**5. Suppress (default):**
+If none of the above tiers apply and Regime = Pre-emergent/Noise, assign Suppress.
 
 ## Enforcement Rule
 
