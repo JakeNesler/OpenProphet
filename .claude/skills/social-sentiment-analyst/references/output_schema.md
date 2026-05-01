@@ -61,7 +61,7 @@ FRESHNESS
 ──────────────────────────────────────────────
 DOMINANT THESIS
 ──────────────────────────────────────────────
-[FIELD 6] Type: [one of the 10 types from thesis_patterns.md — see list in thesis_patterns.md]
+[FIELD 6] Type: [Short Squeeze | Earnings Catalyst | FDA / Regulatory Binary | M&A Speculation | Activist / 13D | Bankruptcy / Restructuring | Sector Theme Rotation | Crypto-Correlated | Political / Policy-Tied | Vague / Undefined]
 → Summary: [1–2 sentence narrative fingerprint of the specific thesis driving chatter.
    If no recognizable thesis, use "Vague / undefined thesis" — do not fabricate a category.]
 

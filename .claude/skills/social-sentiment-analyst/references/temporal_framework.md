@@ -12,10 +12,10 @@ The calling system may pass trigger context when invoking the skill. Handle each
 
 | Input | If provided | If missing |
 |-------|-------------|------------|
-| **Trigger timestamp** | Use as temporal anchor for causal scenario classification. Compare to narrative inflection point. | Note "No trigger context provided — causal scenario classification skipped" in Field 4. Do not guess or estimate. |
+| **Trigger timestamp** | Use as temporal anchor for causal scenario classification. Compare to narrative inflection point. | Note "Skipped — no trigger context" in Field 4. Do not guess or estimate. |
 | **Trigger directional bias** (bullish/bearish/neutral) | Cross-check against dominant chatter sentiment. Explicitly flag any divergence (e.g., "trigger is bullish but chatter is net bearish — divergence flagged"). | Note as unavailable in Field 4 justification. |
 | **Lookback horizon** | Use this as the WebSearch time window. | Default to 7 days. |
-| **No trigger context at all** | If none of the above are provided (manual lookup), note "Manual lookup — causal scenario classification skipped" in Field 4. The skill still produces all other fields. |
+| **No trigger context at all** | If none of the above are provided (manual lookup), note "Skipped — no trigger context" in Field 4. The skill still produces all other fields. |
 
 **Never silently downgrade quality.** If trigger context is missing, the output must state this explicitly. A reader should always know whether causal scenario was classified or skipped, and why.
 
@@ -26,7 +26,7 @@ The calling system may pass trigger context when invoking the skill. Handle each
 **What it means:** Chatter was building hours-to-days before the trigger fired. The unusual flow, breakout, or price alert is the result of the retail narrative reaching a tipping point. **This is the highest-conviction setup for momentum continuation** — retail participation is already established and thesis-driven.
 
 **Identification criteria:**
-- Narrative inflection point is **6+ hours before** the trigger timestamp
+- Narrative inflection point is **more than 1 hour before** the trigger timestamp. Confidence scales with the gap: 6+ hours before = High confidence (narrative clearly predates trigger); 1–6 hours before = Medium confidence (temporal precedence established but gap is borderline — apply Scenario 1 with Medium confidence).
 - Post content references specific catalysts (FDA date, earnings setup, M&A speculation, sector theme) **without** referencing recent unusual flow or options activity
 - The thesis predates the trigger and does not require it for justification
 - Cross-source breadth was already ≥ Partial before the trigger fired

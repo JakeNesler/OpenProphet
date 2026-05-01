@@ -50,7 +50,7 @@ Breadth is measured against Tier 1 sources only (Reddit, X/Twitter, StockTwits).
 |---------------|----------------------|----------------|
 | **Insufficient** | 0–1 of 3 | Likely single-community echo chamber or coordinated single-platform pump. Do not classify as genuine cross-source signal. |
 | **Partial** | 2 of 3 | Developing signal, not yet confirmed. Can qualify for Standard alert tier. |
-| **Full** | 3 of 3 | Genuine cross-source coherence. Required for Emergency alert tier. Your father's Bitcoin case had Full breadth across crypto Tier 1 equivalents. |
+| **Full** | 3 of 3 | Genuine cross-source coherence. Required for Emergency alert tier. |
 
 **Important:** A signal appearing on 10 Tier 2/3 sources but only 1 Tier 1 source is still Insufficient breadth. Tier 2/3 sources confirm and amplify; they do not substitute for Tier 1 coherence.
 
@@ -72,8 +72,8 @@ Assess at the end of Step 2 (parallel WebSearch) and report in Field 2 of every 
 
 | Rating | Criteria |
 |--------|---------|
-| **High** | All 3 Tier 1 sources returned results with timestamps; 10+ substantive posts total |
-| **Medium** | 2 of 3 Tier 1 sources returned results; or all 3 but thin (5–10 posts); or timestamp data partially missing |
+| **High** | All 3 Tier 1 sources returned results with timestamps; 10+ substantive posts total across all tiers |
+| **Medium** | 2 of 3 Tier 1 sources returned results; or all 3 but thin (5–10 posts across all tiers); or timestamp data partially missing |
 | **Low** | 0–1 Tier 1 sources returned meaningful results; fewer than 5 substantive posts total |
 
 **Low Search Yield caps Overall Confidence at Medium** regardless of other factors.

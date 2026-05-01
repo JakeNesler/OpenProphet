@@ -136,7 +136,7 @@ Assess Freshness (Active / Recent / Stale) from most recent substantive post tim
 
 Using `references/regime_taxonomy.md`, classify regime state and trajectory.
 
-Pattern-match to named examples in the taxonomy. Pay special attention to negative examples — if the situation resembles a case that looked like Early but was Noise, apply that lesson and downgrade confidence.
+Pattern-match to named examples in the taxonomy. Pay special attention to all negative examples across all 5 states — if the situation resembles any negative example in the taxonomy, apply that lesson and consider adjusting the classification or confidence accordingly.
 
 Assign confidence (Low / Medium / High) with any automatic caps from Step 1.
 
@@ -149,7 +149,7 @@ Using `references/thesis_patterns.md`:
 - Write a 1–2 sentence narrative fingerprint
 
 Score Cross-Source Breadth (Tier 1 only, categorical, using `references/source_weighting.md`):
-- Count how many of the 3 Tier 1 sources had meaningful activity
+- Count how many of the 3 Tier 1 sources had meaningful activity (a source counts as active if it returned at least 2 substantive posts within the lookback horizon)
 - Apply categorical scale: 0–1 = Insufficient, 2 = Partial, 3 = Full
 
 **Justification required for Dominant Thesis.** Use "Vague / undefined thesis" if no recognizable pattern — do not fabricate a category. Classification without justification is invalid output.

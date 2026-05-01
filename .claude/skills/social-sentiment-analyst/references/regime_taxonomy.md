@@ -9,7 +9,7 @@ Defines the 5-state sentiment regime cycle with named positive and negative exam
 
 ## Regime States
 
-### State 1: Pre-emergent / Noise
+### State 1: Pre-emergent/Noise
 
 **Definition:** Low volume, uncoordinated, absent or incoherent thesis. Often originates from known pump accounts, bots, isolated community chatter, or recycled memes with no new catalyst. Not a tradeable signal.
 

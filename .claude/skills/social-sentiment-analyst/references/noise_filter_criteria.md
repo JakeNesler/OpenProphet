@@ -66,4 +66,6 @@ Count the number of red flags (from Classic + AI-Generated sections above) that 
 | 3+ with no cross-source coherence | Classify Pre-emergent/Noise regardless of volume |
 | 3+ WITH cross-source coherence | Classify with Low confidence; flag prominently |
 
+**Definition — "cross-source coherence":** Cross-Source Breadth ≥ Partial, meaning 2 or more of the 3 Tier 1 sources (Reddit, X/Twitter, StockTwits) had meaningful activity (≥2 substantive posts from that platform within the lookback horizon). A signal on 1 Tier 1 source only = no cross-source coherence, regardless of Tier 2/3 activity.
+
 **Never suppress Red Flags from the output.** Even if the signal passes noise filter and gets classified as Early, the Red Flags field must list what fired. This creates an auditable record.

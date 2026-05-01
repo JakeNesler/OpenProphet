@@ -21,7 +21,7 @@ Then provide guidance based on the moderate IV assumption, clearly labeled as an
 | **Early / Gaining** | High (>60) | IV is expensive; the move may already be partially priced. Use defined-risk debit spreads with a favorable risk/reward ratio, or wait for IV compression before entering. Do not buy naked long premium. |
 | **Peak / Saturating** | High (>60) | Narrative likely priced in. **Sell premium.** Short straddle, iron condor, or credit spread captures IV collapse as the narrative saturates. Manage risk with defined-width spreads. This is the clearest premium-selling setup this skill produces. |
 | **Peak / Saturating** | Medium (30–60) | Light premium selling via credit spread. Leave room for continued squeeze — naked short premium is risky if the narrative hasn't fully peaked. |
-| **Peak / Saturating** | Low (<30) | Unusual — peak regime with low IV suggests the market hasn't priced the narrative. Re-examine whether regime is truly Peak or just Early with high visibility. If Peak is confirmed, wait for IV expansion before positioning. |
+| **Peak / Saturating** | Low (<30) | Unusual — peak regime with low IV suggests the market hasn't priced the narrative. Re-examine whether regime is truly Peak or just Early with high visibility. If Peak is confirmed, wait for IV expansion before positioning. If IV expansion does not occur within your target holding period, default to the Early/Gaining + Low IV row and use directional long premium at reduced size. |
 | **Decaying-elevated** | Any | **Avoid long premium entirely.** You are in the IV crush zone — IV is compressing while price is uncertain. Both directional and long-premium risk are elevated. If you must trade: short premium via tight credit spreads. Cash or short premium are the only rational structures. |
 | **Decayed / Capitulated** | Collapsing | Mean reversion trade possible if price has overshot to the downside. Defined-risk structures only (debit spreads or narrow straddles). IV is low — long premium is cheap but the move must happen quickly. Thesis: fresh catalyst or technical mean reversion, not narrative continuation. |
 | **Pre-emergent / Noise** | Any | No options position based on social sentiment. If trading, use only technical/flow signals. Any options position should be smallest possible size and defined risk. |
@@ -37,17 +37,19 @@ Certain thesis types override the general table. When there is a conflict betwee
 | **Activist / 13D** | Use longer-dated options (3–6 months) regardless of current IV. Short-dated options miss the thesis arc. |
 | **Vague / Undefined** | Maximum 25% of normal position size regardless of IV rank. Debit spread if entering at all. |
 
+**Thesis types not listed above** (Short Squeeze, Earnings Catalyst, M&A Speculation, Sector Theme Rotation, Crypto-Correlated, Political / Policy-Tied) follow the IV Rank × Regime guidance table without modification. For Earnings Catalyst specifically, thesis_patterns.md provides additional direction-vs-straddle guidance that supplements the regime table — consult both.
+
 ## IV Rank Interpretation
 
-If IV rank is provided, interpret as:
+If IV rank is provided, interpret using the same three-band system as the guidance table above:
 
-| IV Rank | Context |
-|---------|---------|
-| <20 | Historically cheap options; premium buyers have structural advantage |
-| 20–40 | Below average; options are reasonably priced |
-| 40–60 | Near average; neither premium buyer nor seller has structural advantage |
-| 60–80 | Above average; premium sellers have structural advantage unless expecting very large move |
-| >80 | Extremely elevated; premiums are expensive; straddles require very large moves to be profitable; credit spreads highly attractive |
+| IV Rank | Band | Context |
+|---------|------|---------|
+| <30 | **Low** | Historically cheap to below-average options; premium buyers have structural advantage |
+| 30–60 | **Medium** | Near average; neither premium buyer nor seller has a clear structural advantage |
+| >60 | **High** | Above-average to extremely elevated; premium sellers have structural advantage; credit spreads highly attractive; straddles require very large moves to be profitable |
+
+Note: IV rank >80 (extreme) within the High band warrants extra caution on long premium — calculate break-even move explicitly before entering.
 
 ## Complete Field 10 Generation
 
