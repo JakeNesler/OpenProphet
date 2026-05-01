@@ -68,6 +68,8 @@ Load all reference files:
 - `references/thesis_patterns.md` — always
 - `references/iv_integration.md` — always
 
+**Do not begin Step 2 until all 7 reference files above have been read and their content is in working context.** If any file cannot be found, stop and report which file is missing.
+
 **Check Reference Freshness:** Note the oldest `Last refreshed:` date across all files. If any file is older than 2 quarters from today's date, confidence ceiling is capped at Medium for this invocation. Surface this in Field 1 of the output.
 
 ### Step 2: Run Parallel WebSearch Queries
@@ -128,6 +130,8 @@ Using `references/temporal_framework.md`:
 
 Assess Freshness (Active / Recent / Stale) from most recent substantive post timestamps.
 
+**Justification required for Causal Scenario and Freshness.** Classification without justification is invalid output.
+
 ### Step 6: Regime Classification
 
 Using `references/regime_taxonomy.md`, classify regime state and trajectory.
@@ -147,6 +151,8 @@ Using `references/thesis_patterns.md`:
 Score Cross-Source Breadth (Tier 1 only, categorical, using `references/source_weighting.md`):
 - Count how many of the 3 Tier 1 sources had meaningful activity
 - Apply categorical scale: 0–1 = Insufficient, 2 = Partial, 3 = Full
+
+**Justification required for Dominant Thesis.** Use "Vague / undefined thesis" if no recognizable pattern — do not fabricate a category. Classification without justification is invalid output.
 
 ### Step 8: Generate Structured Output
 
