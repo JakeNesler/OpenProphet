@@ -18,6 +18,21 @@ Harvest is a mechanical theta-harvesting agent that sells iron condors on a fixe
 
 ---
 
+## Glossary
+
+| Term | Definition |
+|---|---|
+| **IVR (IV Rank)** | `(current_IV − 52wk_low_IV) / (52wk_high_IV − 52wk_low_IV) × 100`. This is IV rank, not IV percentile. Range is 0–100. |
+| **DTE** | Calendar days from current date to expiration date. Not trading days. |
+| **Portfolio value** | Total account equity = cash + market value of all open positions across all agents. Snapshotted at entry decision time. |
+| **Trailing 30-trading-day P&L** | Sum of Harvest realized P&L from position closures only, over the last 30 trading days (not calendar days). Excludes unrealized P&L and other agents' P&L. |
+| **Deployed buying power** | Sum of theoretical max losses across all open Harvest positions (`wing_width × contracts × 100` per position). More conservative than broker buying power requirement. |
+| **Atomic combo order** | Multi-leg options order that fills entirely or not at all. No partial leg fills accepted. |
+| **Heartbeat** | One execution cycle of the agent: run exit logic, run entry logic, emit summary log. |
+| **Monthly expiration** | Third Friday of each calendar month. |
+
+---
+
 ## Section 1: Agent Identity
 
 **Name:** Harvest
@@ -37,7 +52,11 @@ Harvest is a mechanical theta-harvesting agent that sells iron condors on a fixe
 | after_hours | 7200s |
 | closed | 14400s |
 
-**Intraday cadence:** Every 15 minutes during market hours + mandatory 3:45pm pre-close check.
+**Intraday cadence:** Every 15 minutes during market hours (9:30am–4:00pm ET) + mandatory 3:45pm pre-close check.
+
+**3:45pm pre-close check:** An additional heartbeat at 3:45pm ET beyond the regular 15-minute cadence. Same logic as a normal heartbeat — no special pre-close behavior. Exists to ensure no position misses its exit trigger in the window between the last regular heartbeat and market close.
+
+**Non-market hours behavior:** During `pre_market`, `after_hours`, and `closed` phases, the agent emits a heartbeat-alive log and verifies broker connectivity only. It does not evaluate entry or exit logic. All trading actions occur during the `market_open` and `market_close` heartbeat phases (9:30am–4:00pm ET).
 
 ---
 
@@ -60,8 +79,8 @@ Harvest is a mechanical theta-harvesting agent that sells iron condors on a fixe
    - Short call: nearest strike to 16-delta, tolerance [12, 20]; on tie pick further OTM
    - Wing widths (fixed per underlying): SPY $5, QQQ $5, IWM $2, GLD $2, TLT $1
    - If no strikes fall within tolerance → skip
-5. **Credit quality check:** Mid-price credit < (wing_width / 3) → skip (likely thin IV or data issue)
-6. **Position sizing:** `contracts = floor((portfolio_value × 0.015) / (wing_width × 100))`
+5. **Credit quality check:** Mid-price credit < (wing_width / 3) → skip (likely thin IV or data issue). Credit is calculated against the actually-selected strikes, not theoretical 16-delta strikes — if tolerance allows a slightly higher delta (e.g. 18-delta), the credit will be slightly higher, which is acceptable since the extra premium compensates for the modestly higher risk.
+6. **Position sizing:** `contracts = floor((portfolio_value × 0.015) / (wing_width × 100))`. If `contracts = 0`, skip this underlying and log "portfolio too small for minimum position on [underlying]" — this is a useful signal that wing widths may need revisiting relative to portfolio size.
 7. **Buying power verification:** Adding this position would push total deployed > 12% → skip
 
 ### Entry Execution
@@ -70,9 +89,22 @@ Harvest is a mechanical theta-harvesting agent that sells iron condors on a fixe
 - Fill timeout: 5 minutes → cancel and retry once at (mid − $0.05)
 - If second attempt fails → skip this underlying this heartbeat
 
+### Entry Retry Asymmetry
+
+Entry retry logic is intentionally less aggressive than exit retry logic. A failed entry can be re-attempted on the next heartbeat with no loss of edge. A failed exit on a triggered rule introduces real risk (a profit target erodes; a loss stop worsens). This is why entries give up after one retry while exits escalate to market.
+
 ### Entry Logging
 
-Log fields: underlying, expiration, strikes, credit received, max loss, IVR at entry, buying power used, portfolio value at entry, other-agent positions in this underlying (soft flag — informational only, not a decision input).
+Log fields: underlying, expiration, strikes, credit received, max loss, IVR at entry, buying power used, portfolio value at entry, plus the overlap log below.
+
+**Overlap log schema** (soft flag — informational only, not a decision input):
+```json
+"overlap_log": [
+  {"agent": "Prophet", "underlying": "SPY", "direction": "long_call", "contracts": 5, "dte": 42},
+  {"agent": "Guardian", "underlying": "SPY", "direction": "long_put", "contracts": 2, "dte": 67}
+]
+```
+Log `"overlap_log": []` if no other agents hold positions in this underlying.
 
 ---
 
@@ -127,6 +159,8 @@ Fields: exit reason, entry credit, cost to close, net P&L, DTE at exit, days hel
 
 "Portfolio value" = total account equity (cash + market value of all positions, all agents). Snapshotted at entry decision time; fixed for that position's lifetime. Each new entry uses then-current portfolio value.
 
+**Why snapshot timing differs across rules:** Per-position sizing (1.5% max loss) is locked at entry to prevent forced rebalancing of live positions as portfolio value fluctuates. Portfolio-level caps (12% deployed, -5% circuit breaker) are evaluated against current portfolio value on each heartbeat to remain responsive to changing conditions. These are intentionally different — not an inconsistency.
+
 ### Portfolio-Level Circuit Breaker
 
 - **Metric:** Rolling sum of Harvest realized P&L over trailing 30 trading days (excludes unrealized P&L on open positions; excludes P&L from other agents)
@@ -164,6 +198,14 @@ Fields: exit reason, entry credit, cost to close, net P&L, DTE at exit, days hel
 - **Broker state ≠ internal state:** Halt all activity (entries and position management), log "reconciliation mismatch — operator review required" — when internal state is unknown, doing nothing is the only safe action
 - **Credit < $0.30:** Skip (sanity bound — likely data error)
 - **Daily reconciliation:** Verify internal position state matches broker at start of each session; halt on mismatch
+
+### Startup / Restart Behavior
+
+- On startup, fetch current open positions from broker
+- Reconcile against last known internal state (if stored)
+- If reconciliation succeeds: resume normal operation; first heartbeat logs "session start" with full position inventory
+- If reconciliation fails (broker state ≠ stored state): halt all activity, log "reconciliation mismatch on startup — operator review required," await operator reset
+- If no stored state exists (first run): treat broker positions as ground truth; log "fresh start — no prior state found"
 
 ### Logging Requirements
 
