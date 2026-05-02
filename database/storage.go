@@ -355,6 +355,8 @@ func (s *LocalStorage) SaveHarvestCondor(c *models.DBHarvestCondor) error {
 	return s.db.Save(c).Error
 }
 
+// UpdateHarvestCondor applies partial updates to a condor by condorID.
+// Map keys must be GORM column names (e.g. "realized_pnl", "status"), not Go field names.
 func (s *LocalStorage) UpdateHarvestCondor(condorID string, updates map[string]interface{}) error {
 	return s.db.Model(&models.DBHarvestCondor{}).
 		Where("condor_id = ?", condorID).
@@ -369,10 +371,10 @@ func (s *LocalStorage) GetHarvestCondorByID(condorID string) (*models.DBHarvestC
 	return &c, nil
 }
 
-func (s *LocalStorage) ListOpenHarvestCondors() []*models.DBHarvestCondor {
+func (s *LocalStorage) ListOpenHarvestCondors() ([]*models.DBHarvestCondor, error) {
 	var condors []*models.DBHarvestCondor
-	s.db.Where("status = ?", "OPEN").Find(&condors)
-	return condors
+	err := s.db.Where("status = ?", "OPEN").Find(&condors).Error
+	return condors, err
 }
 
 // GetHarvestClosedPnL sums realized P&L for condors closed within [start, end].

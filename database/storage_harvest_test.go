@@ -66,7 +66,10 @@ func TestListOpenHarvestCondors(t *testing.T) {
 	for _, c := range condors {
 		_ = s.SaveHarvestCondor(c)
 	}
-	open := s.ListOpenHarvestCondors()
+	open, err := s.ListOpenHarvestCondors()
+	if err != nil {
+		t.Fatalf("ListOpenHarvestCondors failed: %v", err)
+	}
 	if len(open) != 1 || open[0].CondorID != "c1" {
 		t.Errorf("expected 1 OPEN condor (c1), got %d", len(open))
 	}
