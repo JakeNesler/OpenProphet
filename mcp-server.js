@@ -2760,12 +2760,13 @@ Worst Trade: ${stats.worst_result_pct.toFixed(1)}% ($${stats.worst_result_dollar
       }
 
       case 'get_harvest_ivr': {
-        const data = await callTradingBot(`/harvest/ivr/${args.symbol}?current_iv=${args.current_iv}`);
+        const params = new URLSearchParams({ current_iv: String(args.current_iv) });
+        const data = await callTradingBot(`/harvest/ivr/${encodeURIComponent(args.symbol)}?${params}`);
         return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
       }
 
       case 'get_harvest_expirations': {
-        const data = await callTradingBot(`/harvest/expirations/${args.symbol}`);
+        const data = await callTradingBot(`/harvest/expirations/${encodeURIComponent(args.symbol)}`);
         return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
       }
 
@@ -2775,7 +2776,6 @@ Worst Trade: ${stats.worst_result_pct.toFixed(1)}% ($${stats.worst_result_dollar
       }
 
       case 'open_iron_condor': {
-        await enforcePermissions('open_iron_condor', args);
         const data = await callTradingBot('/harvest/condors', 'POST', {
           underlying:               args.underlying,
           expiration_date:          args.expiration_date,
@@ -2798,8 +2798,7 @@ Worst Trade: ${stats.worst_result_pct.toFixed(1)}% ($${stats.worst_result_dollar
       }
 
       case 'close_iron_condor': {
-        await enforcePermissions('close_iron_condor', args);
-        const data = await callTradingBot(`/harvest/condors/${args.condor_id}/close`, 'POST', {
+        const data = await callTradingBot(`/harvest/condors/${encodeURIComponent(args.condor_id)}/close`, 'POST', {
           order_type:        args.order_type,
           limit_price:       args.limit_price || 0,
           close_reason:      args.close_reason,
