@@ -374,7 +374,7 @@ func (s *LocalStorage) GetHarvestCondorByID(condorID string) (*models.DBHarvestC
 
 func (s *LocalStorage) ListOpenHarvestCondors() ([]*models.DBHarvestCondor, error) {
 	var condors []*models.DBHarvestCondor
-	err := s.db.Where("status = ?", "OPEN").Find(&condors).Error
+	err := s.db.Where("status IN ?", []string{"OPEN", "CLOSING"}).Find(&condors).Error
 	return condors, err
 }
 

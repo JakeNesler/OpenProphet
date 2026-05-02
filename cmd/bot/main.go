@@ -370,28 +370,34 @@ func startHarvestIVCollection(ctx context.Context, ivrSvc *services.HarvestIVRSe
 	ticker := time.NewTicker(6 * time.Hour)
 	defer ticker.Stop()
 
+	collectAll := func() {
+		for _, symbol := range harvestUniverse {
+			if tradingService == nil {
+				continue
+			}
+			chain, err := tradingService.GetOptionsChain(ctx, symbol, time.Now().AddDate(0, 0, 30))
+			if err != nil {
+				logger.WithError(err).Warnf("harvest IV collection: failed to get chain for %s", symbol)
+				continue
+			}
+			atmIV := calcATMIV(chain)
+			if atmIV <= 0 {
+				continue
+			}
+			if err := ivrSvc.RecordDailyIV(symbol, atmIV); err != nil {
+				logger.WithError(err).Warnf("harvest IV collection: failed to record IV for %s", symbol)
+			}
+		}
+	}
+
+	collectAll() // run immediately on startup
+
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			for _, symbol := range harvestUniverse {
-				if tradingService == nil {
-					continue
-				}
-				chain, err := tradingService.GetOptionsChain(ctx, symbol, time.Now().AddDate(0, 0, 30))
-				if err != nil {
-					logger.WithError(err).Warnf("harvest IV collection: failed to get chain for %s", symbol)
-					continue
-				}
-				atmIV := calcATMIV(chain)
-				if atmIV <= 0 {
-					continue
-				}
-				if err := ivrSvc.RecordDailyIV(symbol, atmIV); err != nil {
-					logger.WithError(err).Warnf("harvest IV collection: failed to record IV for %s", symbol)
-				}
-			}
+			collectAll()
 		}
 	}
 }
