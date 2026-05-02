@@ -2,12 +2,14 @@ package controllers
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"gorm.io/gorm"
 	"prophet-trader/models"
 	"prophet-trader/services"
 )
@@ -184,7 +186,11 @@ func (hc *HarvestController) HandleOpenCondor(c *gin.Context) {
 	}
 
 	if err := hc.storage.SaveHarvestCondor(condor); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "order placed but failed to save condor record: " + err.Error(), "order_id": orderID})
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error":     "order placed but failed to save condor record: " + err.Error(),
+			"order_id":  orderID,
+			"condor_id": condorID,
+		})
 		return
 	}
 
@@ -216,7 +222,11 @@ func (hc *HarvestController) HandleCloseCondor(c *gin.Context) {
 
 	condor, err := hc.storage.GetHarvestCondorByID(condorID)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "condor not found: " + condorID})
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "condor not found: " + condorID})
+		} else {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "db error fetching condor: " + err.Error()})
+		}
 		return
 	}
 	if condor.Status != "OPEN" {

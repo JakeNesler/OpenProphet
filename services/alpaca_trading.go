@@ -24,6 +24,7 @@ type AlpacaTradingService struct {
 	apiSecret  string
 	baseURL    string
 	logger     *logrus.Logger
+	httpClient *http.Client
 }
 
 // NewAlpacaTradingService creates a new Alpaca trading service
@@ -52,6 +53,7 @@ func NewAlpacaTradingService(apiKey, secretKey, baseURL string, isPaper bool) (*
 		apiSecret:  secretKey,
 		baseURL:    baseURL,
 		logger:     logger,
+		httpClient: &http.Client{Timeout: 30 * time.Second},
 	}, nil
 }
 
@@ -318,8 +320,7 @@ func (s *AlpacaTradingService) GetOptionsChain(ctx context.Context, underlying s
 	req.Header.Set("Accept", "application/json")
 
 	// Execute request
-	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Do(req)
+	resp, err := s.httpClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch options chain: %w", err)
 	}
@@ -435,7 +436,7 @@ type alpacaMlegRequest struct {
 	Type        string          `json:"type"`
 	OrderClass  string          `json:"order_class"`
 	TimeInForce string          `json:"time_in_force"`
-	LimitPrice  string          `json:"limit_price"` // string per Alpaca spec
+	LimitPrice  string          `json:"limit_price,omitempty"` // string per Alpaca spec
 	Qty         string          `json:"qty"`
 	Legs        []alpacaMlegLeg `json:"legs"`
 }
@@ -459,11 +460,23 @@ func (s *AlpacaTradingService) PlaceMultiLegOrder(ctx context.Context, order Mul
 			PositionIntent: leg.PositionIntent,
 		}
 	}
+	orderType := "limit"
+	limitPriceStr := fmt.Sprintf("%.2f", order.LimitPrice)
+	if order.LimitPrice == 0 {
+		orderType = "market"
+		limitPriceStr = "" // omitempty will drop this field
+	}
+
+	tif := order.TimeInForce
+	if tif == "" {
+		tif = "day"
+	}
+
 	body := alpacaMlegRequest{
-		Type:        "limit",
+		Type:        orderType,
 		OrderClass:  "mleg",
-		TimeInForce: order.TimeInForce,
-		LimitPrice:  fmt.Sprintf("%.2f", order.LimitPrice),
+		TimeInForce: tif,
+		LimitPrice:  limitPriceStr,
 		Qty:         fmt.Sprintf("%d", order.Contracts),
 		Legs:        legs,
 	}
@@ -482,8 +495,7 @@ func (s *AlpacaTradingService) PlaceMultiLegOrder(ctx context.Context, order Mul
 	req.Header.Set("APCA-API-SECRET-KEY", s.apiSecret)
 	req.Header.Set("Content-Type", "application/json")
 
-	httpClient := &http.Client{Timeout: 30 * time.Second}
-	resp, err := httpClient.Do(req)
+	resp, err := s.httpClient.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("execute mleg request: %w", err)
 	}

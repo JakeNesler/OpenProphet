@@ -33,12 +33,12 @@ type DBHarvestCondor struct {
 
 	// Order tracking
 	EntryOrderID string
-	CloseOrderID string
+	CloseOrderID string `gorm:"column:close_order_id"`
 
 	// Status: OPEN | CLOSING | CLOSED
 	Status               string     `gorm:"index"`
 	CloseReason          string
-	CloseCostPerContract float64
+	CloseCostPerContract float64    `gorm:"column:close_cost_per_contract"`
 	RealizedPnL          float64    `gorm:"column:realized_pnl"`
 	OpenedAt             time.Time
 	ClosedAt             *time.Time
