@@ -37,7 +37,10 @@ func NewHarvestIVRService(store harvestIVStore) *HarvestIVRService {
 // RecordDailyIV stores today's ATM IV for the given underlying if not already stored today.
 func (s *HarvestIVRService) RecordDailyIV(underlying string, atmIV float64) error {
 	today := time.Now().UTC().Truncate(24 * time.Hour)
-	existing, err := s.store.GetHarvestIVSnapshots(underlying, today, today.Add(23*time.Hour+59*time.Minute))
+	// tomorrow is the exclusive upper bound: GetHarvestIVSnapshots uses date < end,
+	// so this captures the full calendar day without risking a 23h59m gap.
+	tomorrow := today.Add(24 * time.Hour)
+	existing, err := s.store.GetHarvestIVSnapshots(underlying, today, tomorrow)
 	if err != nil {
 		return fmt.Errorf("checking existing snapshot: %w", err)
 	}

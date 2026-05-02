@@ -11,6 +11,7 @@ import (
 	"github.com/sirupsen/logrus"
 	"github.com/glebarez/sqlite"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 	"gorm.io/gorm/logger"
 )
 
@@ -390,12 +391,15 @@ func (s *LocalStorage) GetHarvestClosedPnL(start, end time.Time) (float64, error
 // ── Harvest IV snapshot storage ────────────────────────────────────
 
 func (s *LocalStorage) SaveHarvestIVSnapshot(snap *models.DBHarvestIVSnapshot) error {
-	return s.db.Save(snap).Error
+	// OnConflict{DoNothing: true} makes duplicate (underlying, date) inserts a no-op,
+	// relying on the DB-level unique index as the idempotency mechanism.
+	return s.db.Clauses(clause.OnConflict{DoNothing: true}).Create(snap).Error
 }
 
 func (s *LocalStorage) GetHarvestIVSnapshots(underlying string, start, end time.Time) ([]*models.DBHarvestIVSnapshot, error) {
 	var snaps []*models.DBHarvestIVSnapshot
-	err := s.db.Where("underlying = ? AND date >= ? AND date <= ?", underlying, start, end).
+	// end is an exclusive upper bound (date < end) so callers can use midnight boundaries cleanly.
+	err := s.db.Where("underlying = ? AND date >= ? AND date < ?", underlying, start, end).
 		Order("date ASC").
 		Find(&snaps).Error
 	return snaps, err

@@ -1,6 +1,7 @@
 package services
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
@@ -20,7 +21,8 @@ func (s *stubIVStore) SaveHarvestIVSnapshot(snap *models.DBHarvestIVSnapshot) er
 func (s *stubIVStore) GetHarvestIVSnapshots(underlying string, start, end time.Time) ([]*models.DBHarvestIVSnapshot, error) {
 	var out []*models.DBHarvestIVSnapshot
 	for _, sn := range s.stored {
-		if sn.Underlying == underlying && !sn.Date.Before(start) && !sn.Date.After(end) {
+		// Matches storage semantics: start <= date < end (end is exclusive)
+		if sn.Underlying == underlying && !sn.Date.Before(start) && sn.Date.Before(end) {
 			out = append(out, sn)
 		}
 	}
@@ -108,4 +110,57 @@ func TestGetIVRData_NoHistory(t *testing.T) {
 	if data.IVR != -1 {
 		t.Errorf("expected IVR=-1 (unknown), got %.2f", data.IVR)
 	}
+}
+
+func TestRecordDailyIV_FirstCall_WritesSnapshot(t *testing.T) {
+	store := &stubIVStore{}
+	svc := NewHarvestIVRService(store)
+	err := svc.RecordDailyIV("SPY", 0.185)
+	if err != nil {
+		t.Fatalf("expected no error, got: %v", err)
+	}
+	if len(store.saved) != 1 {
+		t.Errorf("expected 1 saved snapshot, got %d", len(store.saved))
+	}
+	if store.saved[0].ATMIV != 0.185 {
+		t.Errorf("expected ATMIV=0.185, got %f", store.saved[0].ATMIV)
+	}
+}
+
+func TestRecordDailyIV_Idempotent(t *testing.T) {
+	today := time.Now().UTC().Truncate(24 * time.Hour)
+	store := &stubIVStore{
+		// Pre-populate stored so the service sees an existing snapshot for today
+		stored: []*models.DBHarvestIVSnapshot{
+			{Underlying: "SPY", Date: today, ATMIV: 0.185},
+		},
+	}
+	svc := NewHarvestIVRService(store)
+	err := svc.RecordDailyIV("SPY", 0.200) // different IV, same day
+	if err != nil {
+		t.Fatalf("expected no error, got: %v", err)
+	}
+	// Should NOT have written a second snapshot since today already has one
+	if len(store.saved) != 0 {
+		t.Errorf("expected no new snapshot written (idempotent), got %d", len(store.saved))
+	}
+}
+
+func TestRecordDailyIV_StoreError_Propagates(t *testing.T) {
+	store := &stubGetErrorIVStore{}
+	svc := NewHarvestIVRService(store)
+	err := svc.RecordDailyIV("SPY", 0.185)
+	if err == nil {
+		t.Fatal("expected error from store, got nil")
+	}
+}
+
+// stubGetErrorIVStore returns an error on GetHarvestIVSnapshots.
+type stubGetErrorIVStore struct{}
+
+func (s *stubGetErrorIVStore) SaveHarvestIVSnapshot(snap *models.DBHarvestIVSnapshot) error {
+	return nil
+}
+func (s *stubGetErrorIVStore) GetHarvestIVSnapshots(underlying string, start, end time.Time) ([]*models.DBHarvestIVSnapshot, error) {
+	return nil, fmt.Errorf("DB unavailable")
 }
