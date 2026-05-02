@@ -45,6 +45,8 @@ func NewLocalStorage(dbPath string) (*LocalStorage, error) {
 		&models.DBAccountSnapshot{},
 		&models.DBSignal{},
 		&models.DBManagedPosition{},
+		&models.DBHarvestCondor{},
+		&models.DBHarvestIVSnapshot{},
 	); err != nil {
 		return nil, fmt.Errorf("failed to migrate database: %w", err)
 	}
@@ -345,6 +347,56 @@ func (s *LocalStorage) DeleteManagedPosition(positionID string) error {
 		return fmt.Errorf("failed to delete managed position: %w", result.Error)
 	}
 	return nil
+}
+
+// ── Harvest condor storage ─────────────────────────────────────────
+
+func (s *LocalStorage) SaveHarvestCondor(c *models.DBHarvestCondor) error {
+	return s.db.Save(c).Error
+}
+
+func (s *LocalStorage) UpdateHarvestCondor(condorID string, updates map[string]interface{}) error {
+	return s.db.Model(&models.DBHarvestCondor{}).
+		Where("condor_id = ?", condorID).
+		Updates(updates).Error
+}
+
+func (s *LocalStorage) GetHarvestCondorByID(condorID string) (*models.DBHarvestCondor, error) {
+	var c models.DBHarvestCondor
+	if err := s.db.Where("condor_id = ?", condorID).First(&c).Error; err != nil {
+		return nil, err
+	}
+	return &c, nil
+}
+
+func (s *LocalStorage) ListOpenHarvestCondors() []*models.DBHarvestCondor {
+	var condors []*models.DBHarvestCondor
+	s.db.Where("status = ?", "OPEN").Find(&condors)
+	return condors
+}
+
+// GetHarvestClosedPnL sums realized P&L for condors closed within [start, end].
+func (s *LocalStorage) GetHarvestClosedPnL(start, end time.Time) (float64, error) {
+	var total float64
+	err := s.db.Model(&models.DBHarvestCondor{}).
+		Where("status = ? AND closed_at >= ? AND closed_at <= ?", "CLOSED", start, end).
+		Select("COALESCE(SUM(realized_pnl), 0)").
+		Scan(&total).Error
+	return total, err
+}
+
+// ── Harvest IV snapshot storage ────────────────────────────────────
+
+func (s *LocalStorage) SaveHarvestIVSnapshot(snap *models.DBHarvestIVSnapshot) error {
+	return s.db.Save(snap).Error
+}
+
+func (s *LocalStorage) GetHarvestIVSnapshots(underlying string, start, end time.Time) ([]*models.DBHarvestIVSnapshot, error) {
+	var snaps []*models.DBHarvestIVSnapshot
+	err := s.db.Where("underlying = ? AND date >= ? AND date <= ?", underlying, start, end).
+		Order("date ASC").
+		Find(&snaps).Error
+	return snaps, err
 }
 
 // Close closes the database connection
