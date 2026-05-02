@@ -19,7 +19,8 @@ type harvestStateStore interface {
 }
 
 // fomc2026Dates holds scheduled FOMC announcement times (UTC).
-// Source: federalreserve.gov calendar. Update quarterly.
+// Source: https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm
+// Verify all dates quarterly. Retrieved: 2026-05-01.
 var fomc2026Dates = []time.Time{
 	time.Date(2026, 1, 28, 19, 0, 0, 0, time.UTC),  // Jan 28, 2026 2pm ET
 	time.Date(2026, 3, 18, 18, 0, 0, 0, time.UTC),  // Mar 18, 2026
@@ -105,7 +106,7 @@ func (s *HarvestService) GetFOMCStatus() *FOMCStatusResponse {
 	resp := &FOMCStatusResponse{}
 
 	for _, fomc := range s.fomcDates {
-		if fomc.After(now) {
+		if !fomc.Before(now) {
 			resp.NextFOMCDate = fomc
 			resp.HoursUntilFOMC = fomc.Sub(now).Hours()
 			break

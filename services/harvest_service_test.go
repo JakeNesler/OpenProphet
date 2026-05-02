@@ -1,6 +1,7 @@
 package services
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
@@ -72,32 +73,62 @@ func TestThirdFriday(t *testing.T) {
 	f2 := thirdFriday(2026, time.January)
 	expected2 := time.Date(2026, time.January, 16, 0, 0, 0, 0, time.UTC)
 	if !f2.Equal(expected2) {
-		t.Errorf("expected %s, got %s", expected2.Format("2006-01-02"), f2.Format("2026-01-02"))
+		t.Errorf("expected %s, got %s", expected2.Format("2006-01-02"), f2.Format("2006-01-02"))
 	}
 }
 
 // ── Circuit breaker tests ───────────────────────────────────────────
 
-func TestCircuitBreakerThreshold(t *testing.T) {
-	portfolioValue := 100000.0
-	threshold := portfolioValue * 0.05 // -5%
-	if threshold != 5000.0 {
-		t.Errorf("expected threshold=5000, got %.2f", threshold)
+func TestGetState_CircuitBreakerActivates(t *testing.T) {
+	store := &stubHarvestStore{pnl: -5001.0} // -5.001% of 100k
+	svc := NewHarvestService(store)
+	state, err := svc.GetState(100000.0)
+	if err != nil {
+		t.Fatalf("GetState failed: %v", err)
+	}
+	if !state.CircuitBreakerActive {
+		t.Errorf("expected circuit breaker active at -5.001%% P&L")
+	}
+}
+
+func TestGetState_CircuitBreakerInactive(t *testing.T) {
+	store := &stubHarvestStore{pnl: -4999.0} // -4.999% of 100k
+	svc := NewHarvestService(store)
+	state, err := svc.GetState(100000.0)
+	if err != nil {
+		t.Fatalf("GetState failed: %v", err)
+	}
+	if state.CircuitBreakerActive {
+		t.Errorf("expected circuit breaker inactive at -4.999%% P&L")
+	}
+}
+
+func TestGetState_ZeroPortfolioValue_NoCircuitBreaker(t *testing.T) {
+	store := &stubHarvestStore{pnl: -10000.0}
+	svc := NewHarvestService(store)
+	state, err := svc.GetState(0)
+	if err != nil {
+		t.Fatalf("GetState failed: %v", err)
+	}
+	if state.CircuitBreakerActive {
+		t.Errorf("expected no circuit breaker when portfolioValue=0")
 	}
 }
 
 // ── Harvest state aggregation tests ────────────────────────────────
 
 type stubHarvestStore struct {
-	condors []*models.DBHarvestCondor
-	pnl     float64
+	condors    []*models.DBHarvestCondor
+	pnl        float64
+	condorErr  error
+	pnlErr     error
 }
 
 func (s *stubHarvestStore) ListOpenHarvestCondors() ([]*models.DBHarvestCondor, error) {
-	return s.condors, nil
+	return s.condors, s.condorErr
 }
 func (s *stubHarvestStore) GetHarvestClosedPnL(start, end time.Time) (float64, error) {
-	return s.pnl, nil
+	return s.pnl, s.pnlErr
 }
 func (s *stubHarvestStore) SaveHarvestCondor(c *models.DBHarvestCondor) error { return nil }
 func (s *stubHarvestStore) UpdateHarvestCondor(condorID string, updates map[string]interface{}) error {
@@ -105,6 +136,24 @@ func (s *stubHarvestStore) UpdateHarvestCondor(condorID string, updates map[stri
 }
 func (s *stubHarvestStore) GetHarvestCondorByID(condorID string) (*models.DBHarvestCondor, error) {
 	return nil, nil
+}
+
+func TestGetState_CondorStoreError(t *testing.T) {
+	store := &stubHarvestStore{condorErr: fmt.Errorf("DB down")}
+	svc := NewHarvestService(store)
+	_, err := svc.GetState(100000.0)
+	if err == nil {
+		t.Fatal("expected error from condor store, got nil")
+	}
+}
+
+func TestGetState_PnLStoreError(t *testing.T) {
+	store := &stubHarvestStore{pnlErr: fmt.Errorf("DB down")}
+	svc := NewHarvestService(store)
+	_, err := svc.GetState(100000.0)
+	if err == nil {
+		t.Fatal("expected error from PnL store, got nil")
+	}
 }
 
 func TestCalcDeployedBuyingPower(t *testing.T) {
