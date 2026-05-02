@@ -13,8 +13,9 @@ import (
 type AgentSource string
 
 const (
-	AgentMain  AgentSource = "main"
-	AgentPenny AgentSource = "penny"
+	AgentMain    AgentSource = "main"
+	AgentPenny   AgentSource = "penny"
+	AgentHarvest AgentSource = "harvest"
 )
 
 const agentTagPrefix = "agent:"
@@ -73,8 +74,9 @@ func NewTradeGuard(positions positionLister, ts interfaces.TradingService, cfg T
 		tradingService: ts,
 		cfg:            cfg,
 		rawSymbols: map[AgentSource]map[string]struct{}{
-			AgentMain:  {},
-			AgentPenny: {},
+			AgentMain:    {},
+			AgentPenny:   {},
+			AgentHarvest: {},
 		},
 		logger: logger,
 	}
