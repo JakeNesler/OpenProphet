@@ -1271,6 +1271,80 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         },
       },
       {
+        name: 'get_harvest_state',
+        description: 'Get current Harvest agent state: open condors, circuit breaker status, trailing 30-day P&L, and deployed buying power. Check this at the start of every heartbeat before evaluating entries or exits.',
+        inputSchema: { type: 'object', properties: {} },
+      },
+      {
+        name: 'get_harvest_ivr',
+        description: 'Get IV Rank (IVR) for a Harvest universe underlying. Requires current_iv from the options chain (ATM implied volatility). Returns IVR on 0-100 scale; -1 means insufficient history. Gate: only enter if IVR >= 30.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            symbol: { type: 'string', description: 'Underlying symbol (SPY, QQQ, IWM, GLD, TLT)' },
+            current_iv: { type: 'number', description: 'Current ATM implied volatility (e.g. 0.185 for 18.5%)' },
+          },
+          required: ['symbol', 'current_iv'],
+        },
+      },
+      {
+        name: 'get_harvest_expirations',
+        description: 'Get the next qualifying monthly expiration (third Friday) in the [35, 55] DTE band for a given underlying. Returns expiration_date and dte. If no qualifying expiration exists, returns a 404-style error.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            symbol: { type: 'string', description: 'Underlying symbol (SPY, QQQ, IWM, GLD, TLT)' },
+          },
+          required: ['symbol'],
+        },
+      },
+      {
+        name: 'get_harvest_fomc',
+        description: 'Check FOMC blackout status. If is_blackout=true, do NOT open new positions. Blackout window = 24 hours before scheduled FOMC announcement.',
+        inputSchema: { type: 'object', properties: {} },
+      },
+      {
+        name: 'open_iron_condor',
+        description: 'Open a new iron condor position for a Harvest underlying. Provide the four OCC option symbols, strikes, contract count, and credit. Returns condor_id, order_id, and status.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            underlying:             { type: 'string', description: 'Underlying symbol (SPY, QQQ, IWM, GLD, TLT)' },
+            expiration_date:        { type: 'string', description: 'Expiration date YYYY-MM-DD (third Friday of target month)' },
+            short_put_symbol:       { type: 'string', description: 'OCC symbol for short put (sell to open)' },
+            short_put_strike:       { type: 'number', description: 'Short put strike price' },
+            long_put_symbol:        { type: 'string', description: 'OCC symbol for long put (buy to open, wing_width below short put)' },
+            long_put_strike:        { type: 'number', description: 'Long put strike price' },
+            short_call_symbol:      { type: 'string', description: 'OCC symbol for short call (sell to open)' },
+            short_call_strike:      { type: 'number', description: 'Short call strike price' },
+            long_call_symbol:       { type: 'string', description: 'OCC symbol for long call (buy to open, wing_width above short call)' },
+            long_call_strike:       { type: 'number', description: 'Long call strike price' },
+            contracts:              { type: 'number', description: 'Number of iron condors (from sizing formula: floor(portfolio * 0.015 / (wing_width * 100)))' },
+            wing_width:             { type: 'number', description: 'Wing width in dollars (SPY=5, QQQ=5, IWM=2, GLD=2, TLT=1)' },
+            credit_per_contract:    { type: 'number', description: 'Net credit received per contract at entry (mid-price of the 4-leg combo)' },
+            ivr_at_entry:           { type: 'number', description: 'IV rank at time of entry (for analysis)' },
+            portfolio_value_at_entry: { type: 'number', description: 'Total portfolio equity at time of entry (snapshot)' },
+            overlap_log:            { type: 'string', description: 'JSON string: [{agent, underlying, direction, contracts, dte}] — other agents with positions in this underlying' },
+          },
+          required: ['underlying', 'expiration_date', 'short_put_symbol', 'short_put_strike', 'long_put_symbol', 'long_put_strike', 'short_call_symbol', 'short_call_strike', 'long_call_symbol', 'long_call_strike', 'contracts', 'wing_width', 'credit_per_contract'],
+        },
+      },
+      {
+        name: 'close_iron_condor',
+        description: 'Close an existing Harvest iron condor position. Provide the condor_id from open_iron_condor, the order type, and the current cost-to-close per contract. Returns close_order_id and realized_pnl.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            condor_id:         { type: 'string', description: 'The condor_id returned when the position was opened' },
+            order_type:        { type: 'string', enum: ['limit', 'market', 'marketable_limit'], description: 'limit: patient fill at mid; marketable_limit: mid+$0.20 for faster fill; market: immediate at any price' },
+            limit_price:       { type: 'number', description: 'Net debit limit price (required for limit and marketable_limit order types)' },
+            close_reason:      { type: 'string', enum: ['profit_target', 'loss_stop', 'time_exit', 'manual'], description: 'Reason for closing (used in exit logging)' },
+            cost_per_contract: { type: 'number', description: 'Current mid-price cost to close the condor per contract (for P&L calculation)' },
+          },
+          required: ['condor_id', 'order_type', 'close_reason', 'cost_per_contract'],
+        },
+      },
+      {
         name: 'get_penny_signal_detail',
         description: 'Get the full signal breakdown for a specific ticker: technical score, regulatory score, social score, dominant signal type, event descriptions, and last update time.',
         inputSchema: {
@@ -1315,7 +1389,7 @@ const AGENT_QUERY = { sandboxId: OPENPROPHET_SANDBOX_ID };
 const agentAxios = axios.create({
   headers: AGENT_AUTH_TOKEN ? { Authorization: `Bearer ${AGENT_AUTH_TOKEN}` } : {},
 });
-const ORDER_TOOLS = ['place_buy_order', 'place_sell_order', 'place_options_order', 'place_managed_position', 'close_managed_position'];
+const ORDER_TOOLS = ['place_buy_order', 'place_sell_order', 'place_options_order', 'place_managed_position', 'close_managed_position', 'open_iron_condor', 'close_iron_condor'];
 
 async function enforcePermissions(toolName, args) {
   let perms;
@@ -1342,6 +1416,10 @@ async function enforcePermissions(toolName, args) {
     // Options check
     if (!perms.allowOptions && (toolName === 'place_options_order' || (args.symbol && args.symbol.length > 10))) {
       throw new Error('Options trading is DISABLED by permissions.');
+    }
+    // Harvest condor check
+    if ((toolName === 'open_iron_condor' || toolName === 'close_iron_condor') && !perms.allowOptions) {
+      throw new Error('Options trading is DISABLED by permissions. Cannot open/close iron condors.');
     }
     // Stock check
     if (!perms.allowStocks && (toolName === 'place_buy_order' || toolName === 'place_sell_order')) {
@@ -2674,6 +2752,60 @@ Worst Trade: ${stats.worst_result_pct.toFixed(1)}% ($${stats.worst_result_dollar
         return {
           content: [{ type: 'text', text: JSON.stringify(data, null, 2) }],
         };
+      }
+
+      case 'get_harvest_state': {
+        const data = await callTradingBot('/harvest/state');
+        return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
+      }
+
+      case 'get_harvest_ivr': {
+        const data = await callTradingBot(`/harvest/ivr/${args.symbol}?current_iv=${args.current_iv}`);
+        return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
+      }
+
+      case 'get_harvest_expirations': {
+        const data = await callTradingBot(`/harvest/expirations/${args.symbol}`);
+        return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
+      }
+
+      case 'get_harvest_fomc': {
+        const data = await callTradingBot('/harvest/fomc');
+        return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
+      }
+
+      case 'open_iron_condor': {
+        await enforcePermissions('open_iron_condor', args);
+        const data = await callTradingBot('/harvest/condors', 'POST', {
+          underlying:               args.underlying,
+          expiration_date:          args.expiration_date,
+          short_put_symbol:         args.short_put_symbol,
+          short_put_strike:         args.short_put_strike,
+          long_put_symbol:          args.long_put_symbol,
+          long_put_strike:          args.long_put_strike,
+          short_call_symbol:        args.short_call_symbol,
+          short_call_strike:        args.short_call_strike,
+          long_call_symbol:         args.long_call_symbol,
+          long_call_strike:         args.long_call_strike,
+          contracts:                args.contracts,
+          wing_width:               args.wing_width,
+          credit_per_contract:      args.credit_per_contract,
+          ivr_at_entry:             args.ivr_at_entry || 0,
+          portfolio_value_at_entry: args.portfolio_value_at_entry || 0,
+          overlap_log:              args.overlap_log || '[]',
+        });
+        return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
+      }
+
+      case 'close_iron_condor': {
+        await enforcePermissions('close_iron_condor', args);
+        const data = await callTradingBot(`/harvest/condors/${args.condor_id}/close`, 'POST', {
+          order_type:        args.order_type,
+          limit_price:       args.limit_price || 0,
+          close_reason:      args.close_reason,
+          cost_per_contract: args.cost_per_contract,
+        });
+        return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
       }
 
       case 'get_penny_universe': {
