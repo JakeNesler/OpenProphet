@@ -25,9 +25,16 @@ Add field:
 OperatorEmail string // used in SEC EDGAR User-Agent header; set via OPERATOR_EMAIL env var
 ```
 
-Default value: `"mtzuoo.pennyprophet.bot@gmail.com"` (overridable via env so the codebase is reusable without touching source).
+**No default.** If `OPERATOR_EMAIL` is empty or unset at startup, service initialization must fail fast:
 
-The env var name is `OPERATOR_EMAIL`. The service instantiation passes the resolved value to `NewSECEdgarService`.
+```
+fatal: OPERATOR_EMAIL must be set — SEC EDGAR policy requires a real contact
+address in the User-Agent header. Set OPERATOR_EMAIL=your@email.com in .env.
+```
+
+A fallback or placeholder address is not acceptable: the SEC may contact this address, and an invalid address can result in IP-level blocking. Operators set this once in their `.env` file. The reference deployment uses `mtzuoo.pennyprophet.bot@gmail.com`.
+
+The env var name is `OPERATOR_EMAIL`. The resolved value is passed to `NewSECEdgarService`.
 
 ---
 
@@ -117,7 +124,7 @@ Universe size estimate drops to 150–350 symbols from 200–500.
 
 ### 3.2 `PennyScreenerService` — decay anchor and `DecayEntry` migration
 
-**Decay anchor definition:** "most recent meaningful score change" — the timestamp at which the computed technical score last changed by more than 10% relative to its prior value. This prevents scores that have been flat for hours from appearing fresh.
+**Decay anchor definition:** "most recent meaningful score change" — the timestamp at which the computed technical score last changed meaningfully. This prevents scores that have been flat for hours from appearing fresh.
 
 ```go
 type TechnicalEntry struct {
@@ -128,7 +135,13 @@ type TechnicalEntry struct {
 }
 ```
 
-`GetTechnicalScore` calls `entry.Entry.EffectiveScore()` and returns the context string. The score stored in `Entry.BaseScore` is the raw computed value at the time of last significant change. When a new scan produces a score within 10% of the stored base, `EventTime` is not updated (decay continues from the original event). When the score changes by >10%, `BaseScore` and `EventTime` both update.
+**Meaningful-change rule (precise):**
+
+1. **First observation** (no prior entry for this ticker): always meaningful. Set `BaseScore = computed`, `EventTime = now`.
+2. **Prior `BaseScore == 0` and new computed score > 0**: always meaningful. Set `BaseScore = computed`, `EventTime = now`. (Avoids division-by-zero in the relative-change check and correctly treats any signal emergence as fresh.)
+3. **Otherwise**: meaningful if `|new_score − prior.BaseScore| / prior.BaseScore > 0.10` (10% relative change). If meaningful: update both `BaseScore` and `EventTime`. If not meaningful: keep existing `BaseScore` and `EventTime`; decay continues from the original anchor.
+
+`GetTechnicalScore` calls `entry.Entry.EffectiveScore()` and returns the context string.
 
 This makes the decay semantics correct: a volume spike that then stabilizes decays from when the spike occurred, not from the last scan cycle.
 
@@ -142,7 +155,9 @@ fmt.Sprintf("PennyProphet Trading Bot %s", s.operatorEmail)
 
 `operatorEmail` is passed in via `NewSECEdgarService(universe, httpClient, operatorEmail string)`. Applied to all outbound HTTP requests the service makes (EDGAR atom feed, GlobeNewswire RSS, PR Newswire).
 
-**Decay anchor:** EDGAR filings carry an `<updated>` timestamp in the Atom feed; use that as `EventTime`. GlobeNewswire items carry `<pubDate>` in RSS; use that. If either is unparseable, fall back to `time.Now()` with a warning log: `"decay anchor: observation fallback used"`.
+**Decay anchor:** EDGAR filings carry an `<updated>` timestamp in the Atom feed; use that as `EventTime`. GlobeNewswire items carry `<pubDate>` in RSS; use that. If either is unparseable, fall back to `time.Now()` and log a warning: `"decay anchor: observation fallback used for {ticker}"`.
+
+**Fallback rate logging:** The service tracks a per-poll `fallbackCount` counter (reset each poll cycle). If `fallbackCount / totalEvents > 0.50` in any cycle, elevate from Warn to Error: `"decay anchor fallback rate {pct}% — EDGAR feed format may have changed"`. This lets operators detect systematic timestamp parsing failures before they cause silently-stale scores.
 
 **New-event handling (max rule):** `upsertEntry` is refactored to implement the max rule from Revision 2:
 
@@ -150,12 +165,14 @@ fmt.Sprintf("PennyProphet Trading Bot %s", s.operatorEmail)
 When a new event of the same signal type arrives:
   existing_decayed = existing.Entry.EffectiveScore()
   if new_base > existing_decayed:
-      replace entry (new BaseScore, new EventTime)
+      replace entry (new BaseScore = new_base, new EventTime = event timestamp)
   else:
-      discard new event (decayed old score is still higher)
+      discard new event — preserve old entry including its original anchor
 ```
 
 This prevents accumulation while preserving the freshest signal value. The prior implementation kept the highest base score unconditionally; the new implementation compares against the *decayed* prior score.
+
+**Anchor-reset clarification:** The Revision 2 source document states "the new event's timestamp becomes the new decay anchor for that signal type" as a general rule, but Example 1 in that document contradicts this for the case where the decayed old score is still higher ("anchor still 9:00am"). The examples govern: anchor resets only when `new_base > existing_decayed`. When the old decayed score remains higher, the old anchor is preserved.
 
 **Migrate internal `regulatoryEntry`** to use `DecayEntry`. The `EventDesc` field is kept alongside it.
 
@@ -177,10 +194,20 @@ The ring index for a given time `t` is `(t.Unix() / 1800) % 336`. On each Reddit
 
 **Scoring (Revision 3):**
 
-```go
-mentionVelocityPts = min(mentionsLast30min / baselineMentionsPer30min, 2.0) * 5   // max 10
-sentimentPts = ...                                                                   // max 10 (unchanged)
-SocialScore = mentionVelocityPts + sentimentPts                                      // max 20
+```
+mentionVelocityPts = min(mentionsLast30min / baselineMentionsPer30min, 2.0) × 5
+  max: 10 pts
+
+sentimentPts (StockTwits only — Reddit posts count toward mentions but have no
+reliable sentiment tagging and do not contribute to bullishRatio):
+  bullishRatio = bullish_tagged / (bullish_tagged + bearish_tagged)
+  if bullishRatio > 0.65:   sentimentPts = 10
+  elif bullishRatio > 0.55: sentimentPts = 5
+  else:                     sentimentPts = 0
+  max: 10 pts
+  if no tagged messages: sentimentPts = 0
+
+SocialScore = mentionVelocityPts + sentimentPts   (max 20)
 ```
 
 **Universe-exit cleanup (approved refinement):** After each Reddit poll, prune the baseline map to remove tickers no longer present in the current universe snapshot. Call `s.universe.GetTickers()` and build a ticker set; delete baseline entries for absent tickers. This prevents unbounded memory growth from tickers that briefly entered the universe and left.
@@ -246,12 +273,14 @@ type BracketBlacklistEntry struct {
 ```
 
 Methods on `PennySignalAggregator`:
-- `AddToBlacklist(ticker, reason string)` — adds entry, logs it
-- `RemoveFromBlacklist(ticker string)` — operator override
-- `ClearBlacklist()` — operator override (full reset)
+- `AddToBlacklist(ticker, reason string)` — adds entry, logs it; called by the backend order handler (see below)
+- `RemoveFromBlacklist(ticker string)` — operator override via HTTP endpoint
+- `ClearBlacklist()` — operator override via HTTP endpoint (full reset)
 - `IsBlacklisted(ticker string) bool` — checked inside `GetCandidates` before returning
 
 Blacklist is session-scoped: cleared on `NewPennySignalAggregator`. `GetCandidates` filters blacklisted tickers silently (they simply don't appear in results).
+
+**Blacklist insertion ownership:** `AddToBlacklist` is called by the Go HTTP handler for `place_managed_position`, not by the agent. When the Alpaca order API returns a bracket-order rejection, the handler calls `aggregator.AddToBlacklist(ticker, brokerErrorMessage)` before returning the error response to the MCP server. The agent receives an order-failure response and skips the trade per its rules — it does not call any blacklist tool and has no awareness of the blacklist mechanism. This keeps the agent's rule surface simple: "if place_managed_position fails, skip the trade and log."
 
 **v2 note:** If additional broker-state feedback filters are needed (e.g., symbols with rejected market orders, symbols flagged by broker risk engine), the blacklist should be refactored into a dedicated `BrokerStateService` so all broker-feedback state is co-located. The embedded approach is appropriate for v1 where only bracket rejection needs tracking.
 
@@ -274,13 +303,21 @@ Both return `{"status": "ok"}` on success. These are operator-facing only — no
 
 Update the `sbx_a788a4e3` (PennyTrades) sandbox `permissions` block (Revision 6):
 
-| Field | Old | New |
+| Field | Current config | New |
 |---|---|---|
-| `maxPositionPct` | 12 | 8 |
-| `maxDeployedPct` | 80 | 60 |
-| `allowOptions` | true | false |
-| `maxToolRoundsPerBeat` | 25 | 18 |
+| `allowLiveTrading` | true | true (unchanged) |
+| `allowStocks` | true | true (unchanged) |
+| `allowOptions` | true | **false** |
+| `allow0DTE` | false | false (unchanged) |
+| `maxPositionPct` | 12 | **8** |
+| `maxDeployedPct` | 80 | **60** |
+| `maxDailyLoss` | 5 | 5 (unchanged) |
 | `maxOpenPositions` | 10 | 10 (unchanged) |
+| `maxOrderValue` | 0 | 0 (unchanged) |
+| `requireConfirmation` | false | false (unchanged) |
+| `maxToolRoundsPerBeat` | 25 | **18** |
+
+**maxOpenPositions reconciliation:** The deployed sandbox config already has `maxOpenPositions: 10`. The original design spec and `TRADING_RULES_PENNY.md` incorrectly documented 12. No config change is needed here; §7.2 corrects the trading rules text from 12 → 10 to match the config that was already deployed.
 
 ---
 
@@ -346,9 +383,9 @@ After the Bracket Order Requirement section:
 BRACKET ORDER BLACKLIST
 
 If place_managed_position rejects a symbol due to bracket-order limitations,
-that symbol is automatically blacklisted for the remainder of the session.
-The agent does not need to track this — blacklisted tickers will not appear
-in get_penny_candidates results during the session.
+that symbol is automatically blacklisted for the remainder of the session by
+the backend — the agent does not need to take any action. Blacklisted tickers
+will not appear in get_penny_candidates results during the session.
 
 The agent must NEVER attempt to enter a position without a bracket order,
 even if a candidate appears highly attractive. If place_managed_position
