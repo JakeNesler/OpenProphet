@@ -99,9 +99,17 @@ If no strikes found in [0.12, 0.20] tolerance → skip, log "no strikes in delta
 Wing widths by underlying: SPY=$5, QQQ=$5, IWM=$2, GLD=$2, TLT=$1.
 Long put strike = short_put_strike - wing_width.
 Long call strike = short_call_strike + wing_width.
-Find the OCC symbols for long_put and long_call in the chain.
 
-Calculate mid-price credit = (short_put_mid + short_call_mid - long_put_mid - long_call_mid).
+Call `get_options_chain` with `{ symbol: underlying, expiration: <date>, type: "put" }` (no delta filter).
+Find the contract where strike = long_put_strike. Record: long_put_symbol, long_put_mid.
+
+Call `get_options_chain` with `{ symbol: underlying, expiration: <date>, type: "call" }` (no delta filter).
+Find the contract where strike = long_call_strike. Record: long_call_symbol, long_call_mid.
+
+If either long-leg contract is not found → skip, log "long leg not found for {underlying}".
+
+Mid-price for any option = (bid + ask) / 2 from the chain response.
+Calculate net credit = (short_put_mid + short_call_mid) - (long_put_mid + long_call_mid).
 If credit < wing_width / 3 → skip, log "credit {value} below minimum for {underlying}".
 If credit < 0.30 → skip, log "credit sanity check failed for {underlying}".
 
@@ -109,8 +117,9 @@ Call `get_account` to get current portfolio_value.
 Contracts = floor(portfolio_value × 0.015 / (wing_width × 100)).
 If contracts = 0 → skip, log "portfolio too small for {underlying}".
 
-Verify: adding this position keeps `deployed_buying_power_pct` + (wing_width × contracts × 100 / portfolio_value × 100) ≤ 12.0.
-If not → skip.
+Verify: adding this position keeps total deployed ≤ 12.0%.
+  new_bp_pct = (wing_width × contracts × 100) / portfolio_value × 100
+  if (deployed_buying_power_pct + new_bp_pct) > 12.0 → skip.
 
 Call `open_iron_condor` with the full condor specification.
 
