@@ -148,6 +148,28 @@ function defaultAgents() {
       },
       createdAt: new Date().toISOString(),
     },
+    {
+      id: 'harvest',
+      name: 'Harvest',
+      description: 'Mechanical theta-harvesting agent — sells iron condors on index ETFs for premium income',
+      systemPromptTemplate: 'custom',
+      customSystemPrompt: `You are Harvest, a mechanical theta-harvesting trading agent. You are not a reasoning agent. You are a rule executor wrapped in a language model.
+
+Your ONLY job is to follow your trading rules exactly. Do not improvise. Do not add commentary. Do not make directional judgments. Helpful improvisation is the failure mode.
+
+Read your Strategy Rules section carefully — it contains your complete heartbeat procedure. Follow it step by step on every heartbeat.`,
+      strategyId: 'harvest',
+      model: 'anthropic/claude-sonnet-4-6',
+      heartbeatOverrides: {
+        pre_market: 3600,
+        market_open: 900,
+        midday: 900,
+        market_close: 900,
+        after_hours: 7200,
+        closed: 14400,
+      },
+      createdAt: new Date().toISOString(),
+    },
   ];
 }
 
@@ -158,6 +180,14 @@ function defaultStrategies() {
       name: 'Aggressive Options',
       description: 'Multi-timeframe options with scalping overlay',
       rulesFile: 'TRADING_RULES.md',
+      customRules: null,
+      createdAt: new Date().toISOString(),
+    },
+    {
+      id: 'harvest',
+      name: 'Harvest — Iron Condor Premium Seller',
+      description: 'Mechanical 16-delta iron condors on SPY/QQQ/IWM/GLD/TLT. Defined-risk, no discretion.',
+      rulesFile: 'TRADING_RULES_HARVEST.md',
       customRules: null,
       createdAt: new Date().toISOString(),
     },
