@@ -861,17 +861,36 @@ ${userBlock}`;
         const resultStr = typeof toolOutput === 'string' ? toolOutput : JSON.stringify(toolOutput);
         this.state.emit('tool_result', { name: toolName, result: resultStr.substring(0, 500), beat: beatNum });
 
-        // Track trades
-        if (fullToolName.includes('buy') || fullToolName.includes('sell') || fullToolName.includes('order') || fullToolName.includes('managed')) {
+        // Track trades — only actual order placement/closure tools, not read queries
+        const isNewOrder = fullToolName.includes('place_buy_order') ||
+                           fullToolName.includes('place_sell_order') ||
+                           fullToolName.includes('place_options_order') ||
+                           fullToolName.includes('place_managed');
+        const isClose    = fullToolName.includes('close_managed');
+        if (isNewOrder || isClose) {
           this.state.stats.trades++;
-          this.state.addTrade({
-            type: 'order',
-            tool: toolName,
-            symbol: toolInput.symbol || '??',
-            side: toolInput.side || (fullToolName.includes('buy') ? 'buy' : 'sell'),
-            quantity: toolInput.quantity || toolInput.qty,
-            price: toolInput.limit_price,
-          });
+          if (isClose) {
+            const posId = toolInput.position_id || toolInput.id || '';
+            this.state.addTrade({
+              type: 'close',
+              tool: toolName,
+              symbol: posId ? posId.substring(0, 12) : '??',
+              side: 'close',
+              quantity: null,
+              price: null,
+            });
+          } else {
+            const qty = toolInput.quantity || toolInput.qty;
+            const dollars = toolInput.allocation_dollars;
+            this.state.addTrade({
+              type: 'order',
+              tool: toolName,
+              symbol: toolInput.symbol || toolInput.underlying || '??',
+              side: toolInput.side || (fullToolName.includes('buy') ? 'buy' : 'sell'),
+              quantity: qty || (dollars ? `$${dollars}` : null),
+              price: toolInput.limit_price,
+            });
+          }
         }
         break;
       }

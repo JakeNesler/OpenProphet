@@ -891,6 +891,7 @@
     .trade-card .trade-side { font-size: 11px; font-weight: 700; text-transform: uppercase; }
     .trade-card .trade-side.buy { color: var(--success); }
     .trade-card .trade-side.sell { color: var(--error); }
+    .trade-card .trade-side.close { color: var(--warning); }
     .trade-card .trade-details { font-size: 12px; color: var(--ink-muted); margin-top: 4px; }
     .trade-card .trade-time { font-size: 11px; color: var(--ink-faint); font-family: 'IBM Plex Mono', monospace; }
 
@@ -1886,7 +1887,7 @@ async function startAgent() {
   btn.textContent = 'Starting...'; btn.disabled = true;
   try {
     const sid = getEffectiveSandboxId();
-    if (!sid) { log('No sandbox selected', 'error'); return; }
+    if (!sid || sid === '_manager') { btn.textContent = 'Start'; btn.disabled = false; return; }
     const r = await fetch('/api/sandboxes/' + encodeURIComponent(sid) + '/start', {method:'POST'});
     const d = await r.json();
     if (!d.ok && d.error) {
@@ -1904,7 +1905,7 @@ async function startAgent() {
 }
 async function stopAgent() {
   const sid = getEffectiveSandboxId();
-  if (!sid) return;
+  if (!sid || sid === '_manager') return;
   if (!confirm('Stop the agent on this account?')) return;
   logToSandbox(sid, `<div class="log-entry warning"><span class="time">${fmtTime()}</span>Stopping agent...</div>`);
   await fetch('/api/sandboxes/' + encodeURIComponent(sid) + '/stop', {method:'POST'});
@@ -1913,14 +1914,14 @@ async function stopAgent() {
 }
 async function pauseAgent() {
   const sid = getEffectiveSandboxId();
-  if (!sid) return;
+  if (!sid || sid === '_manager') return;
   logToSandbox(sid, `<div class="log-entry warning"><span class="time">${fmtTime()}</span>Pausing agent...</div>`);
   await fetch('/api/sandboxes/' + encodeURIComponent(sid) + '/pause', {method:'POST'});
   checkHealth(); renderSandboxTabs(); refreshSandboxButtons();
 }
 async function resumeAgent() {
   const sid = getEffectiveSandboxId();
-  if (!sid) return;
+  if (!sid || sid === '_manager') return;
   logToSandbox(sid, `<div class="log-entry success"><span class="time">${fmtTime()}</span>Resuming agent...</div>`);
   await fetch('/api/sandboxes/' + encodeURIComponent(sid) + '/resume', {method:'POST'});
   checkHealth(); renderSandboxTabs(); refreshSandboxButtons();
@@ -1978,8 +1979,11 @@ async function openChatSession(sessionId, accountId) {
     historyState.chatMessages = data.messages || [];
     renderHistorySessions();
     renderHistoryTranscript(data.session, data.messages || []);
+    document.getElementById('history-session-title').scrollIntoView({ behavior: 'smooth', block: 'start' });
   } catch (e) {
     log('Chat load failed: ' + e.message, 'error');
+    const el = document.getElementById('history-transcript');
+    if (el) el.innerHTML = '<div class="log-entry error"><span class="time">--:--:--</span>Failed to load session: ' + esc(e.message) + '</div>';
   }
 }
 
@@ -2108,7 +2112,7 @@ async function refreshPortfolio() {
       const pv = '$' + Number(acc.PortfolioValue||acc.portfolio_value||0).toLocaleString('en-US',{minimumFractionDigits:2});
       const cv = '$' + Number(acc.Cash||acc.cash||0).toLocaleString('en-US',{minimumFractionDigits:2});
       const bv = '$' + Number(acc.BuyingPower||acc.buying_power||0).toLocaleString('en-US',{minimumFractionDigits:2});
-      const pnl = Number(acc.Equity||acc.equity||0) - Number(acc.LastEquity||acc.last_equity||0);
+      const pnl = Number(acc.PortfolioValue||acc.portfolio_value||acc.Equity||acc.equity||0) - Number(acc.LastEquity||acc.last_equity||0);
       const pnlStr = (pnl>=0?'+':'') + '$' + pnl.toLocaleString('en-US',{minimumFractionDigits:2});
       const cls = pnl>=0? 'positive' : 'negative';
       // Update legacy static IDs
@@ -2174,7 +2178,8 @@ function addTradeCard(trade) {
   const card = document.createElement('div');
   card.className = 'trade-card';
   const t = trade.timestamp ? new Date(trade.timestamp).toLocaleTimeString('en-US',{hour12:false}) : '--';
-  card.innerHTML = '<div class="trade-header"><span class="trade-symbol">' + esc(trade.symbol||'??') + '</span><span class="trade-side ' + (trade.side||'') + '">' + esc(trade.side||'--') + '</span></div><div class="trade-details">' + esc(trade.tool||'') + (trade.quantity?' | Qty: '+trade.quantity:'') + (trade.price?' | $'+trade.price:'') + '</div><div class="trade-time">' + t + '</div>';
+  const qtyLabel = trade.quantity != null ? (String(trade.quantity).startsWith('$') ? ' | ' + trade.quantity : ' | Qty: ' + trade.quantity) : '';
+  card.innerHTML = '<div class="trade-header"><span class="trade-symbol">' + esc(trade.symbol||'??') + '</span><span class="trade-side ' + esc(trade.side||'') + '">' + esc((trade.side||'--').toUpperCase()) + '</span></div><div class="trade-details">' + esc(trade.tool||'') + qtyLabel + (trade.price?' | $'+trade.price:'') + '</div><div class="trade-time">' + t + '</div>';
   feed.insertBefore(card, feed.firstChild);
   while(feed.children.length > 50) feed.removeChild(feed.lastChild);
 }

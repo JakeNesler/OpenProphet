@@ -393,7 +393,7 @@ function scheduleDailySummaryForHarness(targetHarness) {
         const client = getGoClientForSandbox(sandboxId);
         if (!client) return;
         const { data: acc } = await client.get('/api/v1/account');
-        const equity = Number(acc.Equity || acc.equity || 0);
+        const equity = Number(acc.PortfolioValue || acc.portfolio_value || acc.Equity || acc.equity || 0);
         const lastEquity = Number(acc.LastEquity || acc.last_equity || 0);
         const pnl = equity - lastEquity;
         const pnlPct = lastEquity ? ((pnl / lastEquity) * 100).toFixed(2) : '0.00';
@@ -456,7 +456,7 @@ function bindOperationalHooks(targetHarness) {
       const client = getGoClientForSandbox(sandboxId);
       if (!client) return;
       const { data: acc } = await client.get('/api/v1/account', { timeout: 3000 });
-      const equity = Number(acc.Equity || acc.equity || 0);
+      const equity = Number(acc.PortfolioValue || acc.portfolio_value || acc.Equity || acc.equity || 0);
       const lastEquity = Number(acc.LastEquity || acc.last_equity || 0);
       if (!lastEquity) return;
       const dayLossPct = ((equity - lastEquity) / lastEquity) * 100;
