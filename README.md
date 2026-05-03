@@ -1,16 +1,26 @@
 # OpenProphet
 
+*As featured in [Bloomberg](https://www.bloomberg.com/news/articles/2026-05-01/ai-tools-for-stock-trading-put-up-mixed-results)*
+
 **Autonomous AI trading agent with a web dashboard, MCP tools, and a Go trading backend**
 
 ---
 
-## **[Premium Setup Guide & Templates at openprophet.io](https://openprophet.io)**
+> **Heads up:** This is a research project. I have many other things going on and OpenProphet is not at the top of my backlog. The paid templates and guides at [openprophet.io](https://openprophet.io) exist mainly to handle the volume of setup questions I get from non-technical users — they're not a sign this is a polished commercial product.
+>
+> For questions about licensing, commercial use, or acquisition, please email me directly at [jakenesler@gmail.com](mailto:jakenesler@gmail.com).
+>
+> There are no crypto projects, memecoins, or other projects officially related to this besides my other repo, [Claude_Prophet](https://github.com/JakeNesler/claude_prophet).
+
+---
+
+## [Premium Setup Guide & Templates → openprophet.io](https://openprophet.io)
 
 **Not comfortable with Git or self-hosting?** A paid service is available at **[openprophet.io](https://openprophet.io)** that handles the full setup for you. It also includes:
 
 - **Step-by-step setup guides** for every skill level
-- **Agent templates** -- pre-built personas with tuned prompts and configurations
-- **Strategy templates** -- ready-to-use trading strategies with rules and risk parameters
+- **Agent templates** — pre-built personas with tuned prompts and configurations
+- **Strategy templates** — ready-to-use trading strategies with rules and risk parameters
 
 ---
 
