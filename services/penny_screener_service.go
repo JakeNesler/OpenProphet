@@ -24,8 +24,11 @@ type TechnicalEntry struct {
 // updateAnchor applies the meaningful-change rule: anchor resets only on first observation,
 // prior-zero-to-positive, or >10% relative change.
 func updateAnchor(newScore, priorBase float64, priorAnchor time.Time, hasPrior bool) (base float64, anchor time.Time) {
-	if !hasPrior || priorBase == 0 {
+	if !hasPrior || (priorBase == 0 && newScore > 0) {
 		return newScore, time.Now()
+	}
+	if priorBase == 0 {
+		return priorBase, priorAnchor
 	}
 	relChange := math.Abs(newScore-priorBase) / priorBase
 	if relChange > 0.10 {
@@ -122,6 +125,7 @@ func (s *PennyScreenerService) scanChunk(tickers []string) {
 
 func (s *PennyScreenerService) computeEntry(ticker string, snap *alpacaMarket.Snapshot) TechnicalEntry {
 	if snap == nil || snap.DailyBar == nil || snap.PrevDailyBar == nil {
+		// On a transient data outage, preserve the prior signal so decay continues from the existing anchor.
 		prior, hasPrior := s.scores[ticker]
 		if hasPrior {
 			return prior

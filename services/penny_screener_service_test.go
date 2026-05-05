@@ -27,13 +27,21 @@ func TestPennyScreenerService_ComputeEntry_HighVolume(t *testing.T) {
 			Volume: 100_000,
 		},
 	}
+	beforeCall := time.Now()
 	entry := svc.computeEntry("TEST", snap)
+	afterCall := time.Now()
 	// volumeRatio=5.0 → volScore=20; gapPct=10% → gapScore=10; distFromHigh=(6.0-5.9)/6.0≈0.0167 ≤ 0.02 → breakoutScore=10; total=40
 	if entry.Entry.BaseScore != 40.0 {
 		t.Errorf("expected score=40.0 for high-volume entry, got %f", entry.Entry.BaseScore)
 	}
 	if entry.VolumeRatio != 5.0 {
 		t.Errorf("expected volumeRatio=5.0, got %f", entry.VolumeRatio)
+	}
+	if entry.Entry.HalfLifeHrs != 2.0 {
+		t.Errorf("expected HalfLifeHrs=2.0, got %f", entry.Entry.HalfLifeHrs)
+	}
+	if entry.Entry.EventTime.Before(beforeCall) || entry.Entry.EventTime.After(afterCall) {
+		t.Errorf("expected EventTime within call window, got %v", entry.Entry.EventTime)
 	}
 }
 
@@ -128,5 +136,20 @@ func TestUpdateAnchor_ExactlyTenPercent_PreservesAnchor(t *testing.T) {
 	}
 	if !anchor.Equal(oldAnchor) {
 		t.Error("exactly 10%: expected anchor preserved (not strictly > 10%)")
+	}
+}
+
+func TestPennyScreenerService_ComputeEntry_NilSnapshot_PreservesPrior(t *testing.T) {
+	svc := &PennyScreenerService{scores: make(map[string]TechnicalEntry), logger: newTestLogger()}
+	anchor := time.Now().Add(-1 * time.Hour)
+	svc.scores["TEST"] = TechnicalEntry{
+		Entry: DecayEntry{BaseScore: 30.0, EventTime: anchor, HalfLifeHrs: 2.0},
+	}
+	entry := svc.computeEntry("TEST", nil)
+	if entry.Entry.BaseScore != 30.0 {
+		t.Errorf("nil snapshot with prior: expected BaseScore=30.0 preserved, got %f", entry.Entry.BaseScore)
+	}
+	if !entry.Entry.EventTime.Equal(anchor) {
+		t.Errorf("nil snapshot with prior: expected EventTime preserved, got %v", entry.Entry.EventTime)
 	}
 }
