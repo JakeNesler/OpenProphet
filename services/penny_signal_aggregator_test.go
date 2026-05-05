@@ -20,7 +20,7 @@ func aggregatorForTest(techScore, regScore, socScore float64, tickers []string) 
 		logger: logrus.New(),
 	}
 	for _, t := range tickers {
-		screener.scores[t] = TechnicalEntry{Score: techScore, UpdatedAt: time.Now()}
+		screener.scores[t] = TechnicalEntry{Entry: DecayEntry{BaseScore: techScore, EventTime: time.Now(), HalfLifeHrs: 2.0}}
 	}
 
 	edgar := &SECEdgarService{

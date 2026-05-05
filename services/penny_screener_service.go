@@ -15,11 +15,23 @@ const technicalRefreshInterval = 60 * time.Second
 
 // TechnicalEntry holds computed technical signal data for one symbol.
 type TechnicalEntry struct {
-	Score       float64
+	Entry       DecayEntry // BaseScore=computed score, EventTime=last meaningful change, HalfLifeHrs=2.0
 	VolumeRatio float64
 	GapPct      float64
 	Context     string
-	UpdatedAt   time.Time
+}
+
+// updateAnchor applies the meaningful-change rule: anchor resets only on first observation,
+// prior-zero-to-positive, or >10% relative change.
+func updateAnchor(newScore, priorBase float64, priorAnchor time.Time, hasPrior bool) (base float64, anchor time.Time) {
+	if !hasPrior || priorBase == 0 {
+		return newScore, time.Now()
+	}
+	relChange := math.Abs(newScore-priorBase) / priorBase
+	if relChange > 0.10 {
+		return newScore, time.Now()
+	}
+	return priorBase, priorAnchor
 }
 
 // PennyScreenerService computes technical signals via Alpaca market data.
@@ -64,7 +76,7 @@ func (s *PennyScreenerService) Start(ctx context.Context) {
 }
 
 // GetTechnicalScore returns the current technical score and context for a ticker.
-// Applies 2-hour half-life decay via scoreWithDecay.
+// Decay is applied via DecayEntry.EffectiveScore using a 2-hour half-life.
 func (s *PennyScreenerService) GetTechnicalScore(ticker string) (float64, string) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -72,8 +84,7 @@ func (s *PennyScreenerService) GetTechnicalScore(ticker string) (float64, string
 	if !ok {
 		return 0, ""
 	}
-	score := scoreWithDecay(e.Score, e.UpdatedAt, 2.0)
-	return score, e.Context
+	return e.Entry.EffectiveScore(), e.Context
 }
 
 func (s *PennyScreenerService) scan() {
@@ -111,39 +122,46 @@ func (s *PennyScreenerService) scanChunk(tickers []string) {
 
 func (s *PennyScreenerService) computeEntry(ticker string, snap *alpacaMarket.Snapshot) TechnicalEntry {
 	if snap == nil || snap.DailyBar == nil || snap.PrevDailyBar == nil {
-		return TechnicalEntry{UpdatedAt: time.Now()}
+		prior, hasPrior := s.scores[ticker]
+		if hasPrior {
+			return prior
+		}
+		return TechnicalEntry{Entry: DecayEntry{HalfLifeHrs: 2.0, EventTime: time.Now()}}
 	}
 
 	var volumeRatio float64
 	if snap.PrevDailyBar.Volume > 0 {
 		volumeRatio = float64(snap.DailyBar.Volume) / float64(snap.PrevDailyBar.Volume)
 	}
-
 	var gapPct float64
 	if snap.PrevDailyBar.Close > 0 {
 		gapPct = (snap.DailyBar.Open - snap.PrevDailyBar.Close) / snap.PrevDailyBar.Close * 100
 	}
-
 	var breakoutBonus float64
 	if snap.DailyBar.High > 0 {
-		distFromHigh := (snap.DailyBar.High - snap.DailyBar.Close) / snap.DailyBar.High
-		if distFromHigh <= 0.02 {
+		if (snap.DailyBar.High-snap.DailyBar.Close)/snap.DailyBar.High <= 0.02 {
 			breakoutBonus = 1.0
 		}
 	}
 
-	volScore := math.Min(volumeRatio/5.0, 1.0) * 20.0
-	gapScore := math.Min(math.Abs(gapPct)/5.0, 1.0) * 10.0
-	breakoutScore := breakoutBonus * 10.0
-	total := volScore + gapScore + breakoutScore
-
+	total := math.Min(volumeRatio/5.0, 1.0)*20.0 +
+		math.Min(math.Abs(gapPct)/5.0, 1.0)*10.0 +
+		breakoutBonus*10.0
 	signalSummary := fmt.Sprintf("vol_ratio=%.1fx gap=%.1f%% breakout_near=%v", volumeRatio, gapPct, breakoutBonus > 0)
-	entry := TechnicalEntry{
-		Score:       total,
+
+	prior, hasPrior := s.scores[ticker]
+	var priorBase float64
+	var priorAnchor time.Time
+	if hasPrior {
+		priorBase = prior.Entry.BaseScore
+		priorAnchor = prior.Entry.EventTime
+	}
+	base, anchor := updateAnchor(total, priorBase, priorAnchor, hasPrior)
+
+	return TechnicalEntry{
+		Entry:       DecayEntry{BaseScore: base, EventTime: anchor, HalfLifeHrs: 2.0},
 		VolumeRatio: volumeRatio,
 		GapPct:      gapPct,
 		Context:     signalSummary,
-		UpdatedAt:   time.Now(),
 	}
-	return entry
 }
