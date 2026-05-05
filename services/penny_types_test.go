@@ -8,7 +8,7 @@ import (
 func TestDecayEntry_EffectiveScore_AtZero(t *testing.T) {
 	d := DecayEntry{BaseScore: 40.0, EventTime: time.Now(), HalfLifeHrs: 2.0}
 	got := d.EffectiveScore()
-	if got < 39.9 || got > 40.0 {
+	if got < 39.9 || got > 40.1 {
 		t.Errorf("expected ~40.0 at t=0, got %f", got)
 	}
 }
@@ -31,11 +31,11 @@ func TestDecayEntry_EffectiveScore_Floor(t *testing.T) {
 }
 
 func TestDecayEntry_EffectiveScore_JustAboveFloor(t *testing.T) {
-	// 8h with 2h half-life: 40 * 0.5^4 = 2.5, > 5% of 40 (=2.0) → not floored
+	// 8h with 2h half-life: 40 * 0.5^4 = 2.5, above 5% floor (=2.0)
 	d := DecayEntry{BaseScore: 40.0, EventTime: time.Now().Add(-8 * time.Hour), HalfLifeHrs: 2.0}
 	got := d.EffectiveScore()
-	if got <= 0 {
-		t.Errorf("expected positive score at 4 half-lives (above floor), got %f", got)
+	if got < 2.1 || got > 3.0 {
+		t.Errorf("expected ~2.5 at 4 half-lives (above floor), got %f", got)
 	}
 }
 

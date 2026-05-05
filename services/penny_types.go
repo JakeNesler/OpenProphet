@@ -15,7 +15,7 @@ type DecayEntry struct {
 
 // EffectiveScore returns the decayed score, floored to zero below 5% of base.
 func (d DecayEntry) EffectiveScore() float64 {
-	if d.BaseScore == 0 {
+	if d.BaseScore <= 0 || d.HalfLifeHrs <= 0 {
 		return 0
 	}
 	elapsed := time.Since(d.EventTime).Hours()
