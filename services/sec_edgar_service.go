@@ -17,32 +17,33 @@ const regulatoryRefreshInterval = 30 * time.Second
 const regulatoryHalfLifeHours = 24.0
 
 type regulatoryEntry struct {
-	BaseScore  float64
-	DetectedAt time.Time
-	EventDesc  string
+	Entry     DecayEntry
+	EventDesc string
 }
 
 // SECEdgarService polls EDGAR and GlobeNewswire for regulatory events.
 type SECEdgarService struct {
-	httpClient *http.Client
-	universe   *PennyUniverseService
-	mu         sync.RWMutex
-	entries    map[string]regulatoryEntry // keyed by ticker; keeps highest-score entry
-	logger     *logrus.Logger
+	httpClient    *http.Client
+	universe      *PennyUniverseService
+	operatorEmail string
+	mu            sync.RWMutex
+	entries       map[string]regulatoryEntry // keyed by ticker; keeps highest-score entry
+	logger        *logrus.Logger
 }
 
 // NewSECEdgarService creates the service.
-func NewSECEdgarService(universe *PennyUniverseService, httpClient *http.Client) *SECEdgarService {
+func NewSECEdgarService(universe *PennyUniverseService, httpClient *http.Client, operatorEmail string) *SECEdgarService {
 	if httpClient == nil {
 		httpClient = &http.Client{Timeout: 30 * time.Second}
 	}
 	logger := logrus.New()
 	logger.SetFormatter(&logrus.TextFormatter{FullTimestamp: true})
 	return &SECEdgarService{
-		httpClient: httpClient,
-		universe:   universe,
-		entries:    make(map[string]regulatoryEntry),
-		logger:     logger,
+		httpClient:    httpClient,
+		universe:      universe,
+		operatorEmail: operatorEmail,
+		entries:       make(map[string]regulatoryEntry),
+		logger:        logger,
 	}
 }
 
@@ -69,13 +70,19 @@ func (s *SECEdgarService) GetRegulatoryScore(ticker string) (float64, string) {
 	if !ok {
 		return 0, ""
 	}
-	return scoreWithDecay(e.BaseScore, e.DetectedAt, regulatoryHalfLifeHours), e.EventDesc
+	return e.Entry.EffectiveScore(), e.EventDesc
 }
 
 func (s *SECEdgarService) poll() {
 	tickers := tickerSet(s.universe.GetTickers())
-	s.pollEdgar(tickers)
-	s.pollGlobeNewswire(tickers)
+	fb1, tot1 := s.pollEdgar(tickers)
+	fb2, tot2 := s.pollGlobeNewswire(tickers)
+	total := tot1 + tot2
+	fallbacks := fb1 + fb2
+	if total > 0 && float64(fallbacks)/float64(total) > 0.50 {
+		s.logger.WithField("pct", fmt.Sprintf("%.0f%%", float64(fallbacks)/float64(total)*100)).
+			Error("decay anchor fallback rate — EDGAR feed format may have changed")
+	}
 }
 
 // atomFeed is a minimal ATOM feed parser.
@@ -103,6 +110,7 @@ type rssChannel struct {
 type rssItem struct {
 	Title       string `xml:"title"`
 	Description string `xml:"description"`
+	PubDate     string `xml:"pubDate"`
 }
 
 func (s *SECEdgarService) fetchAtom(url string) ([]atomEntry, error) {
@@ -110,7 +118,7 @@ func (s *SECEdgarService) fetchAtom(url string) ([]atomEntry, error) {
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("User-Agent", "ProphetBot/1.0 (contact: trading@example.com)")
+	req.Header.Set("User-Agent", fmt.Sprintf("PennyProphet Trading Bot %s", s.operatorEmail))
 	resp, err := s.httpClient.Do(req)
 	if err != nil {
 		return nil, err
@@ -133,7 +141,7 @@ func (s *SECEdgarService) fetchRSS(url string) ([]rssItem, error) {
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("User-Agent", "ProphetBot/1.0 (contact: trading@example.com)")
+	req.Header.Set("User-Agent", fmt.Sprintf("PennyProphet Trading Bot %s", s.operatorEmail))
 	resp, err := s.httpClient.Do(req)
 	if err != nil {
 		return nil, err
@@ -151,54 +159,94 @@ func (s *SECEdgarService) fetchRSS(url string) ([]rssItem, error) {
 	return feed.Channel.Items, nil
 }
 
-func (s *SECEdgarService) pollEdgar(tickers map[string]bool) {
+func parseAtomDate(s string) (time.Time, bool) {
+	t, err := time.Parse(time.RFC3339, s)
+	if err != nil {
+		return time.Now(), true
+	}
+	return t, false
+}
+
+func parseRSSDate(s string) (time.Time, bool) {
+	t, err := time.Parse(time.RFC1123Z, s)
+	if err != nil {
+		t, err = time.Parse("Mon, 02 Jan 2006 15:04:05 MST", s)
+		if err != nil {
+			return time.Now(), true
+		}
+	}
+	return t, false
+}
+
+func (s *SECEdgarService) pollEdgar(tickers map[string]bool) (fallbacks, total int) {
 	const edgarURL = "https://www.sec.gov/cgi-bin/browse-edgar?action=getcurrent&type=8-K&dateb=&owner=include&count=40&search_text=&output=atom"
 	entries, err := s.fetchAtom(edgarURL)
 	if err != nil {
 		s.logger.WithError(err).Warn("SECEdgarService: EDGAR poll failed")
-		return
+		return 0, 0
 	}
-	now := time.Now()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, entry := range entries {
+		total++
 		ticker := extractTickerFromTitle(entry.Title, tickers)
 		if ticker == "" {
 			continue
 		}
-		desc := fmt.Sprintf("8-K filed %s", now.Format("15:04 ET"))
-		s.upsertEntry(ticker, 40.0, now, desc)
+		eventTime, isFallback := parseAtomDate(entry.Updated)
+		if isFallback {
+			fallbacks++
+			s.logger.Warnf("decay anchor: observation fallback used for %s", ticker)
+		}
+		desc := fmt.Sprintf("8-K filed %s", eventTime.Format("15:04 ET"))
+		s.upsertEntry(ticker, 40.0, eventTime, desc)
 	}
+	return fallbacks, total
 }
 
-func (s *SECEdgarService) pollGlobeNewswire(tickers map[string]bool) {
+func (s *SECEdgarService) pollGlobeNewswire(tickers map[string]bool) (fallbacks, total int) {
 	const gnwURL = "https://www.globenewswire.com/RssFeed/country/US"
 	items, err := s.fetchRSS(gnwURL)
 	if err != nil {
 		s.logger.WithError(err).Warn("SECEdgarService: GlobeNewswire poll failed")
-		return
+		return 0, 0
 	}
-	now := time.Now()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, item := range items {
 		combined := strings.ToUpper(item.Title + " " + item.Description)
 		for ticker := range tickers {
 			if strings.Contains(combined, ticker) {
-				desc := fmt.Sprintf("PR wire mention %s", now.Format("15:04 ET"))
-				s.upsertEntry(ticker, 25.0, now, desc)
+				total++
+				eventTime, isFallback := parseRSSDate(item.PubDate)
+				if isFallback {
+					fallbacks++
+					s.logger.Warnf("decay anchor: observation fallback used for %s", ticker)
+				}
+				desc := fmt.Sprintf("PR wire mention %s", eventTime.Format("15:04 ET"))
+				s.upsertEntry(ticker, 25.0, eventTime, desc)
 			}
 		}
 	}
+	return fallbacks, total
 }
 
-// upsertEntry keeps the highest-score entry per ticker.
-// On equal scores, the existing entry is kept (preserving its earlier DetectedAt for decay purposes).
+// upsertEntry implements the max rule: replace only when new_base > existing decayed score.
 // Caller must hold mu.Lock.
-func (s *SECEdgarService) upsertEntry(ticker string, base float64, now time.Time, desc string) {
+func (s *SECEdgarService) upsertEntry(ticker string, newBase float64, eventTime time.Time, desc string) {
 	existing, ok := s.entries[ticker]
-	if !ok || base > existing.BaseScore {
-		s.entries[ticker] = regulatoryEntry{BaseScore: base, DetectedAt: now, EventDesc: desc}
+	if !ok {
+		s.entries[ticker] = regulatoryEntry{
+			Entry:     DecayEntry{BaseScore: newBase, EventTime: eventTime, HalfLifeHrs: regulatoryHalfLifeHours},
+			EventDesc: desc,
+		}
+		return
+	}
+	if newBase > existing.Entry.EffectiveScore() {
+		s.entries[ticker] = regulatoryEntry{
+			Entry:     DecayEntry{BaseScore: newBase, EventTime: eventTime, HalfLifeHrs: regulatoryHalfLifeHours},
+			EventDesc: desc,
+		}
 	}
 }
 

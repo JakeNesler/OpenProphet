@@ -28,7 +28,10 @@ func aggregatorForTest(techScore, regScore, socScore float64, tickers []string) 
 		logger:  logrus.New(),
 	}
 	for _, t := range tickers {
-		edgar.entries[t] = regulatoryEntry{BaseScore: regScore, DetectedAt: time.Now(), EventDesc: "test event"}
+		edgar.entries[t] = regulatoryEntry{
+			Entry:     DecayEntry{BaseScore: regScore, EventTime: time.Now(), HalfLifeHrs: regulatoryHalfLifeHours},
+			EventDesc: "test event",
+		}
 	}
 
 	social := &SocialSignalService{
