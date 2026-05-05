@@ -39,7 +39,11 @@ func aggregatorForTest(techScore, regScore, socScore float64, tickers []string) 
 		logger:  logrus.New(),
 	}
 	for _, t := range tickers {
-		social.entries[t] = socialEntry{BaseScore: socScore, MentionPts: socScore, DetectedAt: time.Now(), Context: "test ctx"}
+		social.entries[t] = socialEntry{
+			Entry:      DecayEntry{BaseScore: socScore, EventTime: time.Now(), HalfLifeHrs: socialHalfLifeHours},
+			MentionPts: socScore,
+			Context:    "test ctx",
+		}
 	}
 
 	return NewPennySignalAggregator(universe, screener, edgar, social)
