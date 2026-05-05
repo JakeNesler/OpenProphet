@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 )
 
 func TestPennyUniverseService_Filter(t *testing.T) {
@@ -16,7 +17,7 @@ func TestPennyUniverseService_Filter(t *testing.T) {
 		{Symbol: "LOWVOL", CompanyName: "Low Vol", MarketCap: 100_000_000, Price: 5.0, Volume: 1_000, ExchangeShortName: "NASDAQ"},
 		{Symbol: "OTC", CompanyName: "OTC Co", MarketCap: 100_000_000, Price: 5.0, Volume: 100_000, ExchangeShortName: "OTC"},
 	}
-	svc := NewPennyUniverseService("dummy", nil)
+	svc := NewPennyUniverseService("dummy", "", "", "", nil)
 	result := svc.filter(items)
 	if len(result) != 1 {
 		t.Fatalf("expected 1 symbol, got %d", len(result))
@@ -37,11 +38,77 @@ func TestPennyUniverseService_HTTPRefresh(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	svc := NewPennyUniverseService("testkey", ts.Client())
+	svc := NewPennyUniverseService("testkey", "", "", "", ts.Client())
 	svc.fmpBaseURL = ts.URL
 	svc.refresh()
 	tickers := svc.GetTickers()
 	if len(tickers) != 1 || tickers[0] != "TEST" {
 		t.Errorf("expected [TEST], got %v", tickers)
+	}
+}
+
+func TestUniverseFilter_ADV_BoundaryExcluded(t *testing.T) {
+	svc := NewPennyUniverseService("key", "", "", "", nil)
+	items := []fmpScreenerItem{
+		{Symbol: "LOW", CompanyName: "Low Vol", MarketCap: 100_000_000, Price: 5.0,
+			Volume: 99_999, ExchangeShortName: "NASDAQ"}, // dollarVol = 499,995 < 500,000
+	}
+	result := svc.filter(items)
+	if len(result) != 0 {
+		t.Errorf("expected ADV $499,995 to be excluded, got %d results", len(result))
+	}
+}
+
+func TestUniverseFilter_ADV_BoundaryIncluded(t *testing.T) {
+	svc := NewPennyUniverseService("key", "", "", "", nil)
+	items := []fmpScreenerItem{
+		{Symbol: "OK", CompanyName: "OK Vol", MarketCap: 100_000_000, Price: 5.0,
+			Volume: 100_000, ExchangeShortName: "NASDAQ"}, // dollarVol = 500,000 >= 500,000
+	}
+	result := svc.filter(items)
+	if len(result) != 1 {
+		t.Errorf("expected ADV $500,000 to be included, got %d results", len(result))
+	}
+}
+
+func TestIsMarketHours_Open(t *testing.T) {
+	loc, _ := time.LoadLocation("America/New_York")
+	cal := AlpacaCalendarEntry{Date: "2026-05-02", Open: "09:30", Close: "16:00", SessionOpen: "0400", SessionClose: "2000"}
+	// 10:00 ET on the calendar date
+	now := time.Date(2026, 5, 2, 10, 0, 0, 0, loc)
+	got := isMarketHours(now, cal)
+	if got != "open" {
+		t.Errorf("expected 'open' at 10:00 ET, got %q", got)
+	}
+}
+
+func TestIsMarketHours_PreMarket(t *testing.T) {
+	loc, _ := time.LoadLocation("America/New_York")
+	cal := AlpacaCalendarEntry{Date: "2026-05-02", Open: "09:30", Close: "16:00", SessionOpen: "0400", SessionClose: "2000"}
+	now := time.Date(2026, 5, 2, 6, 0, 0, 0, loc)
+	got := isMarketHours(now, cal)
+	if got != "pre" {
+		t.Errorf("expected 'pre' at 06:00 ET, got %q", got)
+	}
+}
+
+func TestIsMarketHours_AfterHours(t *testing.T) {
+	loc, _ := time.LoadLocation("America/New_York")
+	cal := AlpacaCalendarEntry{Date: "2026-05-02", Open: "09:30", Close: "16:00", SessionOpen: "0400", SessionClose: "2000"}
+	now := time.Date(2026, 5, 2, 17, 0, 0, 0, loc)
+	got := isMarketHours(now, cal)
+	if got != "after" {
+		t.Errorf("expected 'after' at 17:00 ET, got %q", got)
+	}
+}
+
+func TestIsMarketHours_Closed_WrongDate(t *testing.T) {
+	loc, _ := time.LoadLocation("America/New_York")
+	cal := AlpacaCalendarEntry{Date: "2026-05-02", Open: "09:30", Close: "16:00", SessionOpen: "0400", SessionClose: "2000"}
+	// next day
+	now := time.Date(2026, 5, 3, 10, 0, 0, 0, loc)
+	got := isMarketHours(now, cal)
+	if got != "closed" {
+		t.Errorf("expected 'closed' for date mismatch, got %q", got)
 	}
 }
