@@ -196,7 +196,8 @@ func (s *SECEdgarService) pollEdgar(tickers map[string]bool) (fallbacks, total i
 		eventTime, isFallback := parseAtomDate(entry.Updated)
 		if isFallback {
 			fallbacks++
-			s.logger.Warnf("decay anchor: observation fallback used for %s", ticker)
+			s.logger.Warnf("decay anchor: skipping %s — unparseable timestamp %q", ticker, entry.Updated)
+			continue
 		}
 		desc := fmt.Sprintf("8-K filed %s", eventTime.Format("15:04 ET"))
 		s.upsertEntry(ticker, 40.0, eventTime, desc)
@@ -214,18 +215,20 @@ func (s *SECEdgarService) pollGlobeNewswire(tickers map[string]bool) (fallbacks,
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, item := range items {
+		eventTime, isFallback := parseRSSDate(item.PubDate)
 		combined := strings.ToUpper(item.Title + " " + item.Description)
 		for ticker := range tickers {
-			if strings.Contains(combined, ticker) {
-				total++
-				eventTime, isFallback := parseRSSDate(item.PubDate)
-				if isFallback {
-					fallbacks++
-					s.logger.Warnf("decay anchor: observation fallback used for %s", ticker)
-				}
-				desc := fmt.Sprintf("PR wire mention %s", eventTime.Format("15:04 ET"))
-				s.upsertEntry(ticker, 25.0, eventTime, desc)
+			if !strings.Contains(combined, ticker) {
+				continue
 			}
+			total++
+			if isFallback {
+				fallbacks++
+				s.logger.Warnf("decay anchor: skipping %s — unparseable timestamp %q", ticker, item.PubDate)
+				continue
+			}
+			desc := fmt.Sprintf("PR wire mention %s", eventTime.Format("15:04 ET"))
+			s.upsertEntry(ticker, 25.0, eventTime, desc)
 		}
 	}
 	return fallbacks, total

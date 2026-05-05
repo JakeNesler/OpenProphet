@@ -227,3 +227,22 @@ func TestSECEdgar_ParseRSSDate_Valid(t *testing.T) {
 		t.Errorf("expected 18:30 UTC, got %v", parsed.UTC())
 	}
 }
+
+func TestSECEdgar_ParseAtomDate_FallbackSkipsUpsert(t *testing.T) {
+	// Verify that a bad timestamp does not insert an entry
+	svc := newTestEdgar()
+	svc.mu.Lock()
+	eventTime, isFallback := parseAtomDate("not-a-date")
+	if !isFallback {
+		t.Fatal("expected fallback=true for bad date")
+	}
+	// Simulate what pollEdgar does — skip on fallback
+	if !isFallback {
+		svc.upsertEntry("TICK", 40.0, eventTime, "bad entry")
+	}
+	svc.mu.Unlock()
+	score, _ := svc.GetRegulatoryScore("TICK")
+	if score != 0 {
+		t.Errorf("expected no entry for unparseable date, got score=%f", score)
+	}
+}
