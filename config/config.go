@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"strconv"
 
@@ -19,6 +20,7 @@ type Config struct {
 	EnableLogging     bool
 	LogLevel          string
 	DataRetentionDays int
+	OperatorEmail     string // SEC EDGAR User-Agent contact; set via OPERATOR_EMAIL env var
 
 	// Trade guard limits
 	PennyMaxCapitalPct      float64 // fraction of portfolio, e.g. 0.20
@@ -48,8 +50,13 @@ func Load() error {
 		PennyMaxCapitalPct:      parseFloat(getEnvOrDefault("PENNY_MAX_CAPITAL_PCT", "0.20")),
 		PennyMaxPositionDollars: parseFloat(getEnvOrDefault("PENNY_MAX_POSITION_DOLLARS", "500")),
 		MaxDailyLossPct:         parseFloat(getEnvOrDefault("MAX_DAILY_LOSS_PCT", "5")),
+
+		OperatorEmail: os.Getenv("OPERATOR_EMAIL"),
 	}
 
+	if AppConfig.OperatorEmail == "" {
+		return fmt.Errorf("OPERATOR_EMAIL must be set — SEC EDGAR policy requires a real contact address in the User-Agent header. Set OPERATOR_EMAIL=your@email.com in .env")
+	}
 	return nil
 }
 
