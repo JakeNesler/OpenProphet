@@ -112,3 +112,43 @@ func TestIsMarketHours_Closed_WrongDate(t *testing.T) {
 		t.Errorf("expected 'closed' for date mismatch, got %q", got)
 	}
 }
+
+func TestIsMarketHours_ExactOpen(t *testing.T) {
+	loc, _ := time.LoadLocation("America/New_York")
+	cal := AlpacaCalendarEntry{Date: "2026-05-02", Open: "09:30", Close: "16:00", SessionOpen: "0400", SessionClose: "2000"}
+	now := time.Date(2026, 5, 2, 9, 30, 0, 0, loc)
+	got := isMarketHours(now, cal)
+	if got != "open" {
+		t.Errorf("expected 'open' at exactly 09:30:00, got %q", got)
+	}
+}
+
+func TestIsMarketHours_ExactClose(t *testing.T) {
+	loc, _ := time.LoadLocation("America/New_York")
+	cal := AlpacaCalendarEntry{Date: "2026-05-02", Open: "09:30", Close: "16:00", SessionOpen: "0400", SessionClose: "2000"}
+	now := time.Date(2026, 5, 2, 16, 0, 0, 0, loc)
+	got := isMarketHours(now, cal)
+	if got != "after" {
+		t.Errorf("expected 'after' at exactly 16:00:00, got %q", got)
+	}
+}
+
+func TestIsMarketHours_ExactSessionClose(t *testing.T) {
+	loc, _ := time.LoadLocation("America/New_York")
+	cal := AlpacaCalendarEntry{Date: "2026-05-02", Open: "09:30", Close: "16:00", SessionOpen: "0400", SessionClose: "2000"}
+	now := time.Date(2026, 5, 2, 20, 0, 0, 0, loc)
+	got := isMarketHours(now, cal)
+	if got != "closed" {
+		t.Errorf("expected 'closed' at exactly 20:00:00 (session end), got %q", got)
+	}
+}
+
+func TestIsMarketHours_BeforeSessionOpen(t *testing.T) {
+	loc, _ := time.LoadLocation("America/New_York")
+	cal := AlpacaCalendarEntry{Date: "2026-05-02", Open: "09:30", Close: "16:00", SessionOpen: "0400", SessionClose: "2000"}
+	now := time.Date(2026, 5, 2, 3, 59, 0, 0, loc)
+	got := isMarketHours(now, cal)
+	if got != "closed" {
+		t.Errorf("expected 'closed' before session open, got %q", got)
+	}
+}

@@ -23,7 +23,10 @@ type AlpacaCalendarEntry struct {
 
 // isMarketHours returns "open", "pre", "after", or "closed" based on now vs the calendar entry.
 func isMarketHours(now time.Time, cal AlpacaCalendarEntry) string {
-	loc, _ := time.LoadLocation("America/New_York")
+	loc := nyLoc
+	if loc == nil {
+		loc = time.UTC
+	}
 	if cal.Date == "" {
 		return staticMarketPhase(now, loc)
 	}
@@ -42,13 +45,17 @@ func isMarketHours(now time.Time, cal AlpacaCalendarEntry) string {
 	sessOpen := parseTimeOnCalDate("1504", cal.SessionOpen, calDate, loc)
 	sessClose := parseTimeOnCalDate("1504", cal.SessionClose, calDate, loc)
 
-	if nowET.Before(sessOpen) || nowET.After(sessClose) {
+	if open.Equal(calDate) || close_.Equal(calDate) || sessOpen.Equal(calDate) || sessClose.Equal(calDate) {
+		return staticMarketPhase(now, loc)
+	}
+
+	if nowET.Before(sessOpen) || !nowET.Before(sessClose) {
 		return "closed"
 	}
 	if nowET.Before(open) {
 		return "pre"
 	}
-	if nowET.After(close_) {
+	if !nowET.Before(close_) {
 		return "after"
 	}
 	return "open"
@@ -72,11 +79,11 @@ func staticMarketPhase(now time.Time, loc *time.Location) string {
 	h, m, _ := nowET.Clock()
 	total := h*60 + m
 	switch {
-	case total < 4*60 || total > 20*60:
+	case total < 4*60 || total >= 20*60:
 		return "closed"
 	case total < 9*60+30:
 		return "pre"
-	case total > 16*60:
+	case total >= 16*60:
 		return "after"
 	default:
 		return "open"
@@ -219,6 +226,8 @@ var allowedExchanges = map[string]bool{
 	"AMEX":   true,
 }
 
+var nyLoc, _ = time.LoadLocation("America/New_York")
+
 func (s *PennyUniverseService) filter(items []fmpScreenerItem) []UniverseSymbol {
 	out := make([]UniverseSymbol, 0)
 	for _, item := range items {
@@ -249,8 +258,14 @@ func (s *PennyUniverseService) filter(items []fmpScreenerItem) []UniverseSymbol 
 
 func (s *PennyUniverseService) maybeRefreshCalendar(now time.Time) {
 	s.mu.RLock()
-	sameDay := !s.calDate.IsZero() && s.calDate.Year() == now.Year() &&
-		s.calDate.Month() == now.Month() && s.calDate.Day() == now.Day()
+	loc := nyLoc
+	if loc == nil {
+		loc = time.UTC
+	}
+	nowET := now.In(loc)
+	calET := s.calDate.In(loc)
+	sameDay := !s.calDate.IsZero() && calET.Year() == nowET.Year() &&
+		calET.Month() == nowET.Month() && calET.Day() == nowET.Day()
 	s.mu.RUnlock()
 	if sameDay {
 		return
