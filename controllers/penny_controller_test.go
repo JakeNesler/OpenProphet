@@ -64,15 +64,16 @@ func TestPennyController_GetCandidates_Empty(t *testing.T) {
 func aggregatorWithSeededCandidate() *services.PennySignalAggregator {
 	agg := emptyAggregator()
 	services.SeedCandidateForTest(agg, services.CandidateScore{
-		Ticker:           "ZZZZ",
-		CompositeScore:   72,
-		TechnicalScore:   30,
-		RegulatoryScore:  22,
-		SocialScore:      20,
-		DominantSignal:   "technical",
-		TechnicalContext: "RSI 72, volume 4.2x",
-		RegulatoryEvent:  "8-K filed 09:32 ET",
-		SocialContext:    "3.2x mention velocity, 71% bullish",
+		Ticker:            "ZZZZ",
+		CompositeScore:    72,
+		CompositeEligible: true,
+		TechnicalScore:    30,
+		RegulatoryScore:   22,
+		SocialScore:       20,
+		DominantSignal:    "technical",
+		TechnicalContext:  "RSI 72, volume 4.2x",
+		RegulatoryEvent:   "8-K filed 09:32 ET",
+		SocialContext:     "3.2x mention velocity, 71% bullish",
 	})
 	return agg
 }
