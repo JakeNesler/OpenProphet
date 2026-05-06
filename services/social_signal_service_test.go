@@ -3,97 +3,128 @@ package services
 import (
 	"testing"
 	"time"
-
-	"github.com/sirupsen/logrus"
 )
 
-func TestSocialSignalService_PruneWindow(t *testing.T) {
-	svc := &SocialSignalService{logger: logrus.New()}
+func bucketIdx(t time.Time) int {
+	return int(t.Unix()/1800) % 336
+}
+
+func TestMentionBaseline_Advance_AccumulatesInSameBucket(t *testing.T) {
+	bl := &mentionBaseline{firstSeen: time.Now().Add(-73 * time.Hour)}
 	now := time.Now()
-	svc.mentionWindow = []mentionRecord{
-		{Ticker: "OLD", Timestamp: now.Add(-40 * time.Minute)}, // older than 30m window
-		{Ticker: "NEW", Timestamp: now.Add(-10 * time.Minute)},
+	bl.lastBucket = bucketIdx(now)
+	bl.advance(now, 5)
+	bl.advance(now, 3)
+	if bl.total != 8 {
+		t.Errorf("expected total=8, got %d", bl.total)
 	}
-	svc.pruneWindow(now)
-	if len(svc.mentionWindow) != 1 || svc.mentionWindow[0].Ticker != "NEW" {
-		t.Errorf("expected [NEW] after pruning, got %v", svc.mentionWindow)
+	if bl.buckets[bucketIdx(now)] != 8 {
+		t.Errorf("expected current bucket=8, got %d", bl.buckets[bucketIdx(now)])
 	}
 }
 
-func TestSocialSignalService_RecomputeRedditScores(t *testing.T) {
+func TestMentionBaseline_Advance_PreservesCompletedBucket(t *testing.T) {
+	now := time.Now()
+	bucketA := bucketIdx(now)
+	bl := &mentionBaseline{firstSeen: now.Add(-73 * time.Hour)}
+	bl.lastBucket = bucketA
+	bl.advance(now, 10)
+	// total should be 10 from the completed advance
+	if bl.total != 10 {
+		t.Fatalf("expected total=10, got %d", bl.total)
+	}
+
+	// Advance to the next 30-min bucket
+	nextBucketTime := now.Add(31 * time.Minute)
+	bl.advance(nextBucketTime, 3)
+
+	// The completed bucket (A) must still contribute to total
+	if bl.buckets[bucketA] != 10 {
+		t.Errorf("completed bucket should be preserved; got buckets[A]=%d", bl.buckets[bucketA])
+	}
+	if bl.total != 13 {
+		t.Errorf("total should be 13 (10 from A + 3 from new bucket), got %d", bl.total)
+	}
+}
+
+func TestMentionBaseline_Advance_RecyclesStaleSlot(t *testing.T) {
+	now := time.Now()
+	currentIdx := bucketIdx(now)
+	bl := &mentionBaseline{firstSeen: now.Add(-200 * time.Hour)}
+
+	// Manually place stale data in currentIdx (simulating 7-day-old occupancy)
+	bl.buckets[currentIdx] = 7
+	bl.total = 7
+	// lastBucket is one slot before current (so advance triggers recycling of currentIdx)
+	bl.lastBucket = (currentIdx - 1 + 336) % 336
+
+	bl.advance(now, 3)
+
+	if bl.buckets[currentIdx] != 3 {
+		t.Errorf("recycled slot should hold only new count; got %d", bl.buckets[currentIdx])
+	}
+	if bl.total != 3 {
+		t.Errorf("stale 7-day data should be subtracted; expected total=3, got %d", bl.total)
+	}
+}
+
+func TestMentionBaseline_BaselinePer30min_Floor(t *testing.T) {
+	bl := &mentionBaseline{total: 0, firstSeen: time.Now().Add(-73 * time.Hour)}
+	got := bl.baselinePer30min()
+	if got != 0.5 {
+		t.Errorf("expected floor exactly 0.5 for zero total, got %f", got)
+	}
+}
+
+func TestMentionBaseline_BaselinePer30min_BelowFloor(t *testing.T) {
+	// total=10 / 336 ≈ 0.03 < 0.5 → floor applies
+	bl := &mentionBaseline{total: 10, firstSeen: time.Now().Add(-73 * time.Hour)}
+	got := bl.baselinePer30min()
+	if got != 0.5 {
+		t.Errorf("expected 0.5 floor for low total, got %f", got)
+	}
+}
+
+func TestSocialService_NewTicker_72hGuard(t *testing.T) {
 	svc := &SocialSignalService{
-		entries: make(map[string]socialEntry),
-		logger:  logrus.New(),
+		entries:   make(map[string]socialEntry),
+		baselines: make(map[string]*mentionBaseline),
+		logger:    newTestLogger(),
+		universe:  &PennyUniverseService{},
 	}
 	now := time.Now()
-	// 3 mentions of TICK, 1 of OTHER → velocity of TICK is higher
-	svc.mentionWindow = []mentionRecord{
-		{Ticker: "TICK", Timestamp: now},
-		{Ticker: "TICK", Timestamp: now},
-		{Ticker: "TICK", Timestamp: now},
-		{Ticker: "OTHER", Timestamp: now},
+	// Ticker first seen < 72h ago
+	counts := map[string]int{"NEW": 50}
+	svc.recomputeRedditScores(now, counts)
+
+	entry, ok := svc.entries["NEW"]
+	if !ok {
+		t.Fatal("expected entry for NEW")
 	}
-	svc.recomputeRedditScores(now)
-	tickScore := svc.entries["TICK"].BaseScore
-	otherScore := svc.entries["OTHER"].BaseScore
-	if tickScore <= otherScore {
-		t.Errorf("expected TICK score (%f) > OTHER score (%f)", tickScore, otherScore)
+	if entry.MentionPts != 0 {
+		t.Errorf("expected MentionPts=0 for new ticker (<72h), got %f", entry.MentionPts)
 	}
 }
 
-func TestSocialSignalService_GetSocialScore_Decay(t *testing.T) {
+func TestSocialService_UniverseExitCleanup(t *testing.T) {
+	universe := &PennyUniverseService{}
+	universe.universe = []UniverseSymbol{{Ticker: "KEEP"}}
 	svc := &SocialSignalService{
-		entries: make(map[string]socialEntry),
-		logger:  logrus.New(),
+		entries:   make(map[string]socialEntry),
+		baselines: make(map[string]*mentionBaseline),
+		logger:    newTestLogger(),
+		universe:  universe,
 	}
-	// 4-hour-old entry with 4h half-life → score should be ~half
-	svc.entries["STALE"] = socialEntry{BaseScore: 20.0, DetectedAt: time.Now().Add(-4 * time.Hour)}
-	got, _ := svc.GetSocialScore("STALE")
-	if got < 8 || got > 12 {
-		t.Errorf("expected ~10 at half-life, got %f", got)
-	}
-}
+	svc.baselines["KEEP"] = &mentionBaseline{firstSeen: time.Now().Add(-73 * time.Hour)}
+	svc.baselines["GONE"] = &mentionBaseline{firstSeen: time.Now().Add(-73 * time.Hour)}
 
-func TestMin64(t *testing.T) {
-	if min64(3, 5) != 3 {
-		t.Error("min64(3,5) should be 3")
-	}
-	if min64(5, 3) != 3 {
-		t.Error("min64(5,3) should be 3")
-	}
-}
-
-func TestSocialSignalService_SentimentPtsUseMentionPtsBase(t *testing.T) {
-	// Setup: 8 TICK mentions, 2 OTHER mentions → avg=5, TICK velocity=1.6 → mentionPts=8.0
-	// Pre-seed TICK with prior StockTwits sentiment (BaseScore=18 = 8 mention + 10 sentiment).
-	// After recompute, BaseScore should remain 18 (not compound to 28).
-	svc := &SocialSignalService{
-		entries: make(map[string]socialEntry),
-		logger:  logrus.New(),
-	}
 	now := time.Now()
-	svc.entries["TICK"] = socialEntry{
-		BaseScore:  18.0,
-		MentionPts: 8.0,
-		DetectedAt: now,
-		Context:    "mentions=8 velocity=1.6x st_bullish=70%",
+	svc.recomputeRedditScores(now, map[string]int{"KEEP": 5})
+
+	if _, ok := svc.baselines["GONE"]; ok {
+		t.Error("expected GONE removed from baselines after universe exit cleanup")
 	}
-	// 8 TICK + 2 OTHER: total=10, avg=5, TICK velocity=1.6, mentionPts=min64(0.8,1)*10=8
-	for i := 0; i < 8; i++ {
-		svc.mentionWindow = append(svc.mentionWindow, mentionRecord{Ticker: "TICK", Timestamp: now})
-	}
-	for i := 0; i < 2; i++ {
-		svc.mentionWindow = append(svc.mentionWindow, mentionRecord{Ticker: "OTHER", Timestamp: now})
-	}
-	svc.recomputeRedditScores(now)
-	got := svc.entries["TICK"].BaseScore
-	if got > 20.0 {
-		t.Errorf("BaseScore should not exceed 20, got %f", got)
-	}
-	if got != 18.0 {
-		t.Errorf("expected 18.0 (8 mention + 10 prior sentiment, no compounding), got %f", got)
-	}
-	if svc.entries["TICK"].MentionPts != 8.0 {
-		t.Errorf("expected MentionPts=8.0, got %f", svc.entries["TICK"].MentionPts)
+	if _, ok := svc.baselines["KEEP"]; !ok {
+		t.Error("expected KEEP preserved in baselines")
 	}
 }

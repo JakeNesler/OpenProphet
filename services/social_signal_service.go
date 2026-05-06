@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"regexp"
 	"sort"
@@ -18,30 +19,55 @@ import (
 const socialRefreshInterval = 30 * time.Second
 const stockTwitsRefreshInterval = 2 * time.Minute
 const socialHalfLifeHours = 4.0
-const mentionWindowDuration = 30 * time.Minute
 
 var tickerRegex = regexp.MustCompile(`\$([A-Z]{2,5})\b`)
 
-type mentionRecord struct {
-	Ticker    string
-	Timestamp time.Time
+type mentionBaseline struct {
+	buckets    [336]int
+	total      int
+	firstSeen  time.Time
+	lastBucket int
+}
+
+func (b *mentionBaseline) advance(now time.Time, newCount int) {
+	currentBucket := int(now.Unix()/1800) % 336
+	if currentBucket != b.lastBucket {
+		passed := (currentBucket - b.lastBucket + 336) % 336
+		// Zero only the recycled slots (lastBucket+1 through currentBucket).
+		// lastBucket itself holds valid completed data and must be preserved.
+		for i := 1; i <= passed; i++ {
+			idx := (b.lastBucket + i) % 336
+			b.total -= b.buckets[idx]
+			b.buckets[idx] = 0
+		}
+		b.lastBucket = currentBucket
+	}
+	b.buckets[currentBucket] += newCount
+	b.total += newCount
+}
+
+func (b *mentionBaseline) baselinePer30min() float64 {
+	avg := float64(b.total) / 336.0
+	if avg < 0.5 {
+		return 0.5
+	}
+	return avg
 }
 
 type socialEntry struct {
-	BaseScore  float64   // total score = MentionPts + sentimentPts (capped at 20)
-	MentionPts float64   // Reddit mention velocity component (0–10)
-	DetectedAt time.Time
+	Entry      DecayEntry
+	MentionPts float64
 	Context    string
 }
 
 // SocialSignalService polls Reddit and StockTwits for social signals.
 type SocialSignalService struct {
-	httpClient    *http.Client
-	universe      *PennyUniverseService
-	mu            sync.RWMutex
-	entries       map[string]socialEntry
-	mentionWindow []mentionRecord // sliding 30-min window of Reddit mentions
-	logger        *logrus.Logger
+	httpClient *http.Client
+	universe   *PennyUniverseService
+	mu         sync.RWMutex
+	entries    map[string]socialEntry
+	baselines  map[string]*mentionBaseline
+	logger     *logrus.Logger
 }
 
 // NewSocialSignalService creates the service.
@@ -55,6 +81,7 @@ func NewSocialSignalService(universe *PennyUniverseService, httpClient *http.Cli
 		httpClient: httpClient,
 		universe:   universe,
 		entries:    make(map[string]socialEntry),
+		baselines:  make(map[string]*mentionBaseline),
 		logger:     logger,
 	}
 }
@@ -74,7 +101,7 @@ func (s *SocialSignalService) GetSocialScore(ticker string) (float64, string) {
 	if !ok {
 		return 0, ""
 	}
-	return scoreWithDecay(e.BaseScore, e.DetectedAt, socialHalfLifeHours), e.Context
+	return e.Entry.EffectiveScore(), e.Context
 }
 
 func (s *SocialSignalService) runReddit(ctx context.Context) {
@@ -119,7 +146,7 @@ func (s *SocialSignalService) pollReddit() {
 	subreddits := []string{"pennystocks", "RobinHoodPennyStocks"}
 	tickers := tickerSet(s.universe.GetTickers())
 	now := time.Now()
-	var newMentions []mentionRecord
+	counts := make(map[string]int)
 
 	for _, sub := range subreddits {
 		url := fmt.Sprintf("https://www.reddit.com/r/%s/new.json?limit=100", sub)
@@ -135,7 +162,7 @@ func (s *SocialSignalService) pollReddit() {
 		}
 		if resp.StatusCode != http.StatusOK {
 			resp.Body.Close()
-			s.logger.WithField("status", resp.StatusCode).Warnf("SocialSignalService: Reddit r/%s returned non-200", sub)
+			s.logger.WithField("status", resp.StatusCode).Warnf("SocialSignalService: Reddit r/%s non-200", sub)
 			continue
 		}
 		body, _ := io.ReadAll(resp.Body)
@@ -148,12 +175,8 @@ func (s *SocialSignalService) pollReddit() {
 		for _, child := range listing.Data.Children {
 			combined := strings.ToUpper(child.Data.Title + " " + child.Data.Selftext)
 			for _, m := range tickerRegex.FindAllStringSubmatch(combined, -1) {
-				if len(m) < 2 {
-					continue
-				}
-				t := m[1]
-				if tickers[t] {
-					newMentions = append(newMentions, mentionRecord{Ticker: t, Timestamp: now})
+				if len(m) >= 2 && tickers[m[1]] {
+					counts[m[1]]++
 				}
 			}
 		}
@@ -161,59 +184,56 @@ func (s *SocialSignalService) pollReddit() {
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.mentionWindow = append(s.mentionWindow, newMentions...)
-	s.pruneWindow(now)
-	s.recomputeRedditScores(now)
+	s.recomputeRedditScores(now, counts)
 }
 
-func (s *SocialSignalService) pruneWindow(now time.Time) {
-	cutoff := now.Add(-mentionWindowDuration)
-	i := 0
-	for i < len(s.mentionWindow) && s.mentionWindow[i].Timestamp.Before(cutoff) {
-		i++
-	}
-	s.mentionWindow = s.mentionWindow[i:]
-}
-
-func (s *SocialSignalService) recomputeRedditScores(now time.Time) {
-	counts := make(map[string]int)
-	for _, m := range s.mentionWindow {
-		counts[m.Ticker]++
-	}
-	total := 0
-	for _, c := range counts {
-		total += c
-	}
-	avgCount := 1
-	if len(counts) > 0 {
-		// Integer division intentional; floor at 1 ensures velocity >= 1.0 for any ticker with mentions.
-		// A lone-mention ticker on a quiet day scores the same as on a busy day (both get velocity=1.0).
-		avg := total / len(counts)
-		if avg > 1 {
-			avgCount = avg
-		}
-	}
+func (s *SocialSignalService) recomputeRedditScores(now time.Time, counts map[string]int) {
 	for ticker, count := range counts {
-		velocity := float64(count) / float64(avgCount)
-		mentionPts := min64(velocity/2.0, 1.0) * 10.0
-		// Preserve any existing StockTwits sentiment by reading the clean prior value.
+		bl, ok := s.baselines[ticker]
+		if !ok {
+			bl = &mentionBaseline{firstSeen: now, lastBucket: int(now.Unix()/1800) % 336}
+			s.baselines[ticker] = bl
+		}
+		bl.advance(now, count)
+
+		var mentionVelocityPts float64
+		if time.Since(bl.firstSeen) >= 72*time.Hour {
+			velocity := math.Min(float64(count)/bl.baselinePer30min(), 2.0)
+			mentionVelocityPts = velocity * 5.0
+		}
+
 		var sentimentPts float64
 		if existing, ok := s.entries[ticker]; ok {
-			sentimentPts = existing.BaseScore - existing.MentionPts
+			sentimentPts = existing.Entry.BaseScore - existing.MentionPts
 			if sentimentPts < 0 {
 				sentimentPts = 0
 			}
 		}
-		score := min64(mentionPts+sentimentPts, 20.0)
-		signalCtx := fmt.Sprintf("mentions=%d velocity=%.1fx", count, velocity)
-		s.entries[ticker] = socialEntry{BaseScore: score, MentionPts: mentionPts, DetectedAt: now, Context: signalCtx}
+
+		score := math.Min(mentionVelocityPts+sentimentPts, 20.0)
+		ctx := fmt.Sprintf("mentions=%d", count)
+		if time.Since(bl.firstSeen) >= 72*time.Hour {
+			ctx = fmt.Sprintf("mentions=%d velocity=%.1fx", count, float64(count)/bl.baselinePer30min())
+		}
+		s.entries[ticker] = socialEntry{
+			Entry:      DecayEntry{BaseScore: score, EventTime: now, HalfLifeHrs: socialHalfLifeHours},
+			MentionPts: mentionVelocityPts,
+			Context:    ctx,
+		}
 	}
 
-	// Evict stale entries for tickers that are no longer in counts (no recent mentions).
-	// This prevents unbounded map growth.
+	// Evict entries for tickers with no current mentions
 	for ticker := range s.entries {
-		if _, hasMentions := counts[ticker]; !hasMentions {
+		if _, ok := counts[ticker]; !ok {
 			delete(s.entries, ticker)
+		}
+	}
+
+	// Universe-exit cleanup: remove baselines for tickers no longer in universe
+	universeTickers := tickerSet(s.universe.GetTickers())
+	for ticker := range s.baselines {
+		if !universeTickers[ticker] {
+			delete(s.baselines, ticker)
 		}
 	}
 }
@@ -226,7 +246,7 @@ func (s *SocialSignalService) pollStockTwitsForTopMentioned() {
 	}
 	var ranked []kv
 	for t, e := range s.entries {
-		decayed := scoreWithDecay(e.BaseScore, e.DetectedAt, socialHalfLifeHours)
+		decayed := e.Entry.EffectiveScore()
 		ranked = append(ranked, kv{t, decayed})
 	}
 	s.mu.RUnlock()
@@ -293,12 +313,18 @@ func (s *SocialSignalService) fetchStockTwits(ticker string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	existing := s.entries[ticker]
+	if _, ok := s.entries[ticker]; !ok {
+		return
+	}
 	// Always recalculate from the clean mention base (MentionPts), never from BaseScore,
 	// so sentiment cannot compound across successive StockTwits polls.
 	newScore := min64(existing.MentionPts+sentimentPts, 20.0)
 	signalCtx := fmt.Sprintf("%s st_bullish=%.0f%%", existing.Context, ratio*100)
-	// DetectedAt is intentionally preserved from the Reddit mention; sentiment ages with the underlying social signal.
-	s.entries[ticker] = socialEntry{BaseScore: newScore, MentionPts: existing.MentionPts, DetectedAt: existing.DetectedAt, Context: signalCtx}
+	s.entries[ticker] = socialEntry{
+		Entry:      DecayEntry{BaseScore: newScore, EventTime: existing.Entry.EventTime, HalfLifeHrs: socialHalfLifeHours},
+		MentionPts: existing.MentionPts,
+		Context:    signalCtx,
+	}
 }
 
 func min64(a, b float64) float64 {

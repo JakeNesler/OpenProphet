@@ -35,9 +35,14 @@ export class AnalysisScheduler extends EventEmitter {
   constructor(options = {}) {
     super();
     this.model = options.model || 'anthropic/claude-sonnet-4-6';
+    this.onEmergencyWake = options.onEmergencyWake || null;
     this._timer = null;
     this._running = false;
     this._activeJob = null;
+    this._scanTimer = null;
+    this._scanActive = false;
+    this._lastAlertTime = null;
+    this._firedAlertFingerprints = new Map(); // date -> Set<fingerprint>
     // File-detectable (reset on restart is fine — file presence is the guard)
     this._lastDailyBriefDate = null;
     this._lastWeeklyScreenDate = null;
@@ -55,12 +60,14 @@ export class AnalysisScheduler extends EventEmitter {
     this._running = true;
     this._timer = setInterval(() => this._checkSchedule(), 60 * 1000);
     this._checkSchedule();
+    this._startScanLoop();
     this._log('Analysis scheduler started.', 'info');
   }
 
   stop() {
     this._running = false;
     if (this._timer) { clearInterval(this._timer); this._timer = null; }
+    this._stopScanLoop();
     this._log('Analysis scheduler stopped.', 'warning');
   }
 
@@ -68,6 +75,8 @@ export class AnalysisScheduler extends EventEmitter {
     return {
       running: this._running,
       activeJob: this._activeJob,
+      scanActive: this._scanActive,
+      lastAlertTime: this._lastAlertTime,
       lastDailyBriefDate: this._lastDailyBriefDate,
       lastWeeklyScreenDate: this._lastWeeklyScreenDate,
       lastScenarioDate: this._lastScenarioDate,
@@ -79,7 +88,16 @@ export class AnalysisScheduler extends EventEmitter {
 
   async triggerJob(jobName, date, target) {
     if (this._activeJob) return { error: `Job already running: ${this._activeJob}` };
+    const validJobs = ['daily_briefing', 'weekly_screeners', 'scenario_analysis', 'review_performance', 'postmortem', 'adapt_strategy'];
+    if (!validJobs.includes(jobName)) {
+      return { error: `Unknown job: ${jobName}. Valid: ${validJobs.join(', ')}` };
+    }
     const isoDate = date || new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+    const lockKey = this._getLockKey(jobName, isoDate, target);
+    if (!await this._acquireLock(lockKey)) {
+      this._log(`${jobName} already running in another process — skipping duplicate.`, 'info');
+      return { skipped: true, reason: 'already_running', job: jobName };
+    }
     this._activeJob = jobName;
     try {
       if (jobName === 'daily_briefing') {
@@ -104,13 +122,11 @@ export class AnalysisScheduler extends EventEmitter {
         this._lastAdaptDate = isoDate;
         await this._runAdaptStrategy(isoDate);
         await this._saveState();
-      } else {
-        this._activeJob = null;
-        return { error: `Unknown job: ${jobName}. Valid: daily_briefing, weekly_screeners, scenario_analysis, review_performance, postmortem, adapt_strategy` };
       }
       return { success: true, job: jobName, date: isoDate };
     } finally {
       this._activeJob = null;
+      await this._releaseLock(lockKey);
     }
   }
 
@@ -125,7 +141,9 @@ export class AnalysisScheduler extends EventEmitter {
     // 1. Daily briefing (file-based) — skip if market has already closed (≥4 PM ET); will fire at 6 AM ET next weekday
     try { await fs.access(path.join(REPORTS_DIR, `daily_brief_${todaySlug}.json`)); }
     catch {
-      if (isWeekday && hour < 16) {
+      if (await this._isLocked(this._getLockKey('daily_briefing', isoDate))) {
+        this._log('Daily briefing already running in another process — skipping startup trigger.', 'info');
+      } else if (isWeekday && hour < 16) {
         this._log('No daily briefing for today — triggering now...', 'info');
         await this.triggerJob('daily_briefing').catch(() => {});
       } else {
@@ -135,23 +153,35 @@ export class AnalysisScheduler extends EventEmitter {
 
     // 2. Scenario analysis (state-based)
     if (this._lastScenarioDate !== isoDate) {
-      this._log('No scenario analysis for today — triggering now...', 'info');
-      await this.triggerJob('scenario_analysis').catch(() => {});
+      if (await this._isLocked(this._getLockKey('scenario_analysis', isoDate))) {
+        this._log('Scenario analysis already running in another process — skipping startup trigger.', 'info');
+      } else {
+        this._log('No scenario analysis for today — triggering now...', 'info');
+        await this.triggerJob('scenario_analysis').catch(() => {});
+      }
     }
 
     // 3. Weekly performance review (state-based)
     if (this._lastReviewWeek !== this._getISOWeek(isoDate)) {
-      this._log('No performance review this week — triggering now...', 'info');
-      await this.triggerJob('review_performance').catch(() => {});
-      adaptNeeded = true;
+      if (await this._isLocked(this._getLockKey('review_performance', isoDate))) {
+        this._log('Weekly performance review already running in another process — skipping startup trigger.', 'info');
+      } else {
+        this._log('No performance review this week — triggering now...', 'info');
+        await this.triggerJob('review_performance').catch(() => {});
+        adaptNeeded = true;
+      }
     }
 
     // 4. Postmortem for significant loss (activity log detection)
     const lossInfo = await this._detectLossConditions();
     if (lossInfo?.significantLoss && this._lastPostmortemDate !== lossInfo.lossDate) {
-      this._log(`Significant loss on ${lossInfo.lossDate} (${lossInfo.lossPercent.toFixed(1)}%) — triggering postmortem...`, 'warning');
-      await this.triggerJob('postmortem', lossInfo.lossDate).catch(() => {});
-      adaptNeeded = true;
+      if (await this._isLocked(this._getLockKey('postmortem', lossInfo.lossDate))) {
+        this._log('Postmortem already running in another process — skipping startup trigger.', 'info');
+      } else {
+        this._log(`Significant loss on ${lossInfo.lossDate} (${lossInfo.lossPercent.toFixed(1)}%) — triggering postmortem...`, 'warning');
+        await this.triggerJob('postmortem', lossInfo.lossDate).catch(() => {});
+        adaptNeeded = true;
+      }
     }
     if (lossInfo?.consecutiveLossDays >= 3) {
       this._log('3 consecutive losing days detected.', 'warning');
@@ -160,8 +190,130 @@ export class AnalysisScheduler extends EventEmitter {
 
     // 5. Adapt strategy if anything above triggered it
     if (adaptNeeded && this._lastAdaptDate !== isoDate) {
-      this._log('Triggering adapt-strategy...', 'info');
-      await this.triggerJob('adapt_strategy').catch(() => {});
+      if (await this._isLocked(this._getLockKey('adapt_strategy', isoDate))) {
+        this._log('Adapt strategy already running in another process — skipping startup trigger.', 'info');
+      } else {
+        this._log('Triggering adapt-strategy...', 'info');
+        await this.triggerJob('adapt_strategy').catch(() => {});
+      }
+    }
+  }
+
+  // ── Mid-session scan loop ────────────────────────────────────────
+
+  _startScanLoop() {
+    if (this._scanTimer) return;
+    this._scanTimer = setInterval(() => this._runMidSessionScan(), 15 * 60 * 1000);
+    // Run immediately if market is currently open
+    this._runMidSessionScan();
+  }
+
+  _stopScanLoop() {
+    if (this._scanTimer) { clearInterval(this._scanTimer); this._scanTimer = null; }
+  }
+
+  async _runMidSessionScan() {
+    if (this._scanActive) return;
+    const { hour, minute, isoDate, dayOfWeek } = this._getETInfo();
+    const isWeekday = dayOfWeek >= 1 && dayOfWeek <= 5;
+    const isMarketHours = isWeekday && (hour > 9 || (hour === 9 && minute >= 30)) && hour < 16;
+    if (!isMarketHours) return;
+
+    this._scanActive = true;
+    try {
+      await this._runScan(isoDate);
+    } catch (err) {
+      this._log(`Mid-session scan error: ${err.message}`, 'error');
+    } finally {
+      this._scanActive = false;
+    }
+  }
+
+  async _runScan(date) {
+    const scanStart = Date.now();
+    const dateSlug = date.replace(/-/g, '');
+    const now = new Date();
+    const timeSlug = now.toLocaleTimeString('en-US', { timeZone: 'America/New_York', hour12: false })
+      .replace(/:/g, '').slice(0, 6);
+    const alertFile = `market_alert_${dateSlug}_${timeSlug}.json`;
+
+    // Option 2: Inject today's already-fired alert summaries into the prompt
+    const existingAlertSummaries = [];
+    try {
+      const allFiles = await fs.readdir(REPORTS_DIR).catch(() => []);
+      for (const f of allFiles.filter(f => f.startsWith(`market_alert_${dateSlug}_`) && f.endsWith('.json'))) {
+        try {
+          const c = JSON.parse(await fs.readFile(path.join(REPORTS_DIR, f), 'utf-8'));
+          if (c.alert_summary) existingAlertSummaries.push(c.alert_summary);
+        } catch {}
+      }
+    } catch {}
+
+    const alreadyAlertedBlock = existingAlertSummaries.length > 0
+      ? `\nALREADY ALERTED TODAY — do NOT re-alert on these stories (assign score < 7 for any news that overlaps with them):\n${existingAlertSummaries.map((s, i) => `${i + 1}. ${s}`).join('\n')}\n`
+      : '';
+
+    const prompt = `You are the Prophet Mid-Session Market Scanner. The time is ${now.toLocaleString('en-US', { timeZone: 'America/New_York' })} ET. Today is ${date}.
+
+Your job: scan for breaking market-moving news and determine if it warrants an emergency alert to the trading agents.
+${alreadyAlertedBlock}
+Step 1: Call get_marketwatch_bulletins to fetch real-time market bulletins.
+Step 2: Call get_marketwatch_realtime to fetch the latest real-time headlines.
+
+Step 3: Assess significance. Score 1-10 based on:
+- 8-10: Systemic impact — FOMC surprise, major index move >1%, banking crisis, circuit breakers, major war escalation, or large-cap earnings surprise with sector contagion (e.g., a cloud/AI company miss that drags related infrastructure names)
+- 6-7: Cross-asset — single sector move >3%, large-cap earnings beat/miss, commodity spike/drop >3%
+- 4-5: Notable — moderate earnings impact, in-line economic data, geopolitical update without escalation
+- 1-3: Routine — no market-moving news, or nothing meaningfully new since market open
+
+Step 4: Only if significance score >= 7, use the Write tool to save to exactly this path:
+data/reports/${alertFile}
+
+The JSON must be exactly this structure:
+{
+  "generated_at": "<current UTC ISO timestamp>",
+  "significance_score": <integer 1-10>,
+  "alert_summary": "<1-2 sentences: what happened and what markets/sectors are affected and in which direction>",
+  "affected_tickers": ["<ticker1>", ...],
+  "affected_sectors": ["<sector1>", ...],
+  "direction": "<bullish|bearish|mixed>",
+  "headlines": [<up to 3 objects: {"headline": "<title>", "source": "<pub>", "impact": "<1 sentence>"}>]
+}
+
+If significance score < 7: do NOT write any file. Output only: SCAN_COMPLETE: no significant news (score: N)
+If significance score >= 7: write the file, then output: SCAN_ALERT: <your alert_summary>`;
+
+    await this._runOneshotOpencode(prompt, 'mid_session_scan', 3 * 60 * 1000);
+
+    if (!this.onEmergencyWake) return;
+    try {
+      const files = (await fs.readdir(REPORTS_DIR).catch(() => []));
+      const alertFiles = files.filter(f => f.startsWith('market_alert_') && f.endsWith('.json'));
+      for (const f of alertFiles) {
+        const fullPath = path.join(REPORTS_DIR, f);
+        const stat = await fs.stat(fullPath);
+        if (stat.mtimeMs >= scanStart) {
+          const content = JSON.parse(await fs.readFile(fullPath, 'utf-8'));
+          if ((content.significance_score || 0) >= 7) {
+            // Option 1: ticker-based fingerprint guard — suppress if already fired today
+            const fingerprint = this._getAlertFingerprint(date, content);
+            const todayFired = this._firedAlertFingerprints.get(date) || new Set();
+            if (todayFired.has(fingerprint)) {
+              this._log(`Duplicate alert suppressed (fingerprint already fired today): ${fingerprint}`, 'info');
+              break;
+            }
+            todayFired.add(fingerprint);
+            this._firedAlertFingerprints.set(date, todayFired);
+            await this._saveState();
+            this._lastAlertTime = new Date().toISOString();
+            this._log(`ALERT fired: ${content.alert_summary}`, 'warning');
+            this.onEmergencyWake(content.alert_summary);
+          }
+          break;
+        }
+      }
+    } catch (err) {
+      this._log(`Alert file check error: ${err.message}`, 'error');
     }
   }
 
@@ -169,6 +321,40 @@ export class AnalysisScheduler extends EventEmitter {
 
   _log(message, level = 'info') {
     this.emit('agent_log', { message: `[Scheduler] ${message}`, level, timestamp: new Date().toISOString() });
+  }
+
+  // Returns the lock file key for a given job — used as `${key}.running` in REPORTS_DIR.
+  _getLockKey(jobName, date, target) {
+    const dateSlug = (date || '').replace(/-/g, '');
+    switch (jobName) {
+      case 'daily_briefing':    return `daily_brief_${dateSlug}`;
+      case 'weekly_screeners':  return `weekly_screeners_${dateSlug}`;
+      case 'scenario_analysis': return `scenario_analysis_${dateSlug}`;
+      case 'review_performance': return `review_performance_${this._getISOWeek(date).replace(/[^a-z0-9]/gi, '_')}`;
+      case 'postmortem':        return `postmortem_${(target || date || '').replace(/-/g, '')}`;
+      case 'adapt_strategy':    return `adapt_strategy_${dateSlug}`;
+      default:                  return `${jobName.replace(/[^a-z0-9]/gi, '_')}_${dateSlug}`;
+    }
+  }
+
+  // Exclusive lock via atomic file creation — returns true if acquired, false if already held.
+  async _acquireLock(lockKey) {
+    await fs.mkdir(REPORTS_DIR, { recursive: true });
+    try {
+      const fd = await fs.open(path.join(REPORTS_DIR, `${lockKey}.running`), 'wx');
+      await fd.close();
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  async _releaseLock(lockKey) {
+    await fs.unlink(path.join(REPORTS_DIR, `${lockKey}.running`)).catch(() => {});
+  }
+
+  async _isLocked(lockKey) {
+    return fs.access(path.join(REPORTS_DIR, `${lockKey}.running`)).then(() => true).catch(() => false);
   }
 
   _getETInfo() {
@@ -201,19 +387,38 @@ export class AnalysisScheduler extends EventEmitter {
       this._lastAdaptDate = s.lastAdaptDate || null;
       this._lastLossCheckDate = s.lastLossCheckDate || null;
       this._lastScenarioDate = s.lastScenarioDate || null;
+      const today = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+      const persisted = s.firedAlertFingerprints || {};
+      // Only restore today's fingerprints — older dates are irrelevant
+      if (persisted[today]) {
+        this._firedAlertFingerprints.set(today, new Set(persisted[today]));
+      }
     } catch {}
   }
 
   async _saveState() {
     try {
+      const today = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+      const firedAlertFingerprints = {};
+      const todaySet = this._firedAlertFingerprints.get(today);
+      if (todaySet?.size) firedAlertFingerprints[today] = [...todaySet];
       await fs.writeFile(STATE_FILE, JSON.stringify({
         lastReviewWeek: this._lastReviewWeek,
         lastPostmortemDate: this._lastPostmortemDate,
         lastAdaptDate: this._lastAdaptDate,
         lastLossCheckDate: this._lastLossCheckDate,
         lastScenarioDate: this._lastScenarioDate,
+        firedAlertFingerprints,
       }, null, 2), 'utf-8');
     } catch {}
+  }
+
+  // Fingerprint for dedup: date + sorted affected_tickers. Falls back to normalized summary.
+  _getAlertFingerprint(date, content) {
+    const tickers = (content.affected_tickers || []).slice().sort().join(',');
+    if (tickers) return `${date}::${tickers}`;
+    const normalized = (content.alert_summary || '').toLowerCase().replace(/[^a-z0-9 ]/g, '').slice(0, 80);
+    return `${date}::${normalized}`;
   }
 
   // Returns { significantLoss, lossDate, lossPercent, consecutiveLossDays } or null.
@@ -306,6 +511,8 @@ export class AnalysisScheduler extends EventEmitter {
 
   async _runDailyBriefing(date) {
     const dateSlug = date.replace(/-/g, '');
+    // Lock is acquired by triggerJob — no per-runner lock needed here.
+
     this._log(`Starting daily briefing for ${date}...`, 'info');
     this.emit('scheduler_job_start', { job: 'daily_briefing', date });
 
@@ -318,7 +525,9 @@ Call these MCP tools in this exact order:
 1. run_market_briefing — fetches breadth and uptrend ratio data from public CSV sources (no API key needed). Wait for it to complete.
 ${hasFmp ? `2. run_ftd_check — detects Follow-Through Day signals (requires FMP API).
 3. run_economic_calendar — fetches this week's tier-1 macro events (FOMC, CPI, NFP, GDP).
-4. run_earnings_calendar — fetches key earnings announcements for this week.` : `2. (Skipping FTD, economic calendar, and earnings calendar — FMP_API_KEY not set)`}
+4. run_earnings_calendar — fetches key earnings announcements for this week.
+5. get_marketwatch_all — fetches all MarketWatch feeds (top stories, realtime headlines, bulletins, market pulse). Scan for any market-moving news: earnings results or misses (including private companies), executive commentary, sector contagion, macro surprises, or geopolitical events. Extract up to 7 headlines that a trader must know about today.` : `2. (Skipping FTD, economic calendar, and earnings calendar — FMP_API_KEY not set)
+3. get_marketwatch_all — fetches all MarketWatch feeds. Scan for market-moving headlines and extract up to 7 that a trader must know about today.`}
 
 After all tools have returned, use the Write tool to save the briefing to exactly this path:
 data/reports/daily_brief_${dateSlug}.json
@@ -333,8 +542,9 @@ The JSON must be exactly this structure (fill all values from tool results):
   "ftd_status": "<active_ftd|rally_attempt|no_signal|correction — from run_ftd_check, or null if skipped>",
   "tier1_macro_events": [<objects from run_economic_calendar with date, event, impact fields — empty array if skipped or none>],
   "key_earnings_this_week": [<objects from run_earnings_calendar with date, ticker, timing fields — empty array if skipped or none>],
-  "exposure_ceiling_pct": <integer 0-100 — your recommended max exposure: 100 if BULLISH, 60 if NEUTRAL, 20 if BEARISH; reduce further if active_ftd or tier-1 event today>,
-  "summary": "<2-3 sentences describing today's market setup and key risks>"
+  "market_headlines": [<up to 7 objects from get_marketwatch_all that represent market-moving news — each object: {"headline": "<title>", "source": "<publication>", "impact": "<1 sentence: what moves and which direction>", "sectors_affected": ["<sector1>", ...]}. Include earnings misses/beats, executive statements, sector contagion, macro shocks, and geopolitical news. Empty array only if no significant news found.>],
+  "exposure_ceiling_pct": <integer 0-100 — your recommended max exposure: 100 if BULLISH, 60 if NEUTRAL, 20 if BEARISH; reduce further if active_ftd, tier-1 event today, or major negative market_headlines>,
+  "summary": "<2-3 sentences describing today's market setup, key risks from headlines, and any sector-specific warnings>"
 }
 
 Use null for any field where the corresponding tool failed. Write only the JSON — no markdown, no explanation.`;

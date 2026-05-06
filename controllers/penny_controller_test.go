@@ -19,6 +19,8 @@ func setupPennyRouter(agg *services.PennySignalAggregator) *gin.Engine {
 	r.GET("/api/v1/penny/signal/:ticker", pc.HandleGetSignalDetail)
 	r.GET("/api/v1/penny/universe", pc.HandleGetUniverse)
 	r.POST("/api/v1/penny/scan", pc.HandleScanNow)
+	r.DELETE("/api/v1/penny/blacklist", pc.HandleClearBlacklist)
+	r.DELETE("/api/v1/penny/blacklist/:ticker", pc.HandleRemoveFromBlacklist)
 	return r
 }
 
@@ -54,6 +56,75 @@ func TestPennyController_GetCandidates_Empty(t *testing.T) {
 	body := parseBody(t, w)
 	if body["count"].(float64) != 0 {
 		t.Errorf("expected count=0, got %v", body["count"])
+	}
+}
+
+// aggregatorWithSeededCandidate creates an aggregator and seeds one candidate
+// with full context strings, for verifying summary/detail mode behavior.
+func aggregatorWithSeededCandidate() *services.PennySignalAggregator {
+	agg := emptyAggregator()
+	services.SeedCandidateForTest(agg, services.CandidateScore{
+		Ticker:            "ZZZZ",
+		CompositeScore:    72,
+		CompositeEligible: true,
+		TechnicalScore:    30,
+		RegulatoryScore:   22,
+		SocialScore:       20,
+		DominantSignal:    "technical",
+		TechnicalContext:  "RSI 72, volume 4.2x",
+		RegulatoryEvent:   "8-K filed 09:32 ET",
+		SocialContext:     "3.2x mention velocity, 71% bullish",
+	})
+	return agg
+}
+
+func TestPennyController_GetCandidates_DefaultStripsContext(t *testing.T) {
+	r := setupPennyRouter(aggregatorWithSeededCandidate())
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("GET", "/api/v1/penny/candidates?min_score=60", nil)
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	body := parseBody(t, w)
+	candidates, _ := body["candidates"].([]interface{})
+	if len(candidates) != 1 {
+		t.Fatalf("expected 1 candidate, got %d", len(candidates))
+	}
+	c := candidates[0].(map[string]interface{})
+	if c["ticker"] != "ZZZZ" || c["dominant_signal"] != "technical" {
+		t.Errorf("scalar fields should be preserved, got %+v", c)
+	}
+	// Context fields use omitempty + are cleared in summary mode → should be absent from JSON
+	if _, present := c["technical_context"]; present {
+		t.Errorf("technical_context must be absent in default (summary) mode")
+	}
+	if _, present := c["regulatory_event"]; present {
+		t.Errorf("regulatory_event must be absent in default (summary) mode")
+	}
+	if _, present := c["social_context"]; present {
+		t.Errorf("social_context must be absent in default (summary) mode")
+	}
+}
+
+func TestPennyController_GetCandidates_DetailIncludesContext(t *testing.T) {
+	r := setupPennyRouter(aggregatorWithSeededCandidate())
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("GET", "/api/v1/penny/candidates?min_score=60&detail=true", nil)
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	body := parseBody(t, w)
+	c := body["candidates"].([]interface{})[0].(map[string]interface{})
+	if c["technical_context"] != "RSI 72, volume 4.2x" {
+		t.Errorf("detail=true should include technical_context, got %v", c["technical_context"])
+	}
+	if c["regulatory_event"] != "8-K filed 09:32 ET" {
+		t.Errorf("detail=true should include regulatory_event, got %v", c["regulatory_event"])
+	}
+	if c["social_context"] != "3.2x mention velocity, 71% bullish" {
+		t.Errorf("detail=true should include social_context, got %v", c["social_context"])
 	}
 }
 
@@ -102,5 +173,43 @@ func TestPennyController_GetUniverse_Empty(t *testing.T) {
 	body := parseBody(t, w)
 	if body["count"].(float64) != 0 {
 		t.Errorf("expected count=0, got %v", body["count"])
+	}
+}
+
+func TestPennyController_ClearBlacklist_Returns200(t *testing.T) {
+	agg := emptyAggregator()
+	agg.AddToBlacklist("TICK", "bracket rejection test")
+	r := setupPennyRouter(agg)
+
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("DELETE", "/api/v1/penny/blacklist", nil)
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d", w.Code)
+	}
+	if agg.IsBlacklisted("TICK") {
+		t.Error("expected blacklist cleared after HandleClearBlacklist")
+	}
+}
+
+func TestPennyController_RemoveFromBlacklist_Returns200(t *testing.T) {
+	agg := emptyAggregator()
+	agg.AddToBlacklist("RMVD", "test")
+	agg.AddToBlacklist("KEEP", "test")
+	r := setupPennyRouter(agg)
+
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("DELETE", "/api/v1/penny/blacklist/RMVD", nil)
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d", w.Code)
+	}
+	if agg.IsBlacklisted("RMVD") {
+		t.Error("expected RMVD removed from blacklist")
+	}
+	if !agg.IsBlacklisted("KEEP") {
+		t.Error("expected KEEP still blacklisted")
 	}
 }

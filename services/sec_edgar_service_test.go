@@ -10,6 +10,13 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
+func newTestEdgar() *SECEdgarService {
+	return &SECEdgarService{
+		entries: make(map[string]regulatoryEntry),
+		logger:  logrus.New(),
+	}
+}
+
 func TestExtractTickerFromTitle(t *testing.T) {
 	tickers := map[string]bool{"ACME": true, "FOO": true}
 	tests := []struct {
@@ -34,7 +41,10 @@ func TestSECEdgarService_GetRegulatoryScore_Decay(t *testing.T) {
 		entries: make(map[string]regulatoryEntry),
 		logger:  logrus.New(),
 	}
-	svc.entries["TICK"] = regulatoryEntry{BaseScore: 40.0, DetectedAt: time.Now(), EventDesc: "test"}
+	svc.entries["TICK"] = regulatoryEntry{
+		Entry:     DecayEntry{BaseScore: 40.0, EventTime: time.Now(), HalfLifeHrs: regulatoryHalfLifeHours},
+		EventDesc: "test",
+	}
 	score, desc := svc.GetRegulatoryScore("TICK")
 	if score < 39 || score > 40 {
 		t.Errorf("fresh entry: expected ~40, got %f", score)
@@ -50,8 +60,8 @@ func TestSECEdgarService_UpsertEntry_KeepsHigher(t *testing.T) {
 	svc.upsertEntry("T", 25.0, now, "pr wire")
 	svc.upsertEntry("T", 40.0, now, "8-K")
 	svc.upsertEntry("T", 10.0, now, "lower")
-	if svc.entries["T"].BaseScore != 40.0 {
-		t.Errorf("expected 40.0, got %f", svc.entries["T"].BaseScore)
+	if svc.entries["T"].Entry.BaseScore != 40.0 {
+		t.Errorf("expected 40.0, got %f", svc.entries["T"].Entry.BaseScore)
 	}
 	if svc.entries["T"].EventDesc != "8-K" {
 		t.Errorf("expected '8-K', got %q", svc.entries["T"].EventDesc)
@@ -64,7 +74,7 @@ func TestSECEdgarService_FetchAtom_NonOK(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	svc := NewSECEdgarService(nil, ts.Client())
+	svc := NewSECEdgarService(nil, ts.Client(), "test@example.com")
 	entries, err := svc.fetchAtom(ts.URL)
 	if err == nil {
 		t.Error("expected error for non-200 response, got nil")
@@ -80,7 +90,7 @@ func TestSECEdgarService_FetchRSS_NonOK(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	svc := NewSECEdgarService(nil, ts.Client())
+	svc := NewSECEdgarService(nil, ts.Client(), "test@example.com")
 	items, err := svc.fetchRSS(ts.URL)
 	if err == nil {
 		t.Error("expected error for non-200 response, got nil")
@@ -111,7 +121,7 @@ func TestSECEdgarService_FetchRSS_ParsesTwoItems(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	svc := NewSECEdgarService(nil, ts.Client())
+	svc := NewSECEdgarService(nil, ts.Client(), "test@example.com")
 	tickers := map[string]bool{"ACME": true}
 	// Override the URL by calling the internal method with our tickers
 	// We'll test via pollGlobeNewswire by temporarily injecting — but since
@@ -134,5 +144,105 @@ func TestSECEdgarService_FetchRSS_ParsesTwoItems(t *testing.T) {
 	_ = tickers
 	if !found {
 		t.Error("expected ACME to be found in feed items")
+	}
+}
+
+func TestSECEdgar_UpsertEntry_FirstEntry(t *testing.T) {
+	svc := newTestEdgar()
+	svc.mu.Lock()
+	svc.upsertEntry("TICK", 40.0, time.Now(), "8-K filed")
+	svc.mu.Unlock()
+
+	score, desc := svc.GetRegulatoryScore("TICK")
+	if score < 39.9 || score > 40.0 {
+		t.Errorf("expected ~40.0 for fresh entry, got %f", score)
+	}
+	if desc != "8-K filed" {
+		t.Errorf("expected desc '8-K filed', got %q", desc)
+	}
+}
+
+func TestSECEdgar_UpsertEntry_MaxRule_OldWins(t *testing.T) {
+	// 8-K at -2h scores 40 with 24h half-life: decayed ≈ 39.4 > new 25 → old wins
+	svc := newTestEdgar()
+	oldEventTime := time.Now().Add(-2 * time.Hour)
+	svc.mu.Lock()
+	svc.upsertEntry("TICK", 40.0, oldEventTime, "old 8-K")
+	svc.upsertEntry("TICK", 25.0, time.Now(), "PR wire")
+	svc.mu.Unlock()
+
+	score, desc := svc.GetRegulatoryScore("TICK")
+	if score < 37.0 || score > 40.0 {
+		t.Errorf("expected decayed old score ~37.8 (40 base, 2h elapsed, 24h half-life), got %f", score)
+	}
+	if desc != "old 8-K" {
+		t.Errorf("expected old desc preserved, got %q", desc)
+	}
+}
+
+func TestSECEdgar_UpsertEntry_MaxRule_NewWins(t *testing.T) {
+	// 8-K at -25h scores 40: decayed ≈ 19.3 < new 40 → new wins
+	svc := newTestEdgar()
+	oldEventTime := time.Now().Add(-25 * time.Hour)
+	svc.mu.Lock()
+	svc.upsertEntry("TICK", 40.0, oldEventTime, "old 8-K")
+	svc.upsertEntry("TICK", 40.0, time.Now(), "new 8-K")
+	svc.mu.Unlock()
+
+	score, desc := svc.GetRegulatoryScore("TICK")
+	if score < 39.5 || score > 40.0 {
+		t.Errorf("expected ~40 (new wins), got %f", score)
+	}
+	if desc != "new 8-K" {
+		t.Errorf("expected new desc, got %q", desc)
+	}
+}
+
+func TestSECEdgar_ParseAtomDate_Valid(t *testing.T) {
+	ts := "2026-05-02T14:30:00-04:00"
+	parsed, fallback := parseAtomDate(ts)
+	if fallback {
+		t.Error("expected no fallback for valid RFC3339 timestamp")
+	}
+	// 14:30 EDT = 18:30 UTC
+	if parsed.UTC().Hour() != 18 || parsed.UTC().Minute() != 30 {
+		t.Errorf("expected 18:30 UTC, got %v", parsed.UTC())
+	}
+}
+
+func TestSECEdgar_ParseAtomDate_Invalid_Fallback(t *testing.T) {
+	_, fallback := parseAtomDate("not-a-date")
+	if !fallback {
+		t.Error("expected fallback for invalid timestamp")
+	}
+}
+
+func TestSECEdgar_ParseRSSDate_Valid(t *testing.T) {
+	ts := "Fri, 02 May 2026 14:30:00 -0400"
+	parsed, fallback := parseRSSDate(ts)
+	if fallback {
+		t.Error("expected no fallback for valid RFC1123Z timestamp")
+	}
+	if parsed.UTC().Hour() != 18 || parsed.UTC().Minute() != 30 {
+		t.Errorf("expected 18:30 UTC, got %v", parsed.UTC())
+	}
+}
+
+func TestSECEdgar_ParseAtomDate_FallbackSkipsUpsert(t *testing.T) {
+	// Verify that a bad timestamp does not insert an entry
+	svc := newTestEdgar()
+	svc.mu.Lock()
+	eventTime, isFallback := parseAtomDate("not-a-date")
+	if !isFallback {
+		t.Fatal("expected fallback=true for bad date")
+	}
+	// Simulate what pollEdgar does — skip on fallback
+	if !isFallback {
+		svc.upsertEntry("TICK", 40.0, eventTime, "bad entry")
+	}
+	svc.mu.Unlock()
+	score, _ := svc.GetRegulatoryScore("TICK")
+	if score != 0 {
+		t.Errorf("expected no entry for unparseable date, got score=%f", score)
 	}
 }

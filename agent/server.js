@@ -19,7 +19,7 @@ import AgentOrchestrator from './orchestrator.js';
 import { migrateLegacyDataForAccount } from './data-migration.js';
 import {
   loadConfig, getConfig, saveConfig,
-  addAccount, removeAccount, setActiveAccount, setActiveSandbox, getActiveAccount, getAccountById,
+  addAccount, updateAccount, removeAccount, setActiveAccount, setActiveSandbox, getActiveAccount, getAccountById,
   addAgent, updateAgent, removeAgent, setActiveAgent, getActiveAgent, getAgentById, getResolvedAgentForSandbox,
   addStrategy, updateStrategy, removeStrategy,
   setActiveModel, getStrategyById,
@@ -216,6 +216,24 @@ if (initialActiveAccount?.id) {
   }
 }
 
+// Seed second account from env vars if configured
+{
+  const pk2 = process.env.ALPACA_PUBLIC_KEY_2;
+  const sk2 = process.env.ALPACA_SECRET_KEY_2;
+  if (pk2 && sk2) {
+    const cfg = getConfig();
+    const alreadyExists = (cfg.accounts || []).some(a => a.publicKey === pk2);
+    if (!alreadyExists) {
+      const paper2 = process.env.ALPACA_PAPER_2 !== 'false';
+      const name2 = process.env.ALPACA_NAME_2 || 'Account 2';
+      const baseUrl2 = process.env.ALPACA_ENDPOINT_2 ||
+        (paper2 ? 'https://paper-api.alpaca.markets' : 'https://api.alpaca.markets');
+      await addAccount({ name: name2, publicKey: pk2, secretKey: sk2, baseUrl: baseUrl2, paper: paper2 });
+      console.log(`  Seeded second account "${name2}" from env vars`);
+    }
+  }
+}
+
 // ── Agent Instance ─────────────────────────────────────────────────
 const chatStore = new ChatStore();
 const orchestrator = new AgentOrchestrator({
@@ -324,7 +342,13 @@ for (const evt of EVENTS) {
 }
 
 // ── Analysis Scheduler ─────────────────────────────────────────────
-const scheduler = new AnalysisScheduler({ model: getConfig().activeModel || 'anthropic/claude-sonnet-4-6' });
+const scheduler = new AnalysisScheduler({
+  model: getConfig().activeModel || 'anthropic/claude-sonnet-4-6',
+  onEmergencyWake: (reason) => {
+    if (harness?.state?.running && !harness?.state?.paused) harness.emergencyWake(reason);
+    orchestrator.triggerEmergencyHeartbeat(reason);
+  },
+});
 scheduler.on('agent_log', (data) => broadcast('agent_log', data));
 scheduler.on('scheduler_job_start', ({ job, date }) => broadcast('agent_log', {
   message: `[Scheduler] Job started: ${job} for ${date}`, level: 'info', timestamp: new Date().toISOString(),
@@ -369,7 +393,7 @@ function scheduleDailySummaryForHarness(targetHarness) {
         const client = getGoClientForSandbox(sandboxId);
         if (!client) return;
         const { data: acc } = await client.get('/api/v1/account');
-        const equity = Number(acc.Equity || acc.equity || 0);
+        const equity = Number(acc.PortfolioValue || acc.portfolio_value || acc.Equity || acc.equity || 0);
         const lastEquity = Number(acc.LastEquity || acc.last_equity || 0);
         const pnl = equity - lastEquity;
         const pnlPct = lastEquity ? ((pnl / lastEquity) * 100).toFixed(2) : '0.00';
@@ -432,7 +456,7 @@ function bindOperationalHooks(targetHarness) {
       const client = getGoClientForSandbox(sandboxId);
       if (!client) return;
       const { data: acc } = await client.get('/api/v1/account', { timeout: 3000 });
-      const equity = Number(acc.Equity || acc.equity || 0);
+      const equity = Number(acc.PortfolioValue || acc.portfolio_value || acc.Equity || acc.equity || 0);
       const lastEquity = Number(acc.LastEquity || acc.last_equity || 0);
       if (!lastEquity) return;
       const dayLossPct = ((equity - lastEquity) / lastEquity) * 100;
@@ -1023,6 +1047,15 @@ app.put('/api/sandboxes/:id/agent', async (req, res) => {
     if (model !== undefined) updates.model = model;
     if (Object.keys(overrides).length) updates.overrides = overrides;
     const sandbox = await updateSandboxAgentSelection(req.params.id, updates);
+    // Apply the agent's default heartbeat profile when the agent changes
+    if (activeAgentId !== undefined) {
+      const agent = getAgentById(activeAgentId);
+      if (agent?.defaultHeartbeatProfile) {
+        await applyHeartbeatProfile(req.params.id, agent.defaultHeartbeatProfile).catch(() => {});
+        const targetHarness = getHarnessForSandbox(req.params.id);
+        if (targetHarness?.state.running) targetHarness._scheduleNext();
+      }
+    }
     await refreshHarnessConfigForSandbox(req.params.id, { resetSession: true });
     broadcast('config', safeConfig());
     res.json({ ok: true, sandbox, agent: getResolvedAgentForSandbox(req.params.id) });
@@ -1148,6 +1181,14 @@ app.post('/api/accounts', async (req, res) => {
   } catch (err) { res.status(400).json({ error: err.message }); }
 });
 
+app.put('/api/accounts/:id', async (req, res) => {
+  try {
+    const account = await updateAccount(req.params.id, req.body);
+    broadcast('config', safeConfig());
+    res.json({ ok: true, account: { ...account, secretKey: '****' + account.secretKey.slice(-4) } });
+  } catch (err) { res.status(400).json({ error: err.message }); }
+});
+
 app.delete('/api/accounts/:id', async (req, res) => {
   try {
     await removeAccount(req.params.id);
@@ -1180,6 +1221,24 @@ app.post('/api/accounts/:id/activate', async (req, res) => {
       if (wasRunning) await harness.start();
     }
     res.json({ ok: true });
+  } catch (err) { res.status(400).json({ error: err.message }); }
+});
+
+app.post('/api/accounts/:id/clone', async (req, res) => {
+  try {
+    const source = getAccountById(req.params.id);
+    if (!source) return res.status(404).json({ error: 'Account not found' });
+    const { name } = req.body;
+    if (!name?.trim()) return res.status(400).json({ error: 'Name is required' });
+    const account = await addAccount({
+      name: name.trim(),
+      publicKey: source.publicKey,
+      secretKey: source.secretKey,
+      baseUrl: source.baseUrl,
+      paper: source.paper,
+    });
+    broadcast('config', safeConfig());
+    res.json({ ok: true, sandboxId: `sbx_${account.id}`, account: { ...account, secretKey: '****' + account.secretKey.slice(-4) } });
   } catch (err) { res.status(400).json({ error: err.message }); }
 });
 
@@ -1364,6 +1423,10 @@ app.post('/api/heartbeat/apply-profile', async (req, res) => {
     const targetSandbox = sandboxId || getActiveSandbox()?.id;
     if (!targetSandbox) throw new Error('No active sandbox');
     await applyHeartbeatProfile(targetSandbox, profile);
+    // Reschedule the live harness immediately so the new interval takes effect now
+    // rather than waiting for the current timer to expire naturally.
+    const targetHarness = getHarnessForSandbox(targetSandbox);
+    if (targetHarness?.state.running) targetHarness._scheduleNext();
     broadcast('config', safeConfig());
     res.json({ ok: true, profile, sandboxId: targetSandbox });
   } catch (err) { res.status(400).json({ error: err.message }); }

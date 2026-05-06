@@ -891,6 +891,7 @@
     .trade-card .trade-side { font-size: 11px; font-weight: 700; text-transform: uppercase; }
     .trade-card .trade-side.buy { color: var(--success); }
     .trade-card .trade-side.sell { color: var(--error); }
+    .trade-card .trade-side.close { color: var(--warning); }
     .trade-card .trade-details { font-size: 12px; color: var(--ink-muted); margin-top: 4px; }
     .trade-card .trade-time { font-size: 11px; color: var(--ink-faint); font-family: 'IBM Plex Mono', monospace; }
 
@@ -1022,6 +1023,7 @@
     <button class="tab" data-tab="history" onclick="switchTab('history')">History</button>
     <button class="tab tab-portfolio-mobile" data-tab="portfolio" onclick="switchTab('portfolio')"><span class="tab-full">Portfolio</span><span class="tab-short">Port</span></button>
     <button class="tab" data-tab="agents" onclick="switchTab('agents')">Agents</button>
+    <button class="tab" data-tab="sandboxes" onclick="switchTab('sandboxes')"><span class="tab-full">Sandboxes</span><span class="tab-short">Sbox</span></button>
     <button class="tab" data-tab="accounts" onclick="switchTab('accounts')"><span class="tab-full">Accounts</span><span class="tab-short">Accts</span></button>
     <button class="tab" data-tab="plugins" onclick="switchTab('plugins')"><span class="tab-full">Plugins</span><span class="tab-short">Plug</span></button>
     <button class="tab" data-tab="settings" onclick="switchTab('settings')"><span class="tab-full">Settings</span><span class="tab-short">&#9881;</span></button>
@@ -1113,6 +1115,22 @@
           <p style="font-size:12px;color:var(--ink-muted);margin-bottom:12px">Strategies are your rules — position sizes, stop losses, what to trade, risk limits. Assign a strategy to an agent to constrain its behavior.</p>
           <div id="strategies-list"></div>
         </div>
+      </div>
+    </div>
+
+    <!-- Sandboxes Panel -->
+    <div class="panel" id="panel-sandboxes">
+      <div class="settings-content">
+        <h2>Sandboxes</h2>
+        <p class="subtitle">Each sandbox is an independent agent instance with its own account, heartbeat schedule, and permissions.</p>
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
+          <div class="section-title" style="margin:0">Active Sandboxes</div>
+          <div style="display:flex;gap:8px">
+            <button class="btn primary sm" onclick="showModal('sandbox-create')">New Sandbox</button>
+            <button class="btn sm" id="btn-from-account" onclick="showModal('sandbox-from-account')">From Account</button>
+          </div>
+        </div>
+        <div id="sandboxes-tab-list"></div>
       </div>
     </div>
 
@@ -1421,6 +1439,8 @@ let sandboxScoped = { sandbox: null, agent: null, heartbeat: {}, permissions: {}
 const authToken = new URLSearchParams(window.location.search).get('token') || '';
 let autoScroll = true;
 let nextBeatTime = null, heartbeatSeconds = 0, progressInterval = null;
+const _sbxActiveProfile = {}; // sandboxId → last applied profile id
+const _sbxHbExpanded = new Set(); // sandboxIds with heartbeat intervals panel open
 const terminal = document.getElementById('terminal');
 
 terminal.addEventListener('scroll', () => {
@@ -1867,7 +1887,7 @@ async function startAgent() {
   btn.textContent = 'Starting...'; btn.disabled = true;
   try {
     const sid = getEffectiveSandboxId();
-    if (!sid) { log('No sandbox selected', 'error'); return; }
+    if (!sid || sid === '_manager') { btn.textContent = 'Start'; btn.disabled = false; return; }
     const r = await fetch('/api/sandboxes/' + encodeURIComponent(sid) + '/start', {method:'POST'});
     const d = await r.json();
     if (!d.ok && d.error) {
@@ -1885,7 +1905,7 @@ async function startAgent() {
 }
 async function stopAgent() {
   const sid = getEffectiveSandboxId();
-  if (!sid) return;
+  if (!sid || sid === '_manager') return;
   if (!confirm('Stop the agent on this account?')) return;
   logToSandbox(sid, `<div class="log-entry warning"><span class="time">${fmtTime()}</span>Stopping agent...</div>`);
   await fetch('/api/sandboxes/' + encodeURIComponent(sid) + '/stop', {method:'POST'});
@@ -1894,14 +1914,14 @@ async function stopAgent() {
 }
 async function pauseAgent() {
   const sid = getEffectiveSandboxId();
-  if (!sid) return;
+  if (!sid || sid === '_manager') return;
   logToSandbox(sid, `<div class="log-entry warning"><span class="time">${fmtTime()}</span>Pausing agent...</div>`);
   await fetch('/api/sandboxes/' + encodeURIComponent(sid) + '/pause', {method:'POST'});
   checkHealth(); renderSandboxTabs(); refreshSandboxButtons();
 }
 async function resumeAgent() {
   const sid = getEffectiveSandboxId();
-  if (!sid) return;
+  if (!sid || sid === '_manager') return;
   logToSandbox(sid, `<div class="log-entry success"><span class="time">${fmtTime()}</span>Resuming agent...</div>`);
   await fetch('/api/sandboxes/' + encodeURIComponent(sid) + '/resume', {method:'POST'});
   checkHealth(); renderSandboxTabs(); refreshSandboxButtons();
@@ -1959,8 +1979,11 @@ async function openChatSession(sessionId, accountId) {
     historyState.chatMessages = data.messages || [];
     renderHistorySessions();
     renderHistoryTranscript(data.session, data.messages || []);
+    document.getElementById('history-session-title').scrollIntoView({ behavior: 'smooth', block: 'start' });
   } catch (e) {
     log('Chat load failed: ' + e.message, 'error');
+    const el = document.getElementById('history-transcript');
+    if (el) el.innerHTML = '<div class="log-entry error"><span class="time">--:--:--</span>Failed to load session: ' + esc(e.message) + '</div>';
   }
 }
 
@@ -2060,6 +2083,7 @@ async function _refreshAfterAction(id) {
   await checkHealth();
   renderAccounts();
   renderSandboxTabs();
+  renderSandboxesTab();
   if (getEffectiveSandboxId() === id) refreshSandboxButtons();
 }
 
@@ -2088,7 +2112,7 @@ async function refreshPortfolio() {
       const pv = '$' + Number(acc.PortfolioValue||acc.portfolio_value||0).toLocaleString('en-US',{minimumFractionDigits:2});
       const cv = '$' + Number(acc.Cash||acc.cash||0).toLocaleString('en-US',{minimumFractionDigits:2});
       const bv = '$' + Number(acc.BuyingPower||acc.buying_power||0).toLocaleString('en-US',{minimumFractionDigits:2});
-      const pnl = Number(acc.Equity||acc.equity||0) - Number(acc.LastEquity||acc.last_equity||0);
+      const pnl = Number(acc.PortfolioValue||acc.portfolio_value||acc.Equity||acc.equity||0) - Number(acc.LastEquity||acc.last_equity||0);
       const pnlStr = (pnl>=0?'+':'') + '$' + pnl.toLocaleString('en-US',{minimumFractionDigits:2});
       const cls = pnl>=0? 'positive' : 'negative';
       // Update legacy static IDs
@@ -2154,7 +2178,8 @@ function addTradeCard(trade) {
   const card = document.createElement('div');
   card.className = 'trade-card';
   const t = trade.timestamp ? new Date(trade.timestamp).toLocaleTimeString('en-US',{hour12:false}) : '--';
-  card.innerHTML = '<div class="trade-header"><span class="trade-symbol">' + esc(trade.symbol||'??') + '</span><span class="trade-side ' + (trade.side||'') + '">' + esc(trade.side||'--') + '</span></div><div class="trade-details">' + esc(trade.tool||'') + (trade.quantity?' | Qty: '+trade.quantity:'') + (trade.price?' | $'+trade.price:'') + '</div><div class="trade-time">' + t + '</div>';
+  const qtyLabel = trade.quantity != null ? (String(trade.quantity).startsWith('$') ? ' | ' + trade.quantity : ' | Qty: ' + trade.quantity) : '';
+  card.innerHTML = '<div class="trade-header"><span class="trade-symbol">' + esc(trade.symbol||'??') + '</span><span class="trade-side ' + esc(trade.side||'') + '">' + esc((trade.side||'--').toUpperCase()) + '</span></div><div class="trade-details">' + esc(trade.tool||'') + qtyLabel + (trade.price?' | $'+trade.price:'') + '</div><div class="trade-time">' + t + '</div>';
   feed.insertBefore(card, feed.firstChild);
   while(feed.children.length > 50) feed.removeChild(feed.lastChild);
 }
@@ -2165,7 +2190,250 @@ function renderAll() {
   renderSandboxTabs();
   renderAgents(); renderStrategies(); renderAccounts();
   renderHeartbeat(); renderPermissions(); renderSlack(); renderPromptPreview();
+  renderSandboxesTab();
   document.getElementById('footer-model').textContent = ((sandboxScoped.agent?.model || config.activeModel || '--')).replace('claude-','').split('-202')[0];
+}
+
+// ── Sandboxes Tab ──────────────────────────
+function renderSandboxesTab() {
+  const container = document.getElementById('sandboxes-tab-list');
+  if (!container) return;
+
+  const btnFromAccount = document.getElementById('btn-from-account');
+  if (btnFromAccount) {
+    const hasAccounts = (config.accounts || []).length > 0;
+    btnFromAccount.disabled = !hasAccounts;
+    btnFromAccount.title = hasAccounts ? '' : 'Add an account first in the Accounts tab';
+  }
+
+  const sandboxes = getSandboxEntries();
+  if (!sandboxes.length) {
+    container.innerHTML = '<div class="no-data">No sandboxes yet. Click "New Sandbox" to create one.</div>';
+    return;
+  }
+  const profiles = Array.isArray(window._hbProfiles) ? window._hbProfiles : [];
+
+  container.innerHTML = sandboxes.map(sbx => {
+    const isActive = sbx.id === config.activeSandboxId;
+    const runtime = (window._healthState?.sandboxes || []).find(s => s.sandboxId === sbx.id);
+    const running = !!(runtime?.state?.running);
+    const paused = !!(runtime?.state?.paused);
+    const statusColor = running ? 'var(--success)' : (paused ? 'var(--warning)' : 'var(--ink-faint)');
+    const account = (config.accounts || []).find(a => a.id === sbx.accountId);
+    const accountLabel = account?.name || sbx.name || sbx.id;
+    const isPaper = account ? account.paper !== false : true;
+    const activeAgentId = sbx.agent?.activeAgentId || '';
+    const hb = sbx.heartbeat || {};
+    const phases = ['pre_market','market_open','midday','market_close','after_hours','closed'];
+    const phaseRows = phases.map(ph =>
+      '<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">' +
+      '<label style="text-transform:none;font-weight:400;font-size:12px;width:110px;flex-shrink:0">' + ph.replace(/_/g,' ') + '</label>' +
+      '<input type="number" min="30" style="width:80px" value="' + (hb[ph] !== undefined ? hb[ph] : '') + '" ' +
+      'id="sbx-hb-' + esc(sbx.id) + '-' + ph + '">' +
+      '<span style="font-size:11px;color:var(--ink-muted)">s</span></div>'
+    ).join('');
+
+    return '<div class="config-card" style="margin-bottom:16px">' +
+      '<div class="config-card-header">' +
+        '<span class="config-card-title" style="display:flex;align-items:center;gap:8px">' +
+          '<span style="width:8px;height:8px;border-radius:50%;background:' + statusColor + ';flex-shrink:0;display:inline-block"></span>' +
+          esc(sbx.name || sbx.id) +
+        '</span>' +
+        '<div style="display:flex;gap:4px">' +
+          (isActive ? '<span class="badge" style="background:var(--success-bg);color:var(--success);border-color:var(--success)">Active</span>' : '') +
+          (running ? '<span class="badge active">Running</span>' : '') +
+        '</div>' +
+      '</div>' +
+      '<div class="config-card-desc" style="margin-bottom:12px">' +
+        'Account: <code style="font-size:11px">' + esc(accountLabel) + '</code>' +
+        (isPaper ? ' &nbsp;<span style="font-size:11px;color:var(--ink-muted)">(paper)</span>' : ' &nbsp;<span style="font-size:11px;color:var(--warning)">(live)</span>') +
+      '</div>' +
+      '<div class="config-card-actions" style="margin-bottom:12px">' +
+        (running
+          ? (paused
+            ? '<button class="btn sm primary" onclick="resumeSandbox(\'' + esc(sbx.id) + '\')">Resume</button><button class="btn sm danger" onclick="stopSandbox(\'' + esc(sbx.id) + '\')">Stop</button>'
+            : '<button class="btn sm" onclick="pauseSandbox(\'' + esc(sbx.id) + '\')">Pause</button><button class="btn sm danger" onclick="stopSandbox(\'' + esc(sbx.id) + '\')">Stop</button>')
+          : '<button class="btn primary sm" onclick="startSandbox(\'' + esc(sbx.id) + '\')">Start</button>') +
+        (!isActive ? ' <button class="btn sm" onclick="activateSandboxFromPage(\'' + esc(sbx.id) + '\')">Make Active</button>' : '') +
+        ' <button class="btn sm" onclick="configureSandbox(\'' + esc(sbx.id) + '\')">Full Settings</button>' +
+      '</div>' +
+      '<div class="form-group" style="margin-bottom:8px">' +
+        '<label style="font-size:12px">Assigned Agent</label>' +
+        '<select style="font-size:12px" onchange="assignAgentFromSandboxPage(\'' + esc(sbx.id) + '\',this.value)">' +
+          '<option value="">None</option>' +
+          (config.agents || []).map(a => '<option value="' + esc(a.id) + '"' + (activeAgentId === a.id ? ' selected' : '') + '>' + esc(a.name) + '</option>').join('') +
+        '</select>' +
+      '</div>' +
+      (profiles.length ? (
+        '<div class="form-group" style="margin-bottom:8px">' +
+          '<label style="font-size:12px">Heartbeat Profile</label>' +
+          '<div style="display:flex;gap:8px">' +
+            '<select id="sbx-profile-' + esc(sbx.id) + '" style="font-size:12px;flex:1">' +
+              '<option value="">-- select --</option>' +
+              profiles.map(p => '<option value="' + esc(p.id) + '"' + (_sbxActiveProfile[sbx.id] === p.id ? ' selected' : '') + '>' + esc(p.name) + '</option>').join('') +
+            '</select>' +
+            '<button class="btn sm" onclick="applyProfileFromSandboxPage(\'' + esc(sbx.id) + '\')">Apply</button>' +
+          '</div>' +
+        '</div>'
+      ) : '') +
+      '<div class="form-group" style="margin-bottom:8px">' +
+        '<label style="font-size:12px;cursor:pointer" onclick="toggleSbxHb(\'' + esc(sbx.id) + '\')">' +
+          '<span id="sbx-hb-arrow-' + esc(sbx.id) + '">' + (_sbxHbExpanded.has(sbx.id) ? '&#9650;' : '&#9660;') + '</span> Heartbeat Intervals' +
+        '</label>' +
+        '<div id="sbx-hb-detail-' + esc(sbx.id) + '" style="display:' + (_sbxHbExpanded.has(sbx.id) ? 'block' : 'none') + ';background:var(--surface-2,rgba(0,0,0,0.2));border-radius:6px;padding:12px;margin-top:8px">' +
+          '<div style="font-size:11px;color:var(--ink-muted);margin-bottom:10px">Seconds per phase (min 30). Click Save to apply.</div>' +
+          phaseRows +
+          '<button class="btn sm primary" style="margin-top:8px" onclick="saveSbxHb(\'' + esc(sbx.id) + '\')">Save Intervals</button>' +
+        '</div>' +
+      '</div>' +
+      '<div style="text-align:right">' +
+        '<button class="btn sm" style="color:var(--error);border-color:var(--error)" onclick="deleteSandboxFromPage(\'' + esc(sbx.id) + '\')">Delete</button>' +
+      '</div>' +
+    '</div>';
+  }).join('');
+}
+
+function toggleSbxHb(sandboxId) {
+  const el = document.getElementById('sbx-hb-detail-' + sandboxId);
+  const arrow = document.getElementById('sbx-hb-arrow-' + sandboxId);
+  if (!el) return;
+  const hidden = el.style.display === 'none';
+  el.style.display = hidden ? 'block' : 'none';
+  if (arrow) arrow.innerHTML = hidden ? '&#9650;' : '&#9660;';
+  if (hidden) _sbxHbExpanded.add(sandboxId); else _sbxHbExpanded.delete(sandboxId);
+}
+
+async function assignAgentFromSandboxPage(sandboxId, agentId) {
+  await fetch('/api/sandboxes/' + encodeURIComponent(sandboxId) + '/agent', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ activeAgentId: agentId }),
+  });
+  showToast('Agent assigned', 'success');
+}
+
+async function applyProfileFromSandboxPage(sandboxId) {
+  const select = document.getElementById('sbx-profile-' + sandboxId);
+  if (!select || !select.value) { showToast('Select a profile first', 'error'); return; }
+  _sbxActiveProfile[sandboxId] = select.value; // persist before re-render wipes the dropdown
+  const r = await fetch('/api/heartbeat/apply-profile', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ sandboxId, profile: select.value }),
+  });
+  const d = await r.json();
+  if (d.error) { showToast('Error: ' + d.error, 'error'); return; }
+  const profiles = Array.isArray(window._hbProfiles) ? window._hbProfiles : [];
+  const profile = profiles.find(p => p.id === select.value);
+  if (profile && profile.intervals) {
+    ['pre_market','market_open','midday','market_close','after_hours','closed'].forEach(ph => {
+      const el = document.getElementById('sbx-hb-' + sandboxId + '-' + ph);
+      if (el && profile.intervals[ph] !== undefined) el.value = profile.intervals[ph];
+    });
+  }
+  showToast('Profile applied', 'success');
+  const termSel = document.querySelector(`[data-stat="${sandboxId}-hb-profile"]`);
+  if (termSel) termSel.value = select.value;
+}
+
+async function saveSbxHb(sandboxId) {
+  const phases = ['pre_market','market_open','midday','market_close','after_hours','closed'];
+  const body = { sandboxId };
+  phases.forEach(ph => {
+    const el = document.getElementById('sbx-hb-' + sandboxId + '-' + ph);
+    const v = el ? parseInt(el.value) : NaN;
+    if (!isNaN(v) && v >= 30) body[ph] = v;
+  });
+  await fetch('/api/heartbeat', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  showToast('Heartbeat saved', 'success');
+}
+
+async function activateSandboxFromPage(sandboxId) {
+  const r = await fetch('/api/sandboxes/' + encodeURIComponent(sandboxId) + '/activate', { method: 'POST' });
+  const d = await r.json();
+  if (d.error) { showToast('Activate failed: ' + d.error, 'error'); return; }
+  selectedSandboxId = null;
+  await refreshSelectedSandboxView();
+  renderSandboxesTab();
+  showToast('Sandbox activated', 'success');
+}
+
+async function deleteSandboxFromPage(sandboxId) {
+  const sbx = (config.sandboxes || {})[sandboxId];
+  const name = sbx?.name || sandboxId;
+  if (!confirm('Delete sandbox "' + name + '"? This cannot be undone.')) return;
+  const accountId = sbx?.accountId || sandboxId.replace(/^sbx_/, '');
+  const r = await fetch('/api/accounts/' + encodeURIComponent(accountId), { method: 'DELETE' });
+  const d = await r.json();
+  if (d.error) { showToast('Delete failed: ' + d.error, 'error'); return; }
+  showToast('Sandbox deleted', 'success');
+}
+
+async function submitSandboxCreate() {
+  const agentId = document.getElementById('f-sbx-agent')?.value || '';
+  const profileId = document.getElementById('f-sbx-profile')?.value || '';
+  const body = {
+    name: document.getElementById('f-sbx-name')?.value || '',
+    publicKey: document.getElementById('f-sbx-pk')?.value || '',
+    secretKey: document.getElementById('f-sbx-sk')?.value || '',
+    baseUrl: document.getElementById('f-sbx-url')?.value || '',
+    paper: document.getElementById('f-sbx-paper')?.checked !== false,
+  };
+  if (!body.name || !body.publicKey || !body.secretKey) { showToast('Name and API keys are required', 'error'); return; }
+  try {
+    const r = await fetch('/api/accounts', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    const d = await r.json();
+    if (d.error) { showToast('Error: ' + d.error, 'error'); return; }
+    const sandboxId = d.sandboxId || d.id;
+    if (sandboxId && agentId) {
+      await fetch('/api/sandboxes/' + encodeURIComponent(sandboxId) + '/agent', {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ activeAgentId: agentId }),
+      });
+    }
+    if (sandboxId && profileId) {
+      await fetch('/api/heartbeat/apply-profile', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sandboxId, profile: profileId }),
+      });
+    }
+    closeModal();
+    showToast('Sandbox created', 'success');
+  } catch (e) { showToast('Error: ' + e.message, 'error'); }
+}
+
+async function submitSandboxFromAccount() {
+  const name = document.getElementById('f-sfa-name')?.value?.trim() || '';
+  const accountId = document.getElementById('f-sfa-account')?.value || '';
+  const agentId = document.getElementById('f-sfa-agent')?.value || '';
+  const profileId = document.getElementById('f-sfa-profile')?.value || '';
+  if (!name || !accountId) { showToast('Name and account are required', 'error'); return; }
+  try {
+    const r = await fetch('/api/accounts/' + encodeURIComponent(accountId) + '/clone', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name }),
+    });
+    const d = await r.json();
+    if (d.error) { showToast('Error: ' + d.error, 'error'); return; }
+    const sandboxId = d.sandboxId;
+    if (sandboxId && agentId) {
+      await fetch('/api/sandboxes/' + encodeURIComponent(sandboxId) + '/agent', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ activeAgentId: agentId }),
+      });
+    }
+    if (sandboxId && profileId) {
+      await fetch('/api/heartbeat/apply-profile', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sandboxId, profile: profileId }),
+      });
+    }
+    closeModal();
+    showToast('Sandbox created', 'success');
+  } catch (e) { showToast('Error: ' + e.message, 'error'); }
 }
 
 const sandboxTerminals = {}; // { sandboxId: { el, logs[] } }
@@ -2223,6 +2491,7 @@ function ensureSandboxTerminal(sandboxId, label) {
               <option value="earnings_season">Earnings Season</option>
               <option value="overnight">Overnight Hold</option>
               <option value="scalp">Scalp Mode</option>
+              <option value="penny_stock">Penny Stock</option>
             </select>
           </div>
           <div style="margin-top:4px;display:flex;gap:4px">
@@ -2502,6 +2771,7 @@ function filterTerminalFor(sandboxId) {
 
 async function applyProfile(sandboxId, profile) {
   if (!profile) return;
+  let ok = false;
   try {
     const r = await fetch('/api/heartbeat/apply-profile', {
       method: 'POST',
@@ -2510,7 +2780,11 @@ async function applyProfile(sandboxId, profile) {
     });
     const d = await r.json();
     if (d.ok) {
+      ok = true;
       logToSandbox(sandboxId, `<div class="log-entry success"><span class="time">${fmtTime()}</span>Applied heartbeat profile: ${esc(profile)}</div>`);
+      _sbxActiveProfile[sandboxId] = profile;
+      const sbxSel = document.getElementById('sbx-profile-' + sandboxId);
+      if (sbxSel) sbxSel.value = profile;
     } else {
       logToSandbox(sandboxId, `<div class="log-entry error"><span class="time">${fmtTime()}</span>Failed: ${esc(d.error)}</div>`);
     }
@@ -2518,7 +2792,7 @@ async function applyProfile(sandboxId, profile) {
     logToSandbox(sandboxId, `<div class="log-entry error"><span class="time">${fmtTime()}</span>Error: ${esc(e.message)}</div>`);
   }
   const sel = document.querySelector(`[data-stat="${sandboxId}-hb-profile"]`);
-  if (sel) sel.value = '';
+  if (sel && !ok) sel.value = '';
 }
 
 async function overrideHb(sandboxId) {
@@ -2961,16 +3235,12 @@ function renderAccounts() {
     const beatCount = runtime?.state?.beatCount || 0;
     const phase = runtime?.state?.phase || 'stopped';
     
-    const statusBadge = running 
-      ? '<span class="badge active">Running</span>' 
-      : goReady 
+    const statusBadge = running
+      ? '<span class="badge active">Running</span>'
+      : goReady
         ? '<span class="badge" style="border-color:var(--warning);color:var(--warning)">Ready</span>'
         : '<span class="badge">Stopped</span>';
-    
-    const controls = running
-      ? '<button class="btn sm" onclick="pauseSandbox(\'' + sandboxId + '\')">Pause</button><button class="btn sm danger" onclick="stopSandbox(\'' + sandboxId + '\')">Stop</button>'
-      : '<button class="btn sm primary" onclick="startSandbox(\'' + sandboxId + '\')">Start</button>';
-    
+
     return '<div class="config-card ' + (viewing ? 'active-card' : '') + '" style="border-left:4px solid ' + (a.paper ? 'var(--accent)' : 'var(--error)') + '">'
       + '<div class="config-card-header"><span class="config-card-title">' + esc(a.name) + '</span><div>' + badge + ' ' + (viewing ? '<span class="badge active">Viewing</span>' : '') + ' ' + statusBadge + '</div></div>'
       + '<div class="config-card-meta">Key: ' + (a.publicKey ? a.publicKey.substring(0, 8) + '...' : '??') + ' | ' + (a.baseUrl || '') + '</div>'
@@ -2979,7 +3249,7 @@ function renderAccounts() {
       + '<div class="config-card-actions" style="display:flex;flex-wrap:wrap;gap:8px;margin-top:10px">'
       + '<button class="btn sm" onclick="switchSandboxTab(\'' + sandboxId + '\');switchTab(\'terminal\')">View</button>'
       + '<button class="btn sm" onclick="configureSandbox(\'' + sandboxId + '\')">Configure</button>'
-      + controls
+      + '<button class="btn sm" onclick="showModal(\'account-edit\', config.accounts.find(x=>x.id===\'' + a.id + '\'))">Edit</button>'
       + '<button class="btn sm danger" onclick="deleteAccount(\'' + a.id + '\')">Delete</button>'
       + '</div></div>';
   }).join('');
@@ -3065,8 +3335,45 @@ function showModal(type, data) {
   const modal = document.getElementById('modal-content');
   const overlay = document.getElementById('modal-overlay');
 
-  if(type === 'account-create') {
+  if(type === 'sandbox-create') {
+    const agentOpts = (config.agents || []).map(a => '<option value="'+esc(a.id)+'">'+esc(a.name)+'</option>').join('');
+    const profiles = Array.isArray(window._hbProfiles) ? window._hbProfiles : [];
+    const profileOpts = profiles.map(p => '<option value="'+esc(p.id)+'">'+esc(p.name)+'</option>').join('');
+    modal.innerHTML = '<h3>New Sandbox</h3>'
+      + '<div class="form-group"><label>Sandbox Name</label><input type="text" id="f-sbx-name" placeholder="e.g. PennyProphet"></div>'
+      + '<div class="form-row"><div class="form-group"><label>Public Key</label><input type="text" id="f-sbx-pk" placeholder="AKXXXXXXXXXX"></div>'
+      + '<div class="form-group"><label>Secret Key</label><input type="password" id="f-sbx-sk" placeholder="Your secret key"></div></div>'
+      + '<div class="form-group"><label>Base URL</label><input type="text" id="f-sbx-url" placeholder="https://paper-api.alpaca.markets"><div class="form-hint">Leave blank for auto-detection</div></div>'
+      + '<div class="form-group"><label><input type="checkbox" id="f-sbx-paper" checked> Paper Trading</label></div>'
+      + (agentOpts ? '<div class="form-group"><label>Assign Agent (optional)</label><select id="f-sbx-agent"><option value="">None</option>'+agentOpts+'</select></div>' : '')
+      + (profileOpts ? '<div class="form-group"><label>Heartbeat Profile (optional)</label><select id="f-sbx-profile"><option value="">None</option>'+profileOpts+'</select></div>' : '')
+      + '<div class="modal-actions"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn primary" onclick="submitSandboxCreate()">Create Sandbox</button></div>';
+  }
+  else if(type === 'sandbox-from-account') {
+    const accounts = config.accounts || [];
+    const agentOpts = (config.agents || []).map(a => '<option value="'+esc(a.id)+'">'+esc(a.name)+'</option>').join('');
+    const profiles = Array.isArray(window._hbProfiles) ? window._hbProfiles : [];
+    const profileOpts = profiles.map(p => '<option value="'+esc(p.id)+'">'+esc(p.name)+'</option>').join('');
+    const accountOpts = accounts.map(a =>
+      '<option value="'+esc(a.id)+'">' + esc(a.name) + ' (' + (a.paper !== false ? 'Paper' : 'Live') + ')</option>'
+    ).join('');
+    modal.innerHTML = '<h3>New Sandbox from Account</h3>'
+      + '<div class="form-group"><label>Sandbox Name</label><input type="text" id="f-sfa-name" placeholder="e.g. PennyProphet Paper"></div>'
+      + '<div class="form-group"><label>Account</label><select id="f-sfa-account"><option value="">-- select account --</option>'+accountOpts+'</select></div>'
+      + (agentOpts ? '<div class="form-group"><label>Assign Agent (optional)</label><select id="f-sfa-agent"><option value="">None</option>'+agentOpts+'</select></div>' : '')
+      + (profileOpts ? '<div class="form-group"><label>Heartbeat Profile (optional)</label><select id="f-sfa-profile"><option value="">None</option>'+profileOpts+'</select></div>' : '')
+      + '<div class="modal-actions"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn primary" onclick="submitSandboxFromAccount()">Create Sandbox</button></div>';
+  }
+  else if(type === 'account-create') {
     modal.innerHTML = '<h3>Add Trading Account</h3><div class="form-group"><label>Account Name</label><input type="text" id="f-acc-name" placeholder="e.g. Paper Trading"></div><div class="form-row"><div class="form-group"><label>Public Key</label><input type="text" id="f-acc-pk" placeholder="AKXXXXXXXXXX"></div><div class="form-group"><label>Secret Key</label><input type="password" id="f-acc-sk" placeholder="Your secret key"></div></div><div class="form-group"><label>Base URL</label><input type="text" id="f-acc-url" placeholder="https://paper-api.alpaca.markets"><div class="form-hint">Leave blank for auto-detection based on paper/live selection</div></div><div class="form-group"><label><input type="checkbox" id="f-acc-paper" checked> Paper Trading</label></div><div class="modal-actions"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn primary" onclick="submitAccount()">Add Account</button></div>';
+  }
+  else if(type === 'account-edit') {
+    const a = data || {};
+    modal.innerHTML = '<h3>Edit Account</h3>'
+      + '<div class="form-group"><label>Account Name</label><input type="text" id="f-eacc-name" value="'+esc(a.name||'')+'"></div>'
+      + '<div class="form-group"><label>API Endpoint (Base URL)</label><input type="text" id="f-eacc-url" value="'+esc(a.baseUrl||'')+'" placeholder="https://paper-api.alpaca.markets"></div>'
+      + '<div class="form-group"><label><input type="checkbox" id="f-eacc-paper"'+(a.paper?' checked':'')+'> Paper Trading</label></div>'
+      + '<div class="modal-actions"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn primary" onclick="submitEditAccount(\''+esc(a.id||'')+'\')">Save</button></div>';
   }
   else if(type === 'agent-create' || type === 'agent-edit') {
     const a = data || { name:'', description:'', systemPromptTemplate:'default', customSystemPrompt:'', strategyId:'default', model: config.activeModel, heartbeatOverrides:{} };
@@ -3102,6 +3409,16 @@ async function submitAccount() {
   const body = { name: v('f-acc-name'), publicKey: v('f-acc-pk'), secretKey: v('f-acc-sk'), baseUrl: v('f-acc-url'), paper: document.getElementById('f-acc-paper').checked };
   try {
     const r = await fetch('/api/accounts', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
+    const d = await r.json();
+    if (d.error) { alert('Error: ' + d.error); return; }
+    closeModal();
+  } catch (e) { alert('Error: ' + e.message); }
+}
+
+async function submitEditAccount(id) {
+  const body = { name: v('f-eacc-name'), baseUrl: v('f-eacc-url'), paper: document.getElementById('f-eacc-paper').checked };
+  try {
+    const r = await fetch('/api/accounts/' + encodeURIComponent(id), {method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
     const d = await r.json();
     if (d.error) { alert('Error: ' + d.error); return; }
     closeModal();
@@ -3207,6 +3524,7 @@ async function checkHealth() {
     el.style.color = healthy ? 'var(--success)' : 'var(--error)';
     renderAccounts();
     renderSandboxTabs();
+    renderSandboxesTab();
     refreshSandboxButtons();
   } catch { document.getElementById('bot-status').textContent = 'err'; }
 }
@@ -3603,6 +3921,15 @@ document.addEventListener('visibilitychange', () => {
     startPolling();
   }
 });
+
+// Load heartbeat profiles for sandbox tab and modal
+window._hbProfiles = [];
+fetch('/api/heartbeat/profiles').then(r => r.ok ? r.json() : {}).then(data => {
+  const raw = data.profiles || data;
+  window._hbProfiles = Array.isArray(raw)
+    ? raw
+    : Object.entries(raw).map(([id, p]) => ({ id, name: p.label || id, description: p.description || '', intervals: p.phases || {} }));
+}).catch(() => {});
 
 startPolling();
 </script>

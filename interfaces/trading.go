@@ -105,6 +105,9 @@ type Account struct {
 	BuyingPower      float64
 	DayTradeCount    int
 	PatternDayTrader bool
+	// LastEquity is the previous trading session's closing equity, used to compute
+	// intraday P&L. Zero indicates the data is unavailable (e.g. test stubs).
+	LastEquity float64
 }
 
 type Bar struct {

@@ -1,6 +1,7 @@
 package services
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -21,7 +22,9 @@ type AlpacaTradingService struct {
 	dataClient *marketdata.Client
 	apiKey     string
 	apiSecret  string
+	baseURL    string
 	logger     *logrus.Logger
+	httpClient *http.Client
 }
 
 // NewAlpacaTradingService creates a new Alpaca trading service
@@ -48,7 +51,9 @@ func NewAlpacaTradingService(apiKey, secretKey, baseURL string, isPaper bool) (*
 		dataClient: dataClient,
 		apiKey:     apiKey,
 		apiSecret:  secretKey,
+		baseURL:    baseURL,
 		logger:     logger,
+		httpClient: &http.Client{Timeout: 30 * time.Second},
 	}, nil
 }
 
@@ -178,6 +183,7 @@ func (s *AlpacaTradingService) GetAccount(ctx context.Context) (*interfaces.Acco
 		BuyingPower:      alpacaAccount.BuyingPower.InexactFloat64(),
 		DayTradeCount:    int(alpacaAccount.DaytradeCount),
 		PatternDayTrader: alpacaAccount.PatternDayTrader,
+		LastEquity:       alpacaAccount.LastEquity.InexactFloat64(),
 	}, nil
 }
 
@@ -314,8 +320,7 @@ func (s *AlpacaTradingService) GetOptionsChain(ctx context.Context, underlying s
 	req.Header.Set("Accept", "application/json")
 
 	// Execute request
-	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Do(req)
+	resp, err := s.httpClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch options chain: %w", err)
 	}
@@ -410,18 +415,102 @@ func (s *AlpacaTradingService) ListOptionsPositions(ctx context.Context) ([]*int
 	for _, pos := range positions {
 		if pos.AssetClass == "us_option" {
 			optionsPositions = append(optionsPositions, &interfaces.OptionsPosition{
-				Symbol:        pos.Symbol,
-				Qty:           pos.Qty.InexactFloat64(),
-				AvgEntryPrice: pos.AvgEntryPrice.InexactFloat64(),
-				MarketValue:   pos.MarketValue.InexactFloat64(),
-				CostBasis:     pos.CostBasis.InexactFloat64(),
-				UnrealizedPL:  pos.UnrealizedPL.InexactFloat64(),
+				Symbol:         pos.Symbol,
+				Qty:            pos.Qty.InexactFloat64(),
+				AvgEntryPrice:  pos.AvgEntryPrice.InexactFloat64(),
+				MarketValue:    pos.MarketValue.InexactFloat64(),
+				CostBasis:      pos.CostBasis.InexactFloat64(),
+				UnrealizedPL:   pos.UnrealizedPL.InexactFloat64(),
 				UnrealizedPLPC: pos.UnrealizedIntradayPLPC.InexactFloat64(),
-				CurrentPrice:  pos.CurrentPrice.InexactFloat64(),
-				Side:          string(pos.Side),
+				CurrentPrice:   pos.CurrentPrice.InexactFloat64(),
+				Side:           string(pos.Side),
 			})
 		}
 	}
 
 	return optionsPositions, nil
+}
+
+// alpacaMlegRequest is the JSON body for Alpaca's multi-leg order endpoint.
+type alpacaMlegRequest struct {
+	Type        string          `json:"type"`
+	OrderClass  string          `json:"order_class"`
+	TimeInForce string          `json:"time_in_force"`
+	LimitPrice  string          `json:"limit_price,omitempty"` // string per Alpaca spec
+	Qty         string          `json:"qty"`
+	Legs        []alpacaMlegLeg `json:"legs"`
+}
+
+type alpacaMlegLeg struct {
+	Symbol         string `json:"symbol"`
+	Side           string `json:"side"`
+	RatioQty       string `json:"ratio_qty"`
+	PositionIntent string `json:"position_intent"`
+}
+
+// PlaceMultiLegOrder places a 4-leg iron condor as a single atomic combo order.
+// limitPrice is the net credit per contract (positive = we receive credit).
+func (s *AlpacaTradingService) PlaceMultiLegOrder(ctx context.Context, order MultiLegOrder) (string, error) {
+	legs := make([]alpacaMlegLeg, len(order.Legs))
+	for i, leg := range order.Legs {
+		legs[i] = alpacaMlegLeg{
+			Symbol:         leg.Symbol,
+			Side:           leg.Side,
+			RatioQty:       "1",
+			PositionIntent: leg.PositionIntent,
+		}
+	}
+	orderType := "limit"
+	limitPriceStr := fmt.Sprintf("%.2f", order.LimitPrice)
+	if order.LimitPrice == 0 {
+		orderType = "market"
+		limitPriceStr = "" // omitempty will drop this field
+	}
+
+	tif := order.TimeInForce
+	if tif == "" {
+		tif = "day"
+	}
+
+	body := alpacaMlegRequest{
+		Type:        orderType,
+		OrderClass:  "mleg",
+		TimeInForce: tif,
+		LimitPrice:  limitPriceStr,
+		Qty:         fmt.Sprintf("%d", order.Contracts),
+		Legs:        legs,
+	}
+	jsonBody, err := json.Marshal(body)
+	if err != nil {
+		return "", fmt.Errorf("marshal mleg order: %w", err)
+	}
+
+	url := s.baseURL + "/v2/orders"
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(jsonBody))
+	if err != nil {
+		return "", fmt.Errorf("create mleg request: %w", err)
+	}
+	req.Header.Set("APCA-API-KEY-ID", s.apiKey)
+	req.Header.Set("APCA-API-SECRET-KEY", s.apiSecret)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := s.httpClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("execute mleg request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 400 {
+		return "", fmt.Errorf("alpaca mleg error %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	var result struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return "", fmt.Errorf("unmarshal mleg response: %w", err)
+	}
+	return result.ID, nil
 }

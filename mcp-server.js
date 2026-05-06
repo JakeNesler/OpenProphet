@@ -21,6 +21,16 @@ const TRADING_BOT_URL = process.env.TRADING_BOT_URL || 'http://localhost:4534';
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const OPENPROPHET_ACCOUNT_ID = process.env.OPENPROPHET_ACCOUNT_ID || 'default';
 const OPENPROPHET_SANDBOX_ID = process.env.OPENPROPHET_SANDBOX_ID || `sbx_${OPENPROPHET_ACCOUNT_ID}`;
+
+// Per-agent tool allowlist. When set (comma-separated tool names), the ListTools
+// response is filtered to only those tools — saves prompt tokens by not exposing
+// schemas for tools this agent never uses. Unset/empty = all tools (default).
+const TOOL_ALLOWLIST = new Set(
+  (process.env.OPENPROPHET_TOOL_ALLOWLIST || '')
+    .split(',')
+    .map(s => s.trim())
+    .filter(Boolean)
+);
 const SANDBOX_DATA_DIR = path.join(process.cwd(), 'data', 'sandboxes', OPENPROPHET_ACCOUNT_ID);
 const SUMMARIES_DIR = path.join(SANDBOX_DATA_DIR, 'news_summaries');
 const DECISIONS_DIR = path.join(SANDBOX_DATA_DIR, 'decisive_actions');
@@ -32,6 +42,142 @@ const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash-exp' });
 // Ensure directories exist
 await fs.mkdir(SUMMARIES_DIR, { recursive: true });
 await fs.mkdir(DECISIONS_DIR, { recursive: true });
+
+// ── News deduplication (entity + event bucketing) ─────────────────────────────
+// Prevents the same story from appearing across multiple news tool calls in one
+// heartbeat. Buckets by (ticker, event_type) so "Google surges on earnings" and
+// "Alphabet jumps after Q1 results" both map to GOOG:earnings and the second is dropped.
+
+const NEWS_DEDUP_TTL_MS = 30 * 60 * 1000; // reset every 30 min (one heartbeat window)
+
+const newsDedup = {
+  seen: new Set(),
+  resetAt: Date.now() + NEWS_DEDUP_TTL_MS,
+  checkAndReset() {
+    if (Date.now() > this.resetAt) {
+      this.seen.clear();
+      this.resetAt = Date.now() + NEWS_DEDUP_TTL_MS;
+    }
+  },
+};
+
+// Longer aliases first so "goldman sachs" matches before "goldman".
+// Each alias is compiled to a word-boundary regex to avoid substring false matches
+// (e.g. "intel" matching "intelligence", "meta" matching "metals").
+const TICKER_ALIASES = Object.entries({
+  'goldman sachs': 'GS', 'j.p. morgan': 'JPM', 'bank of america': 'BAC',
+  'morgan stanley': 'MS', 'microstrategy': 'MSTR', 'marathon digital': 'MARA',
+  alphabet: 'GOOG', google: 'GOOG',
+  facebook: 'META', meta: 'META',
+  microsoft: 'MSFT', apple: 'AAPL', amazon: 'AMZN', tesla: 'TSLA',
+  nvidia: 'NVDA', netflix: 'NFLX', intel: 'INTC', palantir: 'PLTR',
+  coinbase: 'COIN', marathon: 'MARA', walmart: 'WMT', disney: 'DIS',
+  salesforce: 'CRM', berkshire: 'BRK', jpmorgan: 'JPM', goldman: 'GS',
+})
+  .sort((a, b) => b[0].length - a[0].length)
+  .map(([alias, ticker]) => [new RegExp(`\\b${alias.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`), ticker]);
+
+const EVENT_KEYWORDS = {
+  earnings:  ['earnings', 'revenue', 'profit', 'eps', ' q1 ', ' q2 ', ' q3 ', ' q4 ', 'quarterly', 'quarter results', 'better-than-expected', 'beat', 'miss', 'guidance', 'forecast', 'outlook'],
+  analyst:   ['upgrade', 'downgrade', 'price target', 'overweight', 'underweight', 'outperform', 'underperform', 'buy rating', 'sell rating', 'raises target', 'cuts target'],
+  ma:        ['merger', 'acquisition', 'acquires', 'buyout', 'takeover', 'to buy ', 'to acquire'],
+  fda:       ['fda ', 'clinical trial', 'drug approval'],
+  layoff:    ['layoff', 'layoffs', 'job cuts', 'restructur', 'downsiz', 'workforce reduction'],
+  ipo:       ['ipo', 'goes public', 'public debut'],
+  fed:       ['fomc', 'federal reserve', 'interest rate', 'rate hike', 'rate cut', 'powell', 'fed funds', 'basis point'],
+  cpi:       ['consumer price index', 'cpi report', 'pce', 'ppi report', 'inflation data', 'inflation report'],
+  jobs:      ['nfp', 'jobs report', 'payrolls', 'unemployment rate', 'jobless claims', 'labor market'],
+  gdp:       ['gdp', 'gross domestic product'],
+  tariff:    ['tariff', 'trade war', 'export ban', 'import duty'],
+  legal:     ['lawsuit', 'sec charges', 'antitrust', 'fraud charges'],
+};
+
+// Common ALL-CAPS words in financial headlines that are not ticker symbols.
+// Intentionally broad to prevent false dedup keys from words like RALLY, CHINA, OPEC.
+const NON_TICKERS = new Set([
+  'CEO', 'CFO', 'COO', 'CTO', 'IPO', 'ETF', 'SEC', 'FDA', 'DOJ', 'FED',
+  'GDP', 'CPI', 'NFP', 'PCE', 'PPI', 'AI', 'US', 'UK', 'EU', 'NY', 'DC',
+  'AM', 'PM', 'ET', 'EST', 'PST',
+  // Common English words and abbreviations that appear ALL-CAPS in headlines
+  'FOR', 'THE', 'AND', 'NOT', 'BUT', 'NEW', 'TOP', 'BIG', 'ALL', 'OUT',
+  'UP', 'ON', 'IN', 'AT', 'BY', 'TO', 'AS', 'OR', 'AN',
+  // Countries / regions
+  'CHINA', 'JAPAN', 'INDIA', 'OPEC', 'NATO', 'BRICS', 'ECB', 'BOJ', 'BOE', 'IMF',
+  // News-ese
+  'BREAKING', 'UPDATE', 'WATCH', 'LIVE', 'NEWS', 'ALERT', 'REPORT', 'SAYS', 'SEES',
+  'RALLY', 'BEATS', 'JUMPS', 'FALLS', 'RISES', 'SLUMP', 'CRASH', 'STOCK', 'BONDS',
+  'CLOSE', 'OPENS', 'HIGHS', 'LOWER', 'MIXED', 'WORLD', 'FIRST', 'AFTER',
+  // Regulators / agencies not already listed
+  'FBI', 'CIA', 'IRS', 'EPA', 'FAA', 'TSA', 'WHO', 'CDC', 'GOP', 'DNC',
+  // Media outlets (appear in "via CNBC" style suffixes)
+  'WSJ', 'NYT', 'CNBC', 'BBC', 'WSJ', 'ESG', 'UAW',
+  // Finance jargon all-caps
+  'WTI', 'OIL', 'GAS', 'USD', 'EUR', 'YEN', 'GBP',
+]);
+
+function extractEntity(title) {
+  const lower = title.toLowerCase();
+  // Word-boundary regex per alias prevents "intel" → "intelligence" false matches
+  for (const [re, ticker] of TICKER_ALIASES) {
+    if (re.test(lower)) return ticker;
+  }
+  // Fall back to $AAPL cashtag or standalone 2-5 char ALL-CAPS words
+  const matches = title.match(/\$([A-Z]{1,5})\b|\b([A-Z]{2,5})\b/g) || [];
+  for (const m of matches) {
+    const clean = m.replace('$', '');
+    if (!NON_TICKERS.has(clean)) return clean;
+  }
+  return null;
+}
+
+function extractEvent(title) {
+  const lower = ` ${title.toLowerCase()} `;
+  for (const [event, keywords] of Object.entries(EVENT_KEYWORDS)) {
+    if (keywords.some(kw => lower.includes(kw))) return event;
+  }
+  return 'general';
+}
+
+function deduplicateArticles(articles) {
+  newsDedup.checkAndReset();
+  const kept = [];
+  for (const article of articles) {
+    const title = article.title || article.headline || article.summary || '';
+    if (!title) { kept.push(article); continue; }
+    const entity = extractEntity(title);
+    const event  = extractEvent(title);
+    // If we can't identify either a specific entity OR a specific event, the story is
+    // too ambiguous to bucket safely — keep it rather than risk collapsing unrelated articles
+    // into a single "macro:general" slot.
+    if (!entity && event === 'general') {
+      kept.push(article);
+      continue;
+    }
+    const key = entity ? `${entity}:${event}` : `macro:${event}`;
+    if (!newsDedup.seen.has(key)) {
+      newsDedup.seen.add(key);
+      kept.push(article);
+    }
+  }
+  return kept;
+}
+
+// Applies dedup to whichever array field a news response uses
+function applyNewsDedup(data) {
+  const fields = ['news', 'articles', 'bulletins', 'stories', 'items', 'results'];
+  if (Array.isArray(data)) {
+    const filtered = deduplicateArticles(data);
+    return filtered;
+  }
+  for (const field of fields) {
+    if (Array.isArray(data[field])) {
+      const before = data[field].length;
+      const filtered = deduplicateArticles(data[field]);
+      return { ...data, [field]: filtered, _dedup_dropped: before - filtered.length };
+    }
+  }
+  return data; // unknown shape — return as-is
+}
 
 // Helper to call trading bot API - resolves correct port per sandbox
 async function getTradingBotUrl() {
@@ -87,8 +233,7 @@ const server = new Server(
 
 // List available tools
 server.setRequestHandler(ListToolsRequestSchema, async () => {
-  return {
-    tools: [
+  const allTools = [
       {
         name: 'get_account',
         description: 'Get trading account information including cash, buying power, and portfolio value',
@@ -1095,13 +1240,13 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: 'read_latest_report',
-        description: "Read the most recently generated analysis report from data/reports/. Use after background screeners finish, or to load the daily briefing and weekly regime report at the start of each pre-market beat.",
+        description: "Read the most recently generated analysis report from data/reports/. Use after background screeners finish, or to load the daily briefing and weekly regime report at the start of each pre-market beat. Use type='market_alert' to read the latest intra-day breaking news alert written by the mid-session scanner.",
         inputSchema: {
           type: 'object',
           properties: {
             type: {
               type: 'string',
-              enum: ['vcp', 'pead', 'market_top', 'ftd', 'daily_brief', 'weekly_regime', 'uptrend', 'scenario', 'review'],
+              enum: ['vcp', 'pead', 'market_top', 'ftd', 'daily_brief', 'weekly_regime', 'uptrend', 'scenario', 'review', 'market_alert'],
               description: 'Report type to read',
             },
           },
@@ -1110,7 +1255,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: 'get_penny_candidates',
-        description: 'Get penny stock candidates scored above a threshold by the real-time signal pipeline. Returns composite score (0–100), dominant signal type (technical/regulatory/social), and context. Use min_score=60 for tradeable signals.',
+        description: 'Get penny stock candidates scored above a threshold by the real-time signal pipeline. Returns ticker, scores (composite, technical, regulatory, social), and dominant_signal type (technical/regulatory/social). Per-candidate context strings are omitted by default to keep the list compact — call get_penny_signal_detail for full context on the specific tickers you intend to trade. Use min_score=60 for tradeable signals.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -1118,7 +1263,85 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               type: 'number',
               description: 'Minimum composite score (0–100). Default: 60. Scores 60–79 → 2–3% position size; 80–100 → 5–7% position size.',
             },
+            detail: {
+              type: 'boolean',
+              description: 'When true, includes full context strings (technical_context, regulatory_event, social_context) inline for every candidate. Default false — prefer fetching context per-ticker via get_penny_signal_detail to save tokens.',
+            },
           },
+        },
+      },
+      {
+        name: 'get_harvest_state',
+        description: 'Get current Harvest agent state: open condors, circuit breaker status, trailing 30-day P&L, and deployed buying power. Check this at the start of every heartbeat before evaluating entries or exits.',
+        inputSchema: { type: 'object', properties: {} },
+      },
+      {
+        name: 'get_harvest_ivr',
+        description: 'Get IV Rank (IVR) for a Harvest universe underlying. Requires current_iv from the options chain (ATM implied volatility). Returns IVR on 0-100 scale; -1 means insufficient history. Gate: only enter if IVR >= 30.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            symbol: { type: 'string', description: 'Underlying symbol (SPY, QQQ, IWM, GLD, TLT)' },
+            current_iv: { type: 'number', description: 'Current ATM implied volatility (e.g. 0.185 for 18.5%)' },
+          },
+          required: ['symbol', 'current_iv'],
+        },
+      },
+      {
+        name: 'get_harvest_expirations',
+        description: 'Get the next qualifying monthly expiration (third Friday) in the [35, 55] DTE band for a given underlying. Returns expiration_date and dte. If no qualifying expiration exists, returns a 404-style error.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            symbol: { type: 'string', description: 'Underlying symbol (SPY, QQQ, IWM, GLD, TLT)' },
+          },
+          required: ['symbol'],
+        },
+      },
+      {
+        name: 'get_harvest_fomc',
+        description: 'Check FOMC blackout status. If is_blackout=true, do NOT open new positions. Blackout window = 24 hours before scheduled FOMC announcement.',
+        inputSchema: { type: 'object', properties: {} },
+      },
+      {
+        name: 'open_iron_condor',
+        description: 'Open a new iron condor position for a Harvest underlying. Provide the four OCC option symbols, strikes, contract count, and credit. Returns condor_id, order_id, and status.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            underlying:             { type: 'string', description: 'Underlying symbol (SPY, QQQ, IWM, GLD, TLT)' },
+            expiration_date:        { type: 'string', description: 'Expiration date YYYY-MM-DD (third Friday of target month)' },
+            short_put_symbol:       { type: 'string', description: 'OCC symbol for short put (sell to open)' },
+            short_put_strike:       { type: 'number', description: 'Short put strike price' },
+            long_put_symbol:        { type: 'string', description: 'OCC symbol for long put (buy to open, wing_width below short put)' },
+            long_put_strike:        { type: 'number', description: 'Long put strike price' },
+            short_call_symbol:      { type: 'string', description: 'OCC symbol for short call (sell to open)' },
+            short_call_strike:      { type: 'number', description: 'Short call strike price' },
+            long_call_symbol:       { type: 'string', description: 'OCC symbol for long call (buy to open, wing_width above short call)' },
+            long_call_strike:       { type: 'number', description: 'Long call strike price' },
+            contracts:              { type: 'number', description: 'Number of iron condors (from sizing formula: floor(portfolio * 0.015 / (wing_width * 100)))' },
+            wing_width:             { type: 'number', description: 'Wing width in dollars (SPY=5, QQQ=5, IWM=2, GLD=2, TLT=1)' },
+            credit_per_contract:    { type: 'number', description: 'Net credit received per contract at entry (mid-price of the 4-leg combo)' },
+            ivr_at_entry:           { type: 'number', description: 'IV rank at time of entry (for analysis)' },
+            portfolio_value_at_entry: { type: 'number', description: 'Total portfolio equity at time of entry (snapshot)' },
+            overlap_log:            { type: 'string', description: 'JSON string: [{agent, underlying, direction, contracts, dte}] — other agents with positions in this underlying' },
+          },
+          required: ['underlying', 'expiration_date', 'short_put_symbol', 'short_put_strike', 'long_put_symbol', 'long_put_strike', 'short_call_symbol', 'short_call_strike', 'long_call_symbol', 'long_call_strike', 'contracts', 'wing_width', 'credit_per_contract'],
+        },
+      },
+      {
+        name: 'close_iron_condor',
+        description: 'Close an existing Harvest iron condor position. Provide the condor_id from open_iron_condor, the order type, and the current cost-to-close per contract. Returns close_order_id and realized_pnl.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            condor_id:         { type: 'string', description: 'The condor_id returned when the position was opened' },
+            order_type:        { type: 'string', enum: ['limit', 'market', 'marketable_limit'], description: 'limit: patient fill at mid; marketable_limit: mid+$0.20 for faster fill; market: immediate at any price' },
+            limit_price:       { type: 'number', description: 'Net debit limit price (required for limit and marketable_limit order types)' },
+            close_reason:      { type: 'string', enum: ['profit_target', 'loss_stop', 'time_exit', 'manual'], description: 'Reason for closing (used in exit logging)' },
+            cost_per_contract: { type: 'number', description: 'Current mid-price cost to close the condor per contract (for P&L calculation)' },
+          },
+          required: ['condor_id', 'order_type', 'close_reason', 'cost_per_contract'],
         },
       },
       {
@@ -1151,8 +1374,12 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           properties: {},
         },
       },
-    ],
-  };
+    ];
+
+  const tools = TOOL_ALLOWLIST.size > 0
+    ? allTools.filter(t => TOOL_ALLOWLIST.has(t.name))
+    : allTools;
+  return { tools };
 });
 
 // ── Permission Enforcement ──────────────────────────────────────────
@@ -1162,7 +1389,7 @@ const AGENT_QUERY = { sandboxId: OPENPROPHET_SANDBOX_ID };
 const agentAxios = axios.create({
   headers: AGENT_AUTH_TOKEN ? { Authorization: `Bearer ${AGENT_AUTH_TOKEN}` } : {},
 });
-const ORDER_TOOLS = ['place_buy_order', 'place_sell_order', 'place_options_order', 'place_managed_position', 'close_managed_position'];
+const ORDER_TOOLS = ['place_buy_order', 'place_sell_order', 'place_options_order', 'place_managed_position', 'close_managed_position', 'open_iron_condor', 'close_iron_condor'];
 
 async function enforcePermissions(toolName, args) {
   let perms;
@@ -1189,6 +1416,10 @@ async function enforcePermissions(toolName, args) {
     // Options check
     if (!perms.allowOptions && (toolName === 'place_options_order' || (args.symbol && args.symbol.length > 10))) {
       throw new Error('Options trading is DISABLED by permissions.');
+    }
+    // Harvest condor check
+    if ((toolName === 'open_iron_condor' || toolName === 'close_iron_condor') && !perms.allowOptions) {
+      throw new Error('Options trading is DISABLED by permissions. Cannot open/close iron condors.');
     }
     // Stock check
     if (!perms.allowStocks && (toolName === 'place_buy_order' || toolName === 'place_sell_order')) {
@@ -1445,7 +1676,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case 'get_news': {
         const limit = args.limit || 20;
-        const data = await callTradingBot(`/news?limit=${limit}`);
+        const data = applyNewsDedup(await callTradingBot(`/news?limit=${limit}`));
         return {
           content: [
             {
@@ -1458,7 +1689,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case 'get_news_by_topic': {
         // Use compact mode to reduce token usage
-        const data = await callTradingBot(`/news/topic/${args.topic}?compact=true`);
+        const data = applyNewsDedup(await callTradingBot(`/news/topic/${args.topic}?compact=true`));
         return {
           content: [
             {
@@ -1471,6 +1702,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case 'search_news': {
         const limit = args.limit || 20;
+        // No dedup applied — this is a targeted query; the agent expects specific results.
         const data = await callTradingBot(`/news/search?q=${encodeURIComponent(args.query)}&limit=${limit}`);
         return {
           content: [
@@ -1486,7 +1718,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const endpoint = args.symbols
           ? `/news/market?symbols=${encodeURIComponent(args.symbols)}`
           : '/news/market';
-        const data = await callTradingBot(endpoint);
+        const data = applyNewsDedup(await callTradingBot(endpoint));
         return {
           content: [
             {
@@ -1625,7 +1857,7 @@ ${allNews.map((article, i) =>
       }
 
       case 'get_marketwatch_topstories': {
-        const data = await callTradingBot('/news/marketwatch/topstories');
+        const data = applyNewsDedup(await callTradingBot('/news/marketwatch/topstories'));
         return {
           content: [
             {
@@ -1637,7 +1869,7 @@ ${allNews.map((article, i) =>
       }
 
       case 'get_marketwatch_realtime': {
-        const data = await callTradingBot('/news/marketwatch/realtime');
+        const data = applyNewsDedup(await callTradingBot('/news/marketwatch/realtime'));
         return {
           content: [
             {
@@ -1649,7 +1881,7 @@ ${allNews.map((article, i) =>
       }
 
       case 'get_marketwatch_bulletins': {
-        const data = await callTradingBot('/news/marketwatch/bulletins');
+        const data = applyNewsDedup(await callTradingBot('/news/marketwatch/bulletins'));
         return {
           content: [
             {
@@ -1661,7 +1893,7 @@ ${allNews.map((article, i) =>
       }
 
       case 'get_marketwatch_marketpulse': {
-        const data = await callTradingBot('/news/marketwatch/marketpulse');
+        const data = applyNewsDedup(await callTradingBot('/news/marketwatch/marketpulse'));
         return {
           content: [
             {
@@ -1673,7 +1905,7 @@ ${allNews.map((article, i) =>
       }
 
       case 'get_marketwatch_all': {
-        const data = await callTradingBot('/news/marketwatch/all');
+        const data = applyNewsDedup(await callTradingBot('/news/marketwatch/all'));
         return {
           content: [
             {
@@ -1744,7 +1976,7 @@ ${allNews.map((article, i) =>
           symbols: args.symbols || [],
           max_articles_per_source: args.max_articles_per_source || 10,
         };
-        const data = await callTradingBot('/intelligence/cleaned-news', 'POST', requestBody);
+        const data = applyNewsDedup(await callTradingBot('/intelligence/cleaned-news', 'POST', requestBody));
         return {
           content: [
             {
@@ -2479,6 +2711,7 @@ Worst Trade: ${stats.worst_result_pct.toFixed(1)}% ($${stats.worst_result_dollar
           uptrend: 'uptrend_analysis_',
           scenario: 'scenario_',
           review: 'review_',
+          market_alert: 'market_alert_',
         };
         const prefix = prefixMap[reportType];
         if (!prefix) return { content: [{ type: 'text', text: `Unknown report type: ${reportType}. Valid: ${Object.keys(prefixMap).join(', ')}` }], isError: true };
@@ -2491,7 +2724,14 @@ Worst Trade: ${stats.worst_result_pct.toFixed(1)}% ($${stats.worst_result_dollar
           return { content: [{ type: 'text', text: 'data/reports/ not found. No reports generated yet.' }] };
         }
 
-        if (files.length === 0) return { content: [{ type: 'text', text: `No ${reportType} reports found in data/reports/. Run the corresponding screener first.` }] };
+        if (files.length === 0) {
+          // Check if the report is currently being generated (lock file present)
+          const lockFiles = (await fs.readdir(REPORTS_DIR).catch(() => [])).filter(f => f.startsWith(prefix) && f.endsWith('.running'));
+          if (lockFiles.length > 0) {
+            return { content: [{ type: 'text', text: `BRIEFING_IN_PROGRESS: The ${reportType} report is currently being generated by another agent. Call wait(60) then retry read_latest_report("${reportType}").` }] };
+          }
+          return { content: [{ type: 'text', text: `No ${reportType} reports found in data/reports/. Run the corresponding screener first.` }] };
+        }
 
         const content = await fs.readFile(path.join(REPORTS_DIR, files[0]), 'utf-8');
         const truncated = content.length > 8000 ? content.slice(0, 8000) + '\n... [truncated]' : content;
@@ -2500,7 +2740,8 @@ Worst Trade: ${stats.worst_result_pct.toFixed(1)}% ($${stats.worst_result_dollar
 
       case 'get_penny_candidates': {
         const min_score = args?.min_score ?? 60;
-        const data = await callTradingBot(`/penny/candidates?min_score=${min_score}`);
+        const detail = args?.detail === true ? '&detail=true' : '';
+        const data = await callTradingBot(`/penny/candidates?min_score=${min_score}${detail}`);
         return {
           content: [{ type: 'text', text: JSON.stringify(data, null, 2) }],
         };
@@ -2511,6 +2752,59 @@ Worst Trade: ${stats.worst_result_pct.toFixed(1)}% ($${stats.worst_result_dollar
         return {
           content: [{ type: 'text', text: JSON.stringify(data, null, 2) }],
         };
+      }
+
+      case 'get_harvest_state': {
+        const data = await callTradingBot('/harvest/state');
+        return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
+      }
+
+      case 'get_harvest_ivr': {
+        const params = new URLSearchParams({ current_iv: String(args.current_iv) });
+        const data = await callTradingBot(`/harvest/ivr/${encodeURIComponent(args.symbol)}?${params}`);
+        return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
+      }
+
+      case 'get_harvest_expirations': {
+        const data = await callTradingBot(`/harvest/expirations/${encodeURIComponent(args.symbol)}`);
+        return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
+      }
+
+      case 'get_harvest_fomc': {
+        const data = await callTradingBot('/harvest/fomc');
+        return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
+      }
+
+      case 'open_iron_condor': {
+        const data = await callTradingBot('/harvest/condors', 'POST', {
+          underlying:               args.underlying,
+          expiration_date:          args.expiration_date,
+          short_put_symbol:         args.short_put_symbol,
+          short_put_strike:         args.short_put_strike,
+          long_put_symbol:          args.long_put_symbol,
+          long_put_strike:          args.long_put_strike,
+          short_call_symbol:        args.short_call_symbol,
+          short_call_strike:        args.short_call_strike,
+          long_call_symbol:         args.long_call_symbol,
+          long_call_strike:         args.long_call_strike,
+          contracts:                args.contracts,
+          wing_width:               args.wing_width,
+          credit_per_contract:      args.credit_per_contract,
+          ivr_at_entry:             args.ivr_at_entry || 0,
+          portfolio_value_at_entry: args.portfolio_value_at_entry || 0,
+          overlap_log:              args.overlap_log || '[]',
+        });
+        return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
+      }
+
+      case 'close_iron_condor': {
+        const data = await callTradingBot(`/harvest/condors/${encodeURIComponent(args.condor_id)}/close`, 'POST', {
+          order_type:        args.order_type,
+          limit_price:       args.limit_price || 0,
+          close_reason:      args.close_reason,
+          cost_per_contract: args.cost_per_contract,
+        });
+        return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
       }
 
       case 'get_penny_universe': {

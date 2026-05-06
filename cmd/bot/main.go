@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"os"
 	"os/signal"
@@ -114,6 +115,26 @@ func main() {
 	positionManager := services.NewPositionManager(tradingService, dataService, storageService)
 	positionController := controllers.NewPositionManagementController(positionManager)
 
+	// Create trade guard and wire into both controllers
+	tradeGuard := services.NewTradeGuard(
+		positionManager,
+		tradingService,
+		services.TradeGuardConfig{
+			PennyMaxCapitalPct:      cfg.PennyMaxCapitalPct,
+			PennyMaxPositionDollars: cfg.PennyMaxPositionDollars,
+			MaxDailyLossPct:         cfg.MaxDailyLossPct,
+		},
+	)
+	positionManager.SetGuard(tradeGuard)
+	orderController.SetGuard(tradeGuard)
+	guardController := controllers.NewGuardController(tradeGuard)
+
+	logger.WithFields(logrus.Fields{
+		"penny_max_capital_pct":      cfg.PennyMaxCapitalPct,
+		"penny_max_position_dollars": cfg.PennyMaxPositionDollars,
+		"max_daily_loss_pct":         cfg.MaxDailyLossPct,
+	}).Info("Trade guard initialized")
+
 	// Create activity logger
 	activityLogDir := os.Getenv("ACTIVITY_LOG_DIR")
 	if activityLogDir == "" {
@@ -129,9 +150,9 @@ func main() {
 	}
 
 	// Initialize penny stock signal pipeline
-	pennyUniverseService := services.NewPennyUniverseService(cfg.FMPAPIKey, nil)
+	pennyUniverseService := services.NewPennyUniverseService(cfg.FMPAPIKey, cfg.AlpacaAPIKey, cfg.AlpacaSecretKey, cfg.AlpacaBaseURL, nil)
 	pennyScreenerService := services.NewPennyScreenerService(cfg.AlpacaAPIKey, cfg.AlpacaSecretKey, pennyUniverseService)
-	secEdgarService := services.NewSECEdgarService(pennyUniverseService, nil)
+	secEdgarService := services.NewSECEdgarService(pennyUniverseService, nil, cfg.OperatorEmail)
 	socialSignalService := services.NewSocialSignalService(pennyUniverseService, nil)
 	pennyAggregator := services.NewPennySignalAggregator(pennyUniverseService, pennyScreenerService, secEdgarService, socialSignalService)
 	pennyController := controllers.NewPennyController(pennyAggregator)
@@ -145,8 +166,40 @@ func main() {
 
 	logger.Info("Penny stock signal pipeline started")
 
+	// Initialize Harvest services
+	harvestIVRSvc := services.NewHarvestIVRService(storageService)
+	harvestSvc := services.NewHarvestService(storageService)
+
+	getPortfolioValue := func() (float64, error) {
+		acct, err := orderController.GetAccount()
+		if err != nil {
+			return 0, err
+		}
+		return acct.PortfolioValue, nil
+	}
+
+	placeMLegFn := services.PlaceMultiLegOrderFn(func(ctx context.Context, order services.MultiLegOrder) (string, error) {
+		if tradingService == nil {
+			return "", fmt.Errorf("trading service unavailable")
+		}
+		return tradingService.PlaceMultiLegOrder(ctx, order)
+	})
+
+	harvestController := controllers.NewHarvestController(
+		harvestSvc,
+		harvestIVRSvc,
+		storageService,
+		placeMLegFn,
+		getPortfolioValue,
+	)
+
+	// Start daily IV collection goroutine for Harvest
+	go startHarvestIVCollection(ctx, harvestIVRSvc, tradingService, logger)
+
+	logger.Info("Harvest service initialized")
+
 	// Setup HTTP server
-	router := setupRouter(orderController, newsController, intelligenceController, positionController, activityController, economicFeedsController, pennyController)
+	router := setupRouter(orderController, newsController, intelligenceController, positionController, activityController, economicFeedsController, pennyController, guardController, harvestController)
 
 	// Start data cleanup routine
 	go startDataCleanup(ctx, storageService, cfg.DataRetentionDays, logger)
@@ -176,7 +229,7 @@ func main() {
 	}
 }
 
-func setupRouter(orderController *controllers.OrderController, newsController *controllers.NewsController, intelligenceController *controllers.IntelligenceController, positionController *controllers.PositionManagementController, activityController *controllers.ActivityController, economicFeedsController *controllers.EconomicFeedsController, pennyController *controllers.PennyController) *gin.Engine {
+func setupRouter(orderController *controllers.OrderController, newsController *controllers.NewsController, intelligenceController *controllers.IntelligenceController, positionController *controllers.PositionManagementController, activityController *controllers.ActivityController, economicFeedsController *controllers.EconomicFeedsController, pennyController *controllers.PennyController, guardController *controllers.GuardController, harvestController *controllers.HarvestController) *gin.Engine {
 	router := gin.Default()
 	router.SetTrustedProxies([]string{"127.0.0.1"})
 
@@ -267,6 +320,24 @@ func setupRouter(orderController *controllers.OrderController, newsController *c
 		api.GET("/penny/signal/:ticker", pennyController.HandleGetSignalDetail)
 		api.GET("/penny/universe", pennyController.HandleGetUniverse)
 		api.POST("/penny/scan", pennyController.HandleScanNow)
+		api.DELETE("/penny/blacklist", pennyController.HandleClearBlacklist)
+		api.DELETE("/penny/blacklist/:ticker", pennyController.HandleRemoveFromBlacklist)
+
+		// Trade guard endpoint
+		api.GET("/guard/status", guardController.HandleGetStatus)
+
+		// Harvest premium seller endpoints
+		harvest := api.Group("/harvest")
+		{
+			harvest.GET("/state", harvestController.HandleGetState)
+			harvest.GET("/fomc", harvestController.HandleGetFOMC)
+			harvest.GET("/expirations/:symbol", harvestController.HandleGetExpirations)
+			harvest.GET("/ivr/:symbol", harvestController.HandleGetIVR)
+			harvest.GET("/condors", harvestController.HandleListCondors)
+			harvest.POST("/condors", harvestController.HandleOpenCondor)
+			harvest.POST("/condors/:id/close", harvestController.HandleCloseCondor)
+			harvest.POST("/iv", harvestController.HandleRecordIV)
+		}
 	}
 
 	// Serve dashboard
@@ -293,6 +364,64 @@ func startDataCleanup(ctx context.Context, storage interfaces.StorageService, re
 			}
 		}
 	}
+}
+
+// startHarvestIVCollection records ATM IV for all Harvest underlyings once per trading day.
+func startHarvestIVCollection(ctx context.Context, ivrSvc *services.HarvestIVRService, tradingService *services.AlpacaTradingService, logger *logrus.Logger) {
+	harvestUniverse := []string{"SPY", "QQQ", "IWM", "GLD", "TLT"}
+	ticker := time.NewTicker(6 * time.Hour)
+	defer ticker.Stop()
+
+	collectAll := func() {
+		for _, symbol := range harvestUniverse {
+			if tradingService == nil {
+				continue
+			}
+			chain, err := tradingService.GetOptionsChain(ctx, symbol, time.Now().AddDate(0, 0, 30))
+			if err != nil {
+				logger.WithError(err).Warnf("harvest IV collection: failed to get chain for %s", symbol)
+				continue
+			}
+			atmIV := calcATMIV(chain)
+			if atmIV <= 0 {
+				continue
+			}
+			if err := ivrSvc.RecordDailyIV(symbol, atmIV); err != nil {
+				logger.WithError(err).Warnf("harvest IV collection: failed to record IV for %s", symbol)
+			}
+		}
+	}
+
+	collectAll() // run immediately on startup
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			collectAll()
+		}
+	}
+}
+
+// calcATMIV averages the IV of contracts with |delta| in [0.45, 0.55].
+func calcATMIV(chain []*interfaces.OptionContract) float64 {
+	var sum float64
+	var count int
+	for _, c := range chain {
+		absDelta := c.Delta
+		if absDelta < 0 {
+			absDelta = -absDelta
+		}
+		if absDelta >= 0.45 && absDelta <= 0.55 && c.ImpliedVolatility > 0 {
+			sum += c.ImpliedVolatility
+			count++
+		}
+	}
+	if count == 0 {
+		return 0
+	}
+	return sum / float64(count)
 }
 
 // Background task to monitor and save positions

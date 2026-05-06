@@ -69,10 +69,11 @@ type PartialExitConfig struct {
 
 // PlaceManagedPositionRequest represents request to open a managed position
 type PlaceManagedPositionRequest struct {
-	Symbol            string              `json:"symbol" binding:"required"`
-	Side              string              `json:"side" binding:"required"` // "buy" or "sell"
-	Strategy          string              `json:"strategy"` // "SWING_TRADE", "LONG_TERM", "DAY_TRADE"
-	AllocationDollars float64             `json:"allocation_dollars" binding:"required,gt=0"`
+	Symbol            string      `json:"symbol" binding:"required"`
+	Side              string      `json:"side" binding:"required"` // "buy" or "sell"
+	Strategy          string      `json:"strategy"`                // "SWING_TRADE", "LONG_TERM", "DAY_TRADE"
+	AgentSource       AgentSource `json:"agent_source,omitempty"`  // "main" or "penny"; defaults to "main"
+	AllocationDollars float64     `json:"allocation_dollars" binding:"required,gt=0"`
 
 	// Entry configuration
 	EntryStrategy     string              `json:"entry_strategy"` // "market", "limit"
@@ -101,13 +102,14 @@ type PositionManager struct {
 	tradingService interfaces.TradingService
 	dataService    interfaces.DataService
 	storageService *database.LocalStorage
+	guard          *TradeGuard
 
-	positions      map[string]*ManagedPosition // position_id -> position
-	mu             sync.RWMutex
-	logger         *logrus.Logger
+	positions map[string]*ManagedPosition // position_id -> position
+	mu        sync.RWMutex
+	logger    *logrus.Logger
 
-	ctx            context.Context
-	cancel         context.CancelFunc
+	ctx    context.Context
+	cancel context.CancelFunc
 }
 
 // NewPositionManager creates a new position manager
@@ -149,6 +151,20 @@ func (pm *PositionManager) PlaceManagedPosition(ctx context.Context, req *PlaceM
 		"allocation": req.AllocationDollars,
 	}).Info("Placing managed position")
 
+	// Resolve agent source
+	agent := req.AgentSource
+	if agent == "" {
+		agent = AgentMain
+	}
+
+	// Trade guard check
+	if pm.guard != nil {
+		if err := pm.guard.CheckBuy(ctx, agent, req.Symbol, req.AllocationDollars); err != nil {
+			pm.logger.WithError(err).Warn("Managed position blocked by trade guard")
+			return nil, err
+		}
+	}
+
 	// Validate request
 	if err := pm.validateRequest(req); err != nil {
 		return nil, fmt.Errorf("invalid request: %w", err)
@@ -182,6 +198,7 @@ func (pm *PositionManager) PlaceManagedPosition(ctx context.Context, req *PlaceM
 	}
 
 	// Create managed position
+	tags := appendTagIfMissing(req.Tags, AgentTag(agent))
 	position := &ManagedPosition{
 		ID:                pm.generatePositionID(),
 		Symbol:            req.Symbol,
@@ -204,7 +221,7 @@ func (pm *PositionManager) PlaceManagedPosition(ctx context.Context, req *PlaceM
 		CreatedAt:         time.Now(),
 		UpdatedAt:         time.Now(),
 		Notes:             req.Notes,
-		Tags:              req.Tags,
+		Tags:              tags,
 	}
 
 	// Place entry order
@@ -781,6 +798,20 @@ func (pm *PositionManager) calculatePartialExitPrice(entryPrice, targetPercent f
 
 func (pm *PositionManager) generatePositionID() string {
 	return fmt.Sprintf("pos_%d", time.Now().UnixNano())
+}
+
+func appendTagIfMissing(tags []string, tag string) []string {
+	for _, t := range tags {
+		if t == tag {
+			return tags
+		}
+	}
+	return append(tags, tag)
+}
+
+// SetGuard attaches a trade guard to the position manager.
+func (pm *PositionManager) SetGuard(guard *TradeGuard) {
+	pm.guard = guard
 }
 
 // Stop stops the position manager

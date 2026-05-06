@@ -4,6 +4,7 @@ import (
 	"context"
 	"math"
 	"prophet-trader/interfaces"
+	"prophet-trader/services"
 	"strconv"
 	"time"
 
@@ -16,6 +17,7 @@ type OrderController struct {
 	tradingService interfaces.TradingService
 	dataService    interfaces.DataService
 	storageService interfaces.StorageService
+	guard          *services.TradeGuard
 	logger         *logrus.Logger
 }
 
@@ -38,24 +40,31 @@ func NewOrderController(
 	}
 }
 
+// SetGuard attaches a trade guard to the controller.
+func (oc *OrderController) SetGuard(guard *services.TradeGuard) {
+	oc.guard = guard
+}
+
 // BuyRequest represents a buy order request
 type BuyRequest struct {
-	Symbol      string   `json:"symbol" binding:"required"`
-	Qty         float64  `json:"qty" binding:"required,gt=0"`
-	Type        string   `json:"type"` // "market", "limit", "stop", "stop_limit"
-	TimeInForce string   `json:"time_in_force"` // "day", "gtc", "ioc", "fok"
-	LimitPrice  *float64 `json:"limit_price,omitempty"`
-	StopPrice   *float64 `json:"stop_price,omitempty"`
+	Symbol      string              `json:"symbol" binding:"required"`
+	Qty         float64             `json:"qty" binding:"required,gt=0"`
+	Type        string              `json:"type"`         // "market", "limit", "stop", "stop_limit"
+	TimeInForce string              `json:"time_in_force"` // "day", "gtc", "ioc", "fok"
+	LimitPrice  *float64            `json:"limit_price,omitempty"`
+	StopPrice   *float64            `json:"stop_price,omitempty"`
+	AgentSource services.AgentSource `json:"agent_source,omitempty"` // "main" or "penny"; defaults to "main"
 }
 
 // SellRequest represents a sell order request
 type SellRequest struct {
-	Symbol      string   `json:"symbol" binding:"required"`
-	Qty         float64  `json:"qty" binding:"required,gt=0"`
-	Type        string   `json:"type"` // "market", "limit", "stop", "stop_limit"
-	TimeInForce string   `json:"time_in_force"` // "day", "gtc", "ioc", "fok"
-	LimitPrice  *float64 `json:"limit_price,omitempty"`
-	StopPrice   *float64 `json:"stop_price,omitempty"`
+	Symbol      string              `json:"symbol" binding:"required"`
+	Qty         float64             `json:"qty" binding:"required,gt=0"`
+	Type        string              `json:"type"`         // "market", "limit", "stop", "stop_limit"
+	TimeInForce string              `json:"time_in_force"` // "day", "gtc", "ioc", "fok"
+	LimitPrice  *float64            `json:"limit_price,omitempty"`
+	StopPrice   *float64            `json:"stop_price,omitempty"`
+	AgentSource services.AgentSource `json:"agent_source,omitempty"` // "main" or "penny"; defaults to "main"
 }
 
 // Buy executes a buy order
@@ -66,6 +75,28 @@ func (oc *OrderController) Buy(ctx context.Context, req BuyRequest) (*interfaces
 	}
 	if req.TimeInForce == "" {
 		req.TimeInForce = "day"
+	}
+	agent := req.AgentSource
+	if agent == "" {
+		agent = services.AgentMain
+	}
+
+	// Trade guard check
+	if oc.guard != nil {
+		allocationDollars := 0.0
+		if agent == services.AgentPenny {
+			if quote, err := oc.dataService.GetLatestQuote(ctx, req.Symbol); err == nil {
+				price := quote.AskPrice
+				if price <= 0 {
+					price = quote.BidPrice
+				}
+				allocationDollars = price * req.Qty
+			}
+		}
+		if err := oc.guard.CheckBuy(ctx, agent, req.Symbol, allocationDollars); err != nil {
+			oc.logger.WithError(err).Warn("Buy order blocked by trade guard")
+			return nil, err
+		}
 	}
 
 	oc.logger.WithFields(logrus.Fields{
@@ -100,6 +131,10 @@ func (oc *OrderController) Buy(ctx context.Context, req BuyRequest) (*interfaces
 		oc.logger.WithError(err).Warn("Failed to save order to database")
 	}
 
+	if oc.guard != nil {
+		oc.guard.RecordRawBuy(agent, req.Symbol)
+	}
+
 	oc.logger.WithField("orderID", result.OrderID).Info("Buy order placed successfully")
 	return result, nil
 }
@@ -112,6 +147,18 @@ func (oc *OrderController) Sell(ctx context.Context, req SellRequest) (*interfac
 	}
 	if req.TimeInForce == "" {
 		req.TimeInForce = "day"
+	}
+	agent := req.AgentSource
+	if agent == "" {
+		agent = services.AgentMain
+	}
+
+	// Trade guard check
+	if oc.guard != nil {
+		if err := oc.guard.CheckSell(ctx, agent, req.Symbol); err != nil {
+			oc.logger.WithError(err).Warn("Sell order blocked by trade guard")
+			return nil, err
+		}
 	}
 
 	oc.logger.WithFields(logrus.Fields{
@@ -144,6 +191,10 @@ func (oc *OrderController) Sell(ctx context.Context, req SellRequest) (*interfac
 	order.Status = result.Status
 	if err := oc.storageService.SaveOrder(order); err != nil {
 		oc.logger.WithError(err).Warn("Failed to save order to database")
+	}
+
+	if oc.guard != nil {
+		oc.guard.RecordRawSell(agent, req.Symbol)
 	}
 
 	oc.logger.WithField("orderID", result.OrderID).Info("Sell order placed successfully")

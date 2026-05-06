@@ -15,7 +15,7 @@ const DEFAULT_HEARTBEAT = {
   midday: 600,
   market_close: 120,
   after_hours: 1800,
-  closed: 3600,
+  closed: 14400,
 };
 
 export const HEARTBEAT_PROFILES = {
@@ -48,6 +48,11 @@ export const HEARTBEAT_PROFILES = {
     label: 'Scalp Mode',
     description: 'Rapid-fire execution for day trading',
     phases: { pre_market: 60, market_open: 15, midday: 30, market_close: 15, after_hours: 120, closed: 600 },
+  },
+  penny_stock: {
+    label: 'Penny Stock',
+    description: 'Active intraday monitoring for fast-moving penny stocks — closes all day-trades by market close',
+    phases: { pre_market: 180, market_open: 60, midday: 90, market_close: 60, after_hours: 1800, closed: 3600 },
   },
 };
 
@@ -143,6 +148,28 @@ function defaultAgents() {
       },
       createdAt: new Date().toISOString(),
     },
+    {
+      id: 'harvest',
+      name: 'Harvest',
+      description: 'Mechanical theta-harvesting agent — sells iron condors on index ETFs for premium income',
+      systemPromptTemplate: 'custom',
+      customSystemPrompt: `You are Harvest, a mechanical theta-harvesting trading agent. You are not a reasoning agent. You are a rule executor wrapped in a language model.
+
+Your ONLY job is to follow your trading rules exactly. Do not improvise. Do not add commentary. Do not make directional judgments. Helpful improvisation is the failure mode.
+
+Read your Strategy Rules section carefully — it contains your complete heartbeat procedure. Follow it step by step on every heartbeat.`,
+      strategyId: 'harvest',
+      model: 'anthropic/claude-sonnet-4-6',
+      heartbeatOverrides: {
+        pre_market: 3600,
+        market_open: 900,
+        midday: 900,
+        market_close: 900,
+        after_hours: 7200,
+        closed: 14400,
+      },
+      createdAt: new Date().toISOString(),
+    },
   ];
 }
 
@@ -153,6 +180,14 @@ function defaultStrategies() {
       name: 'Aggressive Options',
       description: 'Multi-timeframe options with scalping overlay',
       rulesFile: 'TRADING_RULES.md',
+      customRules: null,
+      createdAt: new Date().toISOString(),
+    },
+    {
+      id: 'harvest',
+      name: 'Harvest — Iron Condor Premium Seller',
+      description: 'Mechanical 16-delta iron condors on SPY/QQQ/IWM/GLD/TLT. Defined-risk, no discretion.',
+      rulesFile: 'TRADING_RULES_HARVEST.md',
       customRules: null,
       createdAt: new Date().toISOString(),
     },
@@ -249,7 +284,7 @@ function createSandbox(account, overrides = {}) {
 
 function createDefaultConfig() {
   return {
-    schemaVersion: 2,
+    schemaVersion: 3,
     activeAccountId: null,
     activeSandboxId: null,
 
@@ -309,6 +344,7 @@ function mergeSandbox(sandbox, fallback = {}) {
 }
 
 function normalizeConfig(raw = {}) {
+  const rawSchemaVersion = Number(raw.schemaVersion) || 0;
   const defaults = createDefaultConfig();
   const config = {
     ...defaults,
@@ -327,11 +363,19 @@ function normalizeConfig(raw = {}) {
     config.sandboxes[sandboxId] = mergeSandbox({ id: sandboxId, ...sandbox }, config);
   }
 
-  return migrateLegacyConfig(config);
+  return migrateLegacyConfig(config, rawSchemaVersion);
 }
 
-function migrateLegacyConfig(config) {
-  config.schemaVersion = 2;
+function migrateLegacyConfig(config, rawSchemaVersion = 0) {
+  // v2 → v3: bump default `closed` heartbeat from 3600s to 14400s.
+  // Only matches the OLD default exactly so user customizations (e.g. 7200, 10800) are preserved.
+  if (rawSchemaVersion < 3) {
+    if (config.heartbeat?.closed === 3600) config.heartbeat.closed = 14400;
+    for (const sandbox of Object.values(config.sandboxes || {})) {
+      if (sandbox?.heartbeat?.closed === 3600) sandbox.heartbeat.closed = 14400;
+    }
+  }
+  config.schemaVersion = 3;
   if (!config.sandboxes) config.sandboxes = {};
 
   for (const account of config.accounts || []) {
@@ -402,19 +446,20 @@ export async function loadConfig() {
     _config = createDefaultConfig();
   }
 
+  const envPk = process.env.ALPACA_PUBLIC_KEY || process.env.ALPACA_API_KEY;
+  const envSk = process.env.ALPACA_SECRET_KEY;
+  const envBaseUrl = process.env.ALPACA_BASE_URL || process.env.ALPACA_ENDPOINT || '';
+
   if (_config.accounts.length === 0) {
-    const pk = process.env.ALPACA_PUBLIC_KEY || process.env.ALPACA_API_KEY;
-    const sk = process.env.ALPACA_SECRET_KEY;
-    if (pk && sk) {
-      const baseUrl = process.env.ALPACA_BASE_URL || process.env.ALPACA_ENDPOINT || '';
-      const isPaper = baseUrl.includes('paper') || process.env.ALPACA_PAPER === 'true';
+    if (envPk && envSk) {
+      const isPaper = envBaseUrl.includes('paper') || process.env.ALPACA_PAPER === 'true';
       const id = crypto.randomUUID().slice(0, 8);
       const account = {
         id,
         name: isPaper ? 'Paper (from .env)' : 'Live (from .env)',
-        publicKey: pk,
-        secretKey: sk,
-        baseUrl: baseUrl || (isPaper ? 'https://paper-api.alpaca.markets' : 'https://api.alpaca.markets'),
+        publicKey: envPk,
+        secretKey: envSk,
+        baseUrl: envBaseUrl || (isPaper ? 'https://paper-api.alpaca.markets' : 'https://api.alpaca.markets'),
         paper: isPaper,
         createdAt: new Date().toISOString(),
       };
@@ -423,6 +468,12 @@ export async function loadConfig() {
       _config.activeAccountId = id;
       _config.activeSandboxId = `sbx_${id}`;
       console.log(`  Auto-imported Alpaca account from .env (${isPaper ? 'paper' : 'live'})`);
+    }
+  } else if (envBaseUrl) {
+    const envAccount = _config.accounts.find(a => a.name.includes('(from .env)'));
+    if (envAccount && envAccount.baseUrl !== envBaseUrl) {
+      envAccount.baseUrl = envBaseUrl;
+      console.log(`  Synced baseUrl for "${envAccount.name}" from .env`);
     }
   }
 
@@ -506,6 +557,20 @@ export async function addAccount({ name, publicKey, secretKey, baseUrl, paper })
     _config.activeAccountId = id;
     _config.activeSandboxId = `sbx_${id}`;
   }
+  syncLegacyAliases(_config);
+  await saveConfig();
+  return account;
+}
+
+export async function updateAccount(id, { name, baseUrl, paper }) {
+  const account = _config.accounts.find(a => a.id === id);
+  if (!account) throw new Error('Account not found');
+  if (name !== undefined && name.trim()) account.name = name.trim();
+  if (baseUrl !== undefined) account.baseUrl = baseUrl.trim() || (account.paper ? 'https://paper-api.alpaca.markets' : 'https://api.alpaca.markets');
+  if (paper !== undefined) account.paper = paper;
+  // Keep sandbox name in sync when account name changes
+  const sandbox = _config.sandboxes[`sbx_${id}`];
+  if (sandbox && name !== undefined && name.trim()) sandbox.name = name.trim();
   syncLegacyAliases(_config);
   await saveConfig();
   return account;
