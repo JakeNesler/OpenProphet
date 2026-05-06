@@ -23,30 +23,56 @@ func TestMentionBaseline_Advance_AccumulatesInSameBucket(t *testing.T) {
 	}
 }
 
-func TestMentionBaseline_Advance_ZerosPassedBuckets(t *testing.T) {
-	bl := &mentionBaseline{firstSeen: time.Now().Add(-73 * time.Hour)}
-	old := time.Now().Add(-2 * time.Hour)
-	bl.lastBucket = bucketIdx(old)
-	oldIdx := bucketIdx(old)
-	bl.buckets[oldIdx] = 10
-	bl.total = 10
-
+func TestMentionBaseline_Advance_PreservesCompletedBucket(t *testing.T) {
 	now := time.Now()
+	bucketA := bucketIdx(now)
+	bl := &mentionBaseline{firstSeen: now.Add(-73 * time.Hour)}
+	bl.lastBucket = bucketA
+	bl.advance(now, 10)
+	// total should be 10 from the completed advance
+	if bl.total != 10 {
+		t.Fatalf("expected total=10, got %d", bl.total)
+	}
+
+	// Advance to the next 30-min bucket
+	nextBucketTime := now.Add(31 * time.Minute)
+	bl.advance(nextBucketTime, 3)
+
+	// The completed bucket (A) must still contribute to total
+	if bl.buckets[bucketA] != 10 {
+		t.Errorf("completed bucket should be preserved; got buckets[A]=%d", bl.buckets[bucketA])
+	}
+	if bl.total != 13 {
+		t.Errorf("total should be 13 (10 from A + 3 from new bucket), got %d", bl.total)
+	}
+}
+
+func TestMentionBaseline_Advance_RecyclesStaleSlot(t *testing.T) {
+	now := time.Now()
+	currentIdx := bucketIdx(now)
+	bl := &mentionBaseline{firstSeen: now.Add(-200 * time.Hour)}
+
+	// Manually place stale data in currentIdx (simulating 7-day-old occupancy)
+	bl.buckets[currentIdx] = 7
+	bl.total = 7
+	// lastBucket is one slot before current (so advance triggers recycling of currentIdx)
+	bl.lastBucket = (currentIdx - 1 + 336) % 336
+
 	bl.advance(now, 3)
 
-	if bl.buckets[oldIdx] != 0 {
-		t.Errorf("expected old bucket zeroed, got %d", bl.buckets[oldIdx])
+	if bl.buckets[currentIdx] != 3 {
+		t.Errorf("recycled slot should hold only new count; got %d", bl.buckets[currentIdx])
 	}
 	if bl.total != 3 {
-		t.Errorf("expected total=3 after clearing old bucket, got %d", bl.total)
+		t.Errorf("stale 7-day data should be subtracted; expected total=3, got %d", bl.total)
 	}
 }
 
 func TestMentionBaseline_BaselinePer30min_Floor(t *testing.T) {
 	bl := &mentionBaseline{total: 0, firstSeen: time.Now().Add(-73 * time.Hour)}
 	got := bl.baselinePer30min()
-	if got < 0.5 {
-		t.Errorf("expected floor 0.5, got %f", got)
+	if got != 0.5 {
+		t.Errorf("expected floor exactly 0.5 for zero total, got %f", got)
 	}
 }
 

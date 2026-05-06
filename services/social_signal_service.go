@@ -33,19 +33,12 @@ func (b *mentionBaseline) advance(now time.Time, newCount int) {
 	currentBucket := int(now.Unix()/1800) % 336
 	if currentBucket != b.lastBucket {
 		passed := (currentBucket - b.lastBucket + 336) % 336
-		if passed >= 336 {
-			b.total = 0
-			for i := range b.buckets {
-				b.buckets[i] = 0
-			}
-		} else {
-			// Zero from lastBucket (inclusive) through currentBucket (inclusive)
-			// so stale data in lastBucket and any skipped slots are cleared.
-			for i := 0; i <= passed; i++ {
-				idx := (b.lastBucket + i) % 336
-				b.total -= b.buckets[idx]
-				b.buckets[idx] = 0
-			}
+		// Zero only the recycled slots (lastBucket+1 through currentBucket).
+		// lastBucket itself holds valid completed data and must be preserved.
+		for i := 1; i <= passed; i++ {
+			idx := (b.lastBucket + i) % 336
+			b.total -= b.buckets[idx]
+			b.buckets[idx] = 0
 		}
 		b.lastBucket = currentBucket
 	}
@@ -320,6 +313,9 @@ func (s *SocialSignalService) fetchStockTwits(ticker string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	existing := s.entries[ticker]
+	if _, ok := s.entries[ticker]; !ok {
+		return
+	}
 	// Always recalculate from the clean mention base (MentionPts), never from BaseScore,
 	// so sentiment cannot compound across successive StockTwits polls.
 	newScore := min64(existing.MentionPts+sentimentPts, 20.0)
