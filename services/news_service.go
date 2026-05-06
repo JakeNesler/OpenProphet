@@ -102,28 +102,57 @@ func (ns *NewsService) GetGoogleNewsSearch(query string) ([]NewsItem, error) {
 	return ns.fetchRSSFeed(urlString)
 }
 
+// filterStale removes articles with a parsed date older than maxAge.
+// Articles with no parsed date (PublishedAt is zero) are kept.
+func filterStale(items []NewsItem, maxAge time.Duration) []NewsItem {
+	cutoff := time.Now().UTC().Add(-maxAge)
+	out := make([]NewsItem, 0, len(items))
+	for _, item := range items {
+		if item.PublishedAt.IsZero() || item.PublishedAt.After(cutoff) {
+			out = append(out, item)
+		}
+	}
+	return out
+}
+
 // GetMarketWatchTopStories fetches top stories from MarketWatch
 func (ns *NewsService) GetMarketWatchTopStories() ([]NewsItem, error) {
 	url := "https://feeds.content.dowjones.io/public/rss/mw_topstories"
-	return ns.fetchRSSFeed(url)
+	items, err := ns.fetchRSSFeed(url)
+	if err != nil {
+		return nil, err
+	}
+	return filterStale(items, 48*time.Hour), nil
 }
 
 // GetMarketWatchRealtimeHeadlines fetches real-time headlines from MarketWatch
 func (ns *NewsService) GetMarketWatchRealtimeHeadlines() ([]NewsItem, error) {
 	url := "https://feeds.content.dowjones.io/public/rss/mw_realtimeheadlines"
-	return ns.fetchRSSFeed(url)
+	items, err := ns.fetchRSSFeed(url)
+	if err != nil {
+		return nil, err
+	}
+	return filterStale(items, 48*time.Hour), nil
 }
 
 // GetMarketWatchBulletins fetches breaking news bulletins from MarketWatch
 func (ns *NewsService) GetMarketWatchBulletins() ([]NewsItem, error) {
 	url := "https://feeds.content.dowjones.io/public/rss/mw_bulletins"
-	return ns.fetchRSSFeed(url)
+	items, err := ns.fetchRSSFeed(url)
+	if err != nil {
+		return nil, err
+	}
+	return filterStale(items, 48*time.Hour), nil
 }
 
 // GetMarketWatchMarketPulse fetches market pulse updates from MarketWatch
 func (ns *NewsService) GetMarketWatchMarketPulse() ([]NewsItem, error) {
 	url := "https://feeds.content.dowjones.io/public/rss/mw_marketpulse"
-	return ns.fetchRSSFeed(url)
+	items, err := ns.fetchRSSFeed(url)
+	if err != nil {
+		return nil, err
+	}
+	return filterStale(items, 48*time.Hour), nil
 }
 
 // GetAllMarketWatchNews aggregates all MarketWatch feeds
