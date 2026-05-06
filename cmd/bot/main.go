@@ -150,9 +150,9 @@ func main() {
 	}
 
 	// Initialize penny stock signal pipeline
-	pennyUniverseService := services.NewPennyUniverseService(cfg.FMPAPIKey, nil)
+	pennyUniverseService := services.NewPennyUniverseService(cfg.FMPAPIKey, cfg.AlpacaAPIKey, cfg.AlpacaSecretKey, cfg.AlpacaBaseURL, nil)
 	pennyScreenerService := services.NewPennyScreenerService(cfg.AlpacaAPIKey, cfg.AlpacaSecretKey, pennyUniverseService)
-	secEdgarService := services.NewSECEdgarService(pennyUniverseService, nil)
+	secEdgarService := services.NewSECEdgarService(pennyUniverseService, nil, cfg.OperatorEmail)
 	socialSignalService := services.NewSocialSignalService(pennyUniverseService, nil)
 	pennyAggregator := services.NewPennySignalAggregator(pennyUniverseService, pennyScreenerService, secEdgarService, socialSignalService)
 	pennyController := controllers.NewPennyController(pennyAggregator)
