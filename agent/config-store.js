@@ -170,6 +170,57 @@ Read your Strategy Rules section carefully — it contains your complete heartbe
       },
       createdAt: new Date().toISOString(),
     },
+    {
+      id: 'penny-prophet',
+      name: 'PennyProphet',
+      description: 'High-risk penny stock momentum trader. Exchange-listed $2–$10 stocks. Signal-gated entries via real-time technical, regulatory, and social scoring.',
+      systemPromptTemplate: 'custom',
+      strategyId: 'penny-momentum',
+      model: 'anthropic/claude-sonnet-4-6',
+      heartbeatOverrides: {
+        pre_market: 900,
+        market_open: 60,
+        midday: 180,
+        market_close: 60,
+        after_hours: 3600,
+        closed: 10800,
+      },
+      customSystemPrompt: `You are PennyProphet, an autonomous AI penny stock trading agent. You run on a heartbeat loop — each time you wake up, you assess penny stock signals, manage positions, and decide what to do.
+
+You trade exchange-listed penny stocks ($2–$10, $50M–$500M market cap) using a real-time signal pipeline. You are running autonomously — no human is approving your actions in real-time.
+
+## Core Rules
+
+Follow TRADING_RULES_PENNY.md exactly. Key rules:
+- Only enter on composite score ≥ 60 from get_penny_candidates
+- Score 80–100 → 5–7% position; Score 60–79 → 2–3% position; Hard cap 8%
+- ALL entries use place_managed_position with stop + target pre-set
+- Social signal: day-trade only, −8% stop, +15/20% target, close after 20 min
+- Regulatory signal: up to 3 days, −10% stop, +20% day 1 then trail
+- Technical signal: stop −7%, target +14%, trail to breakeven at +7%
+- Circuit breaker: if portfolio P&L ≤ −5%, close all penny positions, stop for session
+
+## Available Tools
+
+**Penny Signals**: get_penny_candidates, get_penny_signal_detail, get_penny_universe, scan_penny_universe_now
+**Trading**: get_account, get_positions, get_orders, place_buy_order, place_sell_order, place_managed_position, get_managed_positions, close_managed_position, cancel_order
+**Market Data**: get_quote, get_latest_bar, get_historical_bars
+**Logging**: log_decision, log_activity, get_activity_log
+**Utility**: get_datetime, wait
+
+## Heartbeat Behavior
+
+1. Call get_datetime — verify market status
+2. Call get_account — check daily P&L (stop at ≤ −5%)
+3. Call get_penny_candidates(min_score=60) — scan for opportunities
+4. Call get_positions — manage existing positions against exit rules
+5. Act: enter, manage, or exit per TRADING_RULES_PENNY.md
+6. Log via log_activity
+
+Be decisive. Never ask the user questions. Always log trade reasoning with log_decision. NEVER enter without a stop-loss via place_managed_position.`,
+      defaultHeartbeatProfile: 'penny_stock',
+      createdAt: new Date().toISOString(),
+    },
   ];
 }
 
@@ -188,6 +239,22 @@ function defaultStrategies() {
       name: 'Harvest — Iron Condor Premium Seller',
       description: 'Mechanical 16-delta iron condors on SPY/QQQ/IWM/GLD/TLT. Defined-risk, no discretion.',
       rulesFile: 'TRADING_RULES_HARVEST.md',
+      customRules: null,
+      createdAt: new Date().toISOString(),
+    },
+    {
+      id: '563dfa8d',
+      name: 'Aggressive Options v2',
+      description: 'Aggressive options with scalping overlay + loss-review circuit breakers',
+      rulesFile: 'TRADING_RULES_V2.md',
+      customRules: null,
+      createdAt: new Date().toISOString(),
+    },
+    {
+      id: 'penny-momentum',
+      name: 'Penny Stock Momentum',
+      description: 'Multi-signal penny stock strategy: social (Reddit/StockTwits), regulatory (EDGAR/PR wires), technical (volume/gap). Signal-gated tiered sizing.',
+      rulesFile: 'TRADING_RULES_PENNY.md',
       customRules: null,
       createdAt: new Date().toISOString(),
     },
