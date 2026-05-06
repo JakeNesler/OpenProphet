@@ -60,9 +60,12 @@ func TestAggregator_Composite(t *testing.T) {
 	if c.Ticker != "TICK" {
 		t.Errorf("expected TICK, got %s", c.Ticker)
 	}
-	// composite = 30+20+10 = 60
-	if c.CompositeScore < 59 || c.CompositeScore > 61 {
-		t.Errorf("expected composite ~60, got %f", c.CompositeScore)
+	// tech=30 (≥15), reg=20 (<25 → 0), social=10 (≥10) → composite=40, eligible=true
+	if c.CompositeScore < 39 || c.CompositeScore > 41 {
+		t.Errorf("expected composite ~40, got %f", c.CompositeScore)
+	}
+	if !c.CompositeEligible {
+		t.Error("expected CompositeEligible=true (tech+social both contribute)")
 	}
 	if c.DominantSignal != "technical" {
 		t.Errorf("expected dominant=technical, got %s", c.DominantSignal)
@@ -81,8 +84,8 @@ func TestAggregator_EvictsLowScore(t *testing.T) {
 func TestAggregator_MinScoreFilter(t *testing.T) {
 	agg := aggregatorForTest(30.0, 25.0, 15.0, []string{"HIGH", "MED"})
 	// Directly seed candidates to avoid aggregate() recomputing the scores.
-	agg.candidates["MED"] = CandidateScore{Ticker: "MED", CompositeScore: 65}
-	agg.candidates["HIGH"] = CandidateScore{Ticker: "HIGH", CompositeScore: 82}
+	agg.candidates["MED"] = CandidateScore{Ticker: "MED", CompositeScore: 65, CompositeEligible: true}
+	agg.candidates["HIGH"] = CandidateScore{Ticker: "HIGH", CompositeScore: 82, CompositeEligible: true}
 
 	above80 := agg.GetCandidates(80)
 	if len(above80) != 1 || above80[0].Ticker != "HIGH" {
@@ -93,15 +96,16 @@ func TestAggregator_MinScoreFilter(t *testing.T) {
 func TestAggregator_GetCandidateSummaries_StripsContext(t *testing.T) {
 	agg := aggregatorForTest(0, 0, 0, []string{"ABC"})
 	agg.candidates["ABC"] = CandidateScore{
-		Ticker:           "ABC",
-		CompositeScore:   75,
-		TechnicalScore:   30,
-		RegulatoryScore:  25,
-		SocialScore:      20,
-		DominantSignal:   "technical",
-		TechnicalContext: "RSI 72, volume 4.2x",
-		RegulatoryEvent:  "8-K filed 09:32 ET",
-		SocialContext:    "3.2x mention velocity, 71% bullish",
+		Ticker:            "ABC",
+		CompositeScore:    75,
+		CompositeEligible: true,
+		TechnicalScore:    30,
+		RegulatoryScore:   25,
+		SocialScore:       20,
+		DominantSignal:    "technical",
+		TechnicalContext:  "RSI 72, volume 4.2x",
+		RegulatoryEvent:   "8-K filed 09:32 ET",
+		SocialContext:     "3.2x mention velocity, 71% bullish",
 	}
 
 	summaries := agg.GetCandidateSummaries(60)
@@ -150,5 +154,75 @@ func TestAggregator_GetSignalDetail_NotFound(t *testing.T) {
 	detail := agg.GetSignalDetail("NONE")
 	if detail != nil {
 		t.Errorf("expected nil for unknown ticker, got %+v", detail)
+	}
+}
+
+func TestAggregator_SingleSignalBlocked_HighReg(t *testing.T) {
+	// tech=10 (<15 min), reg=30 (≥25), social=5 (<10 min) → only reg contributes → single → not eligible
+	agg := aggregatorForTest(10.0, 30.0, 5.0, []string{"TICK"})
+	agg.aggregate()
+	candidates := agg.GetCandidates(0)
+	if len(candidates) != 0 {
+		t.Errorf("single-signal candidate should not appear in GetCandidates, got %d", len(candidates))
+	}
+	detail := agg.GetSignalDetail("TICK")
+	if detail == nil {
+		t.Fatal("single-signal candidate should still be stored internally")
+	}
+	if detail.CompositeEligible {
+		t.Error("expected CompositeEligible=false for single-signal")
+	}
+	if detail.SignalCount != 1 {
+		t.Errorf("expected SignalCount=1, got %d", detail.SignalCount)
+	}
+}
+
+func TestAggregator_TwoSignalPasses(t *testing.T) {
+	// tech=20 (≥15), reg=30 (≥25), social=5 (<10) → tech+reg contribute → eligible
+	agg := aggregatorForTest(20.0, 30.0, 5.0, []string{"TICK"})
+	agg.aggregate()
+	candidates := agg.GetCandidates(0)
+	if len(candidates) != 1 {
+		t.Errorf("two-signal candidate should appear in GetCandidates, got %d", len(candidates))
+	}
+	if candidates[0].SignalCount != 2 {
+		t.Errorf("expected SignalCount=2, got %d", candidates[0].SignalCount)
+	}
+	if !candidates[0].CompositeEligible {
+		t.Error("expected CompositeEligible=true")
+	}
+	// composite = techEff(20) + regEff(30) + socEff(0) = 50
+	if candidates[0].CompositeScore < 49 || candidates[0].CompositeScore > 51 {
+		t.Errorf("expected composite ~50, got %f", candidates[0].CompositeScore)
+	}
+}
+
+func TestAggregator_ThreeSignalMaxCapped(t *testing.T) {
+	// tech=40, reg=40, social=20 → composite = min(100, 100) = 100
+	agg := aggregatorForTest(40.0, 40.0, 20.0, []string{"TICK"})
+	agg.aggregate()
+	candidates := agg.GetCandidates(0)
+	if len(candidates) != 1 {
+		t.Fatalf("expected 1 candidate, got %d", len(candidates))
+	}
+	if candidates[0].CompositeScore != 100.0 {
+		t.Errorf("expected composite=100, got %f", candidates[0].CompositeScore)
+	}
+	if candidates[0].SignalCount != 3 {
+		t.Errorf("expected SignalCount=3, got %d", candidates[0].SignalCount)
+	}
+}
+
+func TestAggregator_DominantSignal_UsesEffective(t *testing.T) {
+	// tech=10 (below min → techEff=0), reg=30 (≥25 → regEff=30), social=15 (≥10 → socEff=15)
+	// dominant from effective: reg=30, soc=15 → reg wins
+	agg := aggregatorForTest(10.0, 30.0, 15.0, []string{"TICK"})
+	agg.aggregate()
+	detail := agg.GetSignalDetail("TICK")
+	if detail == nil {
+		t.Fatal("expected detail")
+	}
+	if detail.DominantSignal != "regulatory" {
+		t.Errorf("expected dominant=regulatory, got %q", detail.DominantSignal)
 	}
 }
