@@ -320,6 +320,8 @@ func setupRouter(orderController *controllers.OrderController, newsController *c
 		api.GET("/penny/signal/:ticker", pennyController.HandleGetSignalDetail)
 		api.GET("/penny/universe", pennyController.HandleGetUniverse)
 		api.POST("/penny/scan", pennyController.HandleScanNow)
+		api.DELETE("/penny/blacklist", pennyController.HandleClearBlacklist)
+		api.DELETE("/penny/blacklist/:ticker", pennyController.HandleRemoveFromBlacklist)
 
 		// Trade guard endpoint
 		api.GET("/guard/status", guardController.HandleGetStatus)

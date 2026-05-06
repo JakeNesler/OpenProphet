@@ -19,6 +19,8 @@ func setupPennyRouter(agg *services.PennySignalAggregator) *gin.Engine {
 	r.GET("/api/v1/penny/signal/:ticker", pc.HandleGetSignalDetail)
 	r.GET("/api/v1/penny/universe", pc.HandleGetUniverse)
 	r.POST("/api/v1/penny/scan", pc.HandleScanNow)
+	r.DELETE("/api/v1/penny/blacklist", pc.HandleClearBlacklist)
+	r.DELETE("/api/v1/penny/blacklist/:ticker", pc.HandleRemoveFromBlacklist)
 	return r
 }
 
@@ -170,5 +172,43 @@ func TestPennyController_GetUniverse_Empty(t *testing.T) {
 	body := parseBody(t, w)
 	if body["count"].(float64) != 0 {
 		t.Errorf("expected count=0, got %v", body["count"])
+	}
+}
+
+func TestPennyController_ClearBlacklist_Returns200(t *testing.T) {
+	agg := emptyAggregator()
+	agg.AddToBlacklist("TICK", "bracket rejection test")
+	r := setupPennyRouter(agg)
+
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("DELETE", "/api/v1/penny/blacklist", nil)
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d", w.Code)
+	}
+	if agg.IsBlacklisted("TICK") {
+		t.Error("expected blacklist cleared after HandleClearBlacklist")
+	}
+}
+
+func TestPennyController_RemoveFromBlacklist_Returns200(t *testing.T) {
+	agg := emptyAggregator()
+	agg.AddToBlacklist("RMVD", "test")
+	agg.AddToBlacklist("KEEP", "test")
+	r := setupPennyRouter(agg)
+
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("DELETE", "/api/v1/penny/blacklist/RMVD", nil)
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d", w.Code)
+	}
+	if agg.IsBlacklisted("RMVD") {
+		t.Error("expected RMVD removed from blacklist")
+	}
+	if !agg.IsBlacklisted("KEEP") {
+		t.Error("expected KEEP still blacklisted")
 	}
 }

@@ -75,3 +75,18 @@ func (pc *PennyController) HandleScanNow(c *gin.Context) {
 	pc.aggregator.RefreshUniverse()
 	c.JSON(http.StatusOK, gin.H{"status": "refreshing"})
 }
+
+// HandleClearBlacklist clears the entire bracket-rejection blacklist for this session.
+// DELETE /api/v1/penny/blacklist
+func (pc *PennyController) HandleClearBlacklist(c *gin.Context) {
+	pc.aggregator.ClearBlacklist()
+	c.JSON(http.StatusOK, gin.H{"status": "ok"})
+}
+
+// HandleRemoveFromBlacklist removes one ticker from the bracket-rejection blacklist.
+// DELETE /api/v1/penny/blacklist/:ticker
+func (pc *PennyController) HandleRemoveFromBlacklist(c *gin.Context) {
+	ticker := c.Param("ticker")
+	pc.aggregator.RemoveFromBlacklist(ticker)
+	c.JSON(http.StatusOK, gin.H{"status": "ok"})
+}
