@@ -21,6 +21,10 @@ type BracketBlacklistEntry struct {
 	AttemptCount int
 }
 
+// Lock ordering: PennySignalAggregator.mu must always be acquired before
+// BracketBlacklist.mu. GetCandidates holds a.mu.RLock while calling
+// blacklist.IsBlacklisted (which acquires b.mu.RLock). No code path may
+// acquire BracketBlacklist.mu before PennySignalAggregator.mu.
 type BracketBlacklist struct {
 	mu      sync.RWMutex
 	entries map[string]BracketBlacklistEntry

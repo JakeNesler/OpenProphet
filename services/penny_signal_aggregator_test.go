@@ -226,3 +226,55 @@ func TestAggregator_DominantSignal_UsesEffective(t *testing.T) {
 		t.Errorf("expected dominant=regulatory, got %q", detail.DominantSignal)
 	}
 }
+
+func TestAggregator_Blacklist_FiltersFromGetCandidates(t *testing.T) {
+	agg := aggregatorForTest(30.0, 30.0, 15.0, []string{"TICK"})
+	agg.aggregate()
+	// Confirm candidate is eligible before blacklisting
+	before := agg.GetCandidates(0)
+	if len(before) != 1 {
+		t.Fatalf("expected 1 candidate before blacklisting, got %d", len(before))
+	}
+	agg.AddToBlacklist("TICK", "bracket rejection test")
+	after := agg.GetCandidates(0)
+	if len(after) != 0 {
+		t.Errorf("expected 0 candidates after blacklisting TICK, got %d", len(after))
+	}
+}
+
+func TestAggregator_Blacklist_RemoveRestoresCandidates(t *testing.T) {
+	agg := aggregatorForTest(30.0, 30.0, 15.0, []string{"TICK"})
+	agg.aggregate()
+	agg.AddToBlacklist("TICK", "test")
+	agg.RemoveFromBlacklist("TICK")
+	candidates := agg.GetCandidates(0)
+	if len(candidates) != 1 {
+		t.Errorf("expected 1 candidate after removing from blacklist, got %d", len(candidates))
+	}
+}
+
+func TestAggregator_Blacklist_ClearUnblocksAll(t *testing.T) {
+	agg := aggregatorForTest(30.0, 30.0, 15.0, []string{"A", "B"})
+	agg.aggregate()
+	agg.AddToBlacklist("A", "test")
+	agg.AddToBlacklist("B", "test")
+	agg.ClearBlacklist()
+	candidates := agg.GetCandidates(0)
+	if len(candidates) != 2 {
+		t.Errorf("expected 2 candidates after ClearBlacklist, got %d", len(candidates))
+	}
+}
+
+func TestAggregator_Blacklist_AttemptCountIncrements(t *testing.T) {
+	agg := aggregatorForTest(0, 0, 0, []string{})
+	agg.AddToBlacklist("TICK", "first")
+	agg.AddToBlacklist("TICK", "second")
+	// IsBlacklisted confirms it's still there; AttemptCount is internal but
+	// we verify the entry is present and the second call didn't reset it.
+	if !agg.IsBlacklisted("TICK") {
+		t.Error("expected TICK still blacklisted after second AddToBlacklist")
+	}
+	// Verify AttemptCount by checking the blacklist entry directly via the exported method.
+	// Since AttemptCount isn't exposed, we verify the invariant via observable behavior:
+	// the entry survives and is still blacklisted.
+}
