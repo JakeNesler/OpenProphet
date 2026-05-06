@@ -45,7 +45,7 @@ func main() {
 	}
 
 	// Initialize services
-	logger.Info("Initializing services...")
+	logger.Debug("Initializing services...")
 
 	// Create trading service
 	tradingService, err := services.NewAlpacaTradingService(
@@ -92,7 +92,7 @@ func main() {
 	intelligenceController := controllers.NewIntelligenceController(newsService, claudeService, analysisService, stockAnalysisService, dataService)
 
 	// Test account connection
-	logger.Info("Testing Alpaca connection...")
+	logger.Debug("Testing Alpaca connection...")
 	if tradingService != nil {
 		if account, err := orderController.GetAccount(); err != nil {
 			logger.Warn("Failed to connect to Alpaca (trading will be unavailable):", err)
@@ -146,7 +146,7 @@ func main() {
 	// Start trading session automatically
 	if account, err := orderController.GetAccount(); err == nil {
 		activityLogger.StartSession(ctx, account.PortfolioValue)
-		logger.Info("Activity logging session started")
+		logger.Debug("Activity logging session started")
 	}
 
 	// Initialize penny stock signal pipeline
@@ -164,7 +164,7 @@ func main() {
 	go socialSignalService.Start(ctx)
 	go pennyAggregator.Start(ctx)
 
-	logger.Info("Penny stock signal pipeline started")
+	logger.Debug("Penny stock signal pipeline started")
 
 	// Initialize Harvest services
 	harvestIVRSvc := services.NewHarvestIVRService(storageService)
@@ -196,7 +196,7 @@ func main() {
 	// Start daily IV collection goroutine for Harvest
 	go startHarvestIVCollection(ctx, harvestIVRSvc, tradingService, logger)
 
-	logger.Info("Harvest service initialized")
+	logger.Debug("Harvest service initialized")
 
 	// Setup HTTP server
 	router := setupRouter(orderController, newsController, intelligenceController, positionController, activityController, economicFeedsController, pennyController, guardController, harvestController)

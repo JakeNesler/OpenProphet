@@ -289,7 +289,7 @@ func (pm *PositionManager) MonitorPositions(ctx context.Context) {
 	ticker := time.NewTicker(10 * time.Second) // Check every 10 seconds
 	defer ticker.Stop()
 
-	pm.logger.Info("Position monitoring started")
+	pm.logger.Debug("Position monitoring started")
 
 	for {
 		select {
@@ -842,7 +842,7 @@ func (pm *PositionManager) loadPositionsFromDB() error {
 		loaded++
 	}
 
-	pm.logger.WithField("count", loaded).Info("Loaded managed positions from database")
+	pm.logger.WithField("count", loaded).Debug("Loaded managed positions from database")
 	return nil
 }
 

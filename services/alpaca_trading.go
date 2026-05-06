@@ -299,7 +299,7 @@ func (s *AlpacaTradingService) GetOptionsChain(ctx context.Context, underlying s
 	s.logger.WithFields(logrus.Fields{
 		"underlying": underlying,
 		"expiration": expiration,
-	}).Info("Getting options chain")
+	}).Debug("Getting options chain")
 
 	// Build the URL with query parameters
 	url := fmt.Sprintf("https://data.alpaca.markets/v1beta1/options/snapshots/%s", underlying)
@@ -365,7 +365,7 @@ func (s *AlpacaTradingService) GetOptionsChain(ctx context.Context, underlying s
 		contracts = append(contracts, contract)
 	}
 
-	s.logger.WithField("count", len(contracts)).Info("Fetched options chain")
+	s.logger.WithField("count", len(contracts)).Debug("Fetched options chain")
 	return contracts, nil
 }
 
