@@ -14,12 +14,12 @@ import (
 type StockAnalysisService struct {
 	dataService   interfaces.DataService
 	newsService   *NewsService
-	claudeService *ClaudeService
+	claudeService NewsCleanerService
 	logger        *logrus.Logger
 }
 
 // NewStockAnalysisService creates a new stock analysis service
-func NewStockAnalysisService(dataService interfaces.DataService, newsService *NewsService, claudeService *ClaudeService) *StockAnalysisService {
+func NewStockAnalysisService(dataService interfaces.DataService, newsService *NewsService, claudeService NewsCleanerService) *StockAnalysisService {
 	logger := logrus.New()
 	logger.SetFormatter(&logrus.TextFormatter{
 		FullTimestamp: true,

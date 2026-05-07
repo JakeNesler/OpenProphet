@@ -538,11 +538,40 @@ ${userBlock}`;
     return this.getHeartbeatForPhase(this.sandboxId, phase) || PHASE_DEFAULTS[phase]?.seconds || 600;
   }
 
+  _getSecondsToNextPhaseBoundary() {
+    const now = new Date();
+    const weekday = now.getDay() >= 1 && now.getDay() <= 5;
+    if (!weekday) return null;
+    const etStr = now.toLocaleTimeString('en-US', {
+      timeZone: 'America/New_York',
+      hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
+    });
+    const [h, m, s] = etStr.split(':').map(Number);
+    const nowSecs = (h * 60 + m) * 60 + s;
+    const boundaries = Object.values(PHASE_DEFAULTS)
+      .filter(cfg => cfg.range)
+      .map(cfg => cfg.range[0] * 60)
+      .sort((a, b) => a - b);
+    for (const bSecs of boundaries) {
+      if (bSecs > nowSecs) return bSecs - nowSecs;
+    }
+    return null;
+  }
+
   _scheduleNext() {
     if (!this.state.running) return;
     // Always clear any existing timer first to prevent dual timers
     if (this._timer) { clearTimeout(this._timer); this._timer = null; }
-    const seconds = this._getHeartbeatSeconds();
+    let seconds = this._getHeartbeatSeconds();
+    // Fire at phase boundaries so agents always wake at market open, market close, etc.
+    const secsToBoundary = this._getSecondsToNextPhaseBoundary();
+    if (secsToBoundary !== null && secsToBoundary > 10 && secsToBoundary < seconds) {
+      seconds = secsToBoundary;
+      this.state.emit('agent_log', {
+        message: `Phase transition in ${Math.round(seconds)}s — scheduling early heartbeat.`,
+        level: 'info',
+      });
+    }
     this.state.heartbeatSeconds = seconds;
     this.state.nextBeatTime = new Date(Date.now() + seconds * 1000).toISOString();
     this.state.emit('schedule', { seconds, nextBeat: this.state.nextBeatTime, phase: this.state.phase });

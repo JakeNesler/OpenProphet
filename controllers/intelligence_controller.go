@@ -13,17 +13,17 @@ import (
 // IntelligenceController handles AI-powered intelligence operations
 type IntelligenceController struct {
 	newsService          *services.NewsService
-	claudeService        *services.ClaudeService
+	claudeService        services.NewsCleanerService
 	analysisService      *services.TechnicalAnalysisService
 	stockAnalysisService *services.StockAnalysisService
 	dataService          interfaces.DataService
 }
 
 // NewIntelligenceController creates a new intelligence controller
-func NewIntelligenceController(newsService *services.NewsService, claudeService *services.ClaudeService, analysisService *services.TechnicalAnalysisService, stockAnalysisService *services.StockAnalysisService, dataService interfaces.DataService) *IntelligenceController {
+func NewIntelligenceController(newsService *services.NewsService, aiService services.NewsCleanerService, analysisService *services.TechnicalAnalysisService, stockAnalysisService *services.StockAnalysisService, dataService interfaces.DataService) *IntelligenceController {
 	return &IntelligenceController{
 		newsService:          newsService,
-		claudeService:        claudeService,
+		claudeService:        aiService,
 		analysisService:      analysisService,
 		stockAnalysisService: stockAnalysisService,
 		dataService:          dataService,

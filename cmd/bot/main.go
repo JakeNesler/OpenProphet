@@ -85,11 +85,19 @@ func main() {
 	economicFeedsService := services.NewEconomicFeedsService()
 	economicFeedsController := controllers.NewEconomicFeedsController(economicFeedsService)
 
-	// Create Claude service and intelligence controller
-	claudeService := services.NewClaudeService(cfg.ClaudeAPIKey)
+	// Create AI news cleaner (provider selected via AI_PROVIDER env var or auto-detected)
+	var aiService services.NewsCleanerService
+	switch cfg.AIProvider {
+	case "xai":
+		aiService = services.NewXAIService(cfg.XAIAPIKey)
+		logger.Info("AI news cleaning: using xAI (Grok)")
+	default:
+		aiService = services.NewClaudeService(cfg.ClaudeAPIKey)
+		logger.Info("AI news cleaning: using Claude")
+	}
 	analysisService := services.NewTechnicalAnalysisService(dataService)
-	stockAnalysisService := services.NewStockAnalysisService(dataService, newsService, claudeService)
-	intelligenceController := controllers.NewIntelligenceController(newsService, claudeService, analysisService, stockAnalysisService, dataService)
+	stockAnalysisService := services.NewStockAnalysisService(dataService, newsService, aiService)
+	intelligenceController := controllers.NewIntelligenceController(newsService, aiService, analysisService, stockAnalysisService, dataService)
 
 	// Test account connection
 	logger.Debug("Testing Alpaca connection...")

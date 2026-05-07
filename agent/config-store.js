@@ -54,6 +54,11 @@ export const HEARTBEAT_PROFILES = {
     description: 'Active intraday monitoring for fast-moving penny stocks — closes all day-trades by market close',
     phases: { pre_market: 180, market_open: 60, midday: 90, market_close: 60, after_hours: 1800, closed: 3600 },
   },
+  harvest: {
+    label: 'Harvest (Theta)',
+    description: 'Low-frequency check-ins for mechanical theta-harvesting — iron condor entries and exits do not require rapid response',
+    phases: { pre_market: 3600, market_open: 900, midday: 900, market_close: 900, after_hours: 7200, closed: 14400 },
+  },
 };
 
 export const PHASE_TIME_RANGES = {
