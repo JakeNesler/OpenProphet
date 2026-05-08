@@ -228,6 +228,41 @@ func TestSECEdgar_ParseRSSDate_Valid(t *testing.T) {
 	}
 }
 
+func TestSECEdgar_ParseRSSDate_NoSeconds_NamedTz(t *testing.T) {
+	// EDGAR has been observed emitting timestamps without seconds, e.g.
+	// "Fri, 08 May 2026 17:12 GMT". The previous parser rejected these.
+	ts := "Fri, 08 May 2026 17:12 GMT"
+	parsed, fallback := parseRSSDate(ts)
+	if fallback {
+		t.Error("expected no fallback for no-seconds named-tz timestamp")
+	}
+	if parsed.UTC().Hour() != 17 || parsed.UTC().Minute() != 12 {
+		t.Errorf("expected 17:12 UTC, got %v", parsed.UTC())
+	}
+}
+
+func TestSECEdgar_ParseRSSDate_NoSeconds_NumericTz(t *testing.T) {
+	ts := "Fri, 08 May 2026 13:12 -0400"
+	parsed, fallback := parseRSSDate(ts)
+	if fallback {
+		t.Error("expected no fallback for no-seconds numeric-tz timestamp")
+	}
+	if parsed.UTC().Hour() != 17 || parsed.UTC().Minute() != 12 {
+		t.Errorf("expected 17:12 UTC, got %v", parsed.UTC())
+	}
+}
+
+func TestSECEdgar_ParseAtomDate_NoSeconds_NamedTz(t *testing.T) {
+	ts := "Fri, 08 May 2026 17:12 GMT"
+	parsed, fallback := parseAtomDate(ts)
+	if fallback {
+		t.Error("expected no fallback for no-seconds named-tz timestamp")
+	}
+	if parsed.UTC().Hour() != 17 || parsed.UTC().Minute() != 12 {
+		t.Errorf("expected 17:12 UTC, got %v", parsed.UTC())
+	}
+}
+
 func TestSECEdgar_ParseAtomDate_FallbackSkipsUpsert(t *testing.T) {
 	// Verify that a bad timestamp does not insert an entry
 	svc := newTestEdgar()
