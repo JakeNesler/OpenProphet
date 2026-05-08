@@ -199,7 +199,7 @@ func (s *PennyUniverseService) GetTickers() []string {
 
 func (s *PennyUniverseService) refresh() {
 	url := fmt.Sprintf(
-		"%s/api/v3/stock-screener?marketCapMoreThan=50000000&marketCapLowerThan=500000000&priceMoreThan=2&priceLowerThan=10&exchange=NASDAQ,NYSE,AMEX&country=US&limit=500&apikey=%s",
+		"%s/stable/company-screener?marketCapMoreThan=50000000&marketCapLowerThan=500000000&priceMoreThan=2&priceLowerThan=10&exchange=NASDAQ,NYSE,AMEX&country=US&limit=500&apikey=%s",
 		s.fmpBaseURL,
 		s.fmpAPIKey,
 	)

@@ -247,7 +247,7 @@ func (s *EarningsCalendarService) refreshEarnings(now time.Time) (parsed, skippe
 	nowET := now.In(loc)
 	from := nowET.Format("2006-01-02")
 	to := nowET.AddDate(0, 0, earningsFetchHorizonDays).Format("2006-01-02")
-	url := fmt.Sprintf("%s/api/v3/earning_calendar?from=%s&to=%s&apikey=%s",
+	url := fmt.Sprintf("%s/stable/earnings-calendar?from=%s&to=%s&apikey=%s",
 		s.fmpBaseURL, from, to, s.fmpAPIKey)
 
 	resp, err := s.httpClient.Get(url)

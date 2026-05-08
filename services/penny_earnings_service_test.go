@@ -368,12 +368,12 @@ func TestEarningsWaitForFirstRefresh_CompletesWhenSignaledMidWait(t *testing.T) 
 	}
 }
 
-// fmpEarningsTestServer returns an httptest.Server that responds to /api/v3/earning_calendar
+// fmpEarningsTestServer returns an httptest.Server that responds to /stable/earnings-calendar
 // with the supplied JSON body and status code.
 func fmpEarningsTestServer(t *testing.T, body string, status int) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !strings.HasPrefix(r.URL.Path, "/api/v3/earning_calendar") {
+		if !strings.HasPrefix(r.URL.Path, "/stable/earnings-calendar") {
 			http.NotFound(w, r)
 			return
 		}
@@ -535,7 +535,7 @@ func dualEndpointServer(t *testing.T, cfg dualEndpointConfig) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case strings.HasPrefix(r.URL.Path, "/api/v3/earning_calendar"):
+		case strings.HasPrefix(r.URL.Path, "/stable/earnings-calendar"):
 			w.WriteHeader(cfg.earningsStatus)
 			w.Write([]byte(cfg.earningsBody))
 		case strings.HasPrefix(r.URL.Path, "/v2/calendar"):
