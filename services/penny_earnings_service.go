@@ -96,3 +96,34 @@ func tradingDayDistance(nowDate, effective time.Time, calendar []AlpacaCalendarE
 	}
 	return count
 }
+
+// effectiveDate computes the trading day on which the post-earnings gap will manifest.
+// For BMO/empty time: returns the first trading day on or after entry.Date.
+// For AMC: returns the first trading day strictly after entry.Date.
+// Returns entry.Date unchanged if calendar is empty or no qualifying day exists.
+func (s *EarningsCalendarService) effectiveDate(entry earningsEntry, calendar []AlpacaCalendarEntry) time.Time {
+	if len(calendar) == 0 {
+		return entry.Date
+	}
+	entryYMD := entry.Date.Format("2006-01-02")
+	loc := nyLoc
+	if loc == nil {
+		loc = time.UTC
+	}
+	for _, c := range calendar {
+		if entry.Time == "amc" {
+			if c.Date > entryYMD {
+				if d, err := time.ParseInLocation("2006-01-02", c.Date, loc); err == nil {
+					return d
+				}
+			}
+		} else {
+			if c.Date >= entryYMD {
+				if d, err := time.ParseInLocation("2006-01-02", c.Date, loc); err == nil {
+					return d
+				}
+			}
+		}
+	}
+	return entry.Date
+}
