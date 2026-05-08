@@ -2,7 +2,11 @@ package services
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
+	"io"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -193,4 +197,74 @@ func (s *EarningsCalendarService) maybeWarn(now time.Time) bool {
 	}
 	s.lastWarnTime = now
 	return true
+}
+
+type fmpEarningsItem struct {
+	Symbol string `json:"symbol"`
+	Date   string `json:"date"`
+	Time   string `json:"time"`
+}
+
+// refreshEarnings fetches the FMP earnings calendar and replaces the entries map
+// with the parsed result. The HTTP call and parse run outside the mutex; the lock
+// is held only for the final swap. Returns the count of parsed and skipped entries
+// for the caller to log; on failure returns an error and preserves the prior cache.
+func (s *EarningsCalendarService) refreshEarnings(now time.Time) (parsed, skipped int, err error) {
+	loc := nyLoc
+	if loc == nil {
+		loc = time.UTC
+	}
+	nowET := now.In(loc)
+	from := nowET.Format("2006-01-02")
+	to := nowET.AddDate(0, 0, earningsFetchHorizonDays).Format("2006-01-02")
+	url := fmt.Sprintf("%s/api/v3/earning_calendar?from=%s&to=%s&apikey=%s",
+		s.fmpBaseURL, from, to, s.fmpAPIKey)
+
+	resp, err := s.httpClient.Get(url)
+	if err != nil {
+		s.logger.WithError(err).Warn("EarningsCalendarService: FMP earnings fetch failed")
+		return 0, 0, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		s.logger.WithField("status", resp.StatusCode).Warn("EarningsCalendarService: FMP earnings non-200")
+		return 0, 0, fmt.Errorf("fmp earnings returned HTTP %d", resp.StatusCode)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		s.logger.WithError(err).Warn("EarningsCalendarService: failed to read FMP earnings body")
+		return 0, 0, err
+	}
+	var items []fmpEarningsItem
+	if err := json.Unmarshal(body, &items); err != nil {
+		s.logger.WithError(err).Warn("EarningsCalendarService: failed to parse FMP earnings JSON")
+		return 0, 0, err
+	}
+
+	todayYMD := from
+	parsedMap := make(map[string]earningsEntry)
+	for _, it := range items {
+		d, perr := time.ParseInLocation("2006-01-02", it.Date, loc)
+		if perr != nil {
+			skipped++
+			continue
+		}
+		if it.Date < todayYMD {
+			continue
+		}
+		t := strings.ToLower(strings.TrimSpace(it.Time))
+		if t != "bmo" && t != "amc" {
+			t = ""
+		}
+		entry := earningsEntry{Ticker: it.Symbol, Date: d, Time: t}
+		if existing, ok := parsedMap[it.Symbol]; !ok || d.Before(existing.Date) {
+			parsedMap[it.Symbol] = entry
+		}
+	}
+
+	s.mu.Lock()
+	s.entries = parsedMap
+	s.mu.Unlock()
+
+	return len(parsedMap), skipped, nil
 }

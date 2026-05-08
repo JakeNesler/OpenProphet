@@ -1,6 +1,9 @@
 package services
 
 import (
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -361,5 +364,149 @@ func TestEarningsWaitForFirstRefresh_CompletesWhenSignaledMidWait(t *testing.T) 
 	}()
 	if !s.WaitForFirstRefresh(200 * time.Millisecond) {
 		t.Error("expected WaitForFirstRefresh to return true after mid-wait signal")
+	}
+}
+
+// fmpEarningsTestServer returns an httptest.Server that responds to /api/v3/earning_calendar
+// with the supplied JSON body and status code.
+func fmpEarningsTestServer(t *testing.T, body string, status int) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasPrefix(r.URL.Path, "/api/v3/earning_calendar") {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		w.Write([]byte(body))
+	}))
+}
+
+func TestEarningsRefresh_FMPSuccess_PopulatesEntries(t *testing.T) {
+	body := `[
+		{"symbol":"AAA","date":"2026-05-12","time":"bmo"},
+		{"symbol":"BBB","date":"2026-05-13","time":"amc"}
+	]`
+	ts := fmpEarningsTestServer(t, body, 200)
+	defer ts.Close()
+	s := NewEarningsCalendarService("k", "", "", "", ts.Client())
+	s.fmpBaseURL = ts.URL
+	if _, _, err := s.refreshEarnings(time.Now()); err != nil {
+		t.Fatalf("expected refreshEarnings success, got %v", err)
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if len(s.entries) != 2 {
+		t.Errorf("expected 2 entries, got %d", len(s.entries))
+	}
+	if s.entries["AAA"].Time != "bmo" || s.entries["BBB"].Time != "amc" {
+		t.Errorf("unexpected entries: %+v", s.entries)
+	}
+}
+
+func TestEarningsRefresh_FMPNon200_KeepsPriorCache(t *testing.T) {
+	ts := fmpEarningsTestServer(t, `internal error`, 500)
+	defer ts.Close()
+	s := NewEarningsCalendarService("k", "", "", "", ts.Client())
+	s.fmpBaseURL = ts.URL
+	prior := map[string]earningsEntry{"X": {Ticker: "X"}}
+	s.entries = prior
+	if _, _, err := s.refreshEarnings(time.Now()); err == nil {
+		t.Error("expected refreshEarnings to return error on 500")
+	}
+	if _, ok := s.entries["X"]; !ok {
+		t.Error("prior cache must be preserved on FMP failure")
+	}
+}
+
+func TestEarningsRefresh_FMPMalformedJSON_KeepsPriorCache(t *testing.T) {
+	ts := fmpEarningsTestServer(t, `{not json`, 200)
+	defer ts.Close()
+	s := NewEarningsCalendarService("k", "", "", "", ts.Client())
+	s.fmpBaseURL = ts.URL
+	prior := map[string]earningsEntry{"X": {Ticker: "X"}}
+	s.entries = prior
+	if _, _, err := s.refreshEarnings(time.Now()); err == nil {
+		t.Error("expected refreshEarnings to return error on malformed JSON")
+	}
+	if _, ok := s.entries["X"]; !ok {
+		t.Error("prior cache must be preserved on parse failure")
+	}
+}
+
+func TestEarningsRefresh_DuplicateEntries_KeepsEarliest(t *testing.T) {
+	body := `[
+		{"symbol":"AAA","date":"2026-05-15","time":"amc"},
+		{"symbol":"AAA","date":"2026-05-12","time":"bmo"},
+		{"symbol":"AAA","date":"2026-05-20","time":"bmo"}
+	]`
+	ts := fmpEarningsTestServer(t, body, 200)
+	defer ts.Close()
+	s := NewEarningsCalendarService("k", "", "", "", ts.Client())
+	s.fmpBaseURL = ts.URL
+	if _, _, err := s.refreshEarnings(time.Now()); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	got := s.entries["AAA"]
+	if got.Date.Format("2006-01-02") != "2026-05-12" {
+		t.Errorf("expected earliest 2026-05-12, got %s", got.Date.Format("2006-01-02"))
+	}
+}
+
+func TestEarningsRefresh_PastDateEntries_Dropped(t *testing.T) {
+	loc, _ := time.LoadLocation("America/New_York")
+	now := time.Date(2026, 5, 8, 12, 0, 0, 0, loc)
+	body := `[
+		{"symbol":"OLD","date":"2026-05-01","time":"bmo"},
+		{"symbol":"NEW","date":"2026-05-12","time":"bmo"}
+	]`
+	ts := fmpEarningsTestServer(t, body, 200)
+	defer ts.Close()
+	s := NewEarningsCalendarService("k", "", "", "", ts.Client())
+	s.fmpBaseURL = ts.URL
+	if _, _, err := s.refreshEarnings(now); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if _, ok := s.entries["OLD"]; ok {
+		t.Error("past-dated entry should have been dropped")
+	}
+	if _, ok := s.entries["NEW"]; !ok {
+		t.Error("future entry should be present")
+	}
+}
+
+func TestEarningsRefresh_UnknownTimeNormalizedToEmpty(t *testing.T) {
+	body := `[{"symbol":"AAA","date":"2026-05-12","time":"DURING-MARKET"}]`
+	ts := fmpEarningsTestServer(t, body, 200)
+	defer ts.Close()
+	s := NewEarningsCalendarService("k", "", "", "", ts.Client())
+	s.fmpBaseURL = ts.URL
+	if _, _, err := s.refreshEarnings(time.Now()); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.entries["AAA"].Time != "" {
+		t.Errorf("unknown time should normalize to empty, got %q", s.entries["AAA"].Time)
+	}
+}
+
+func TestEarningsRefresh_UppercaseTimeNormalizedToLowercase(t *testing.T) {
+	body := `[{"symbol":"AAA","date":"2026-05-12","time":"BMO"}]`
+	ts := fmpEarningsTestServer(t, body, 200)
+	defer ts.Close()
+	s := NewEarningsCalendarService("k", "", "", "", ts.Client())
+	s.fmpBaseURL = ts.URL
+	if _, _, err := s.refreshEarnings(time.Now()); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.entries["AAA"].Time != "bmo" {
+		t.Errorf("uppercase BMO should normalize to lowercase bmo, got %q", s.entries["AAA"].Time)
 	}
 }
