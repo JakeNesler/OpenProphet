@@ -75,3 +75,24 @@ func NewEarningsCalendarService(
 func (s *EarningsCalendarService) Start(ctx context.Context)                          {}
 func (s *EarningsCalendarService) IsExcluded(ticker string, now time.Time) bool       { return false }
 func (s *EarningsCalendarService) WaitForFirstRefresh(timeout time.Duration) bool     { return false }
+
+// tradingDayDistance returns the number of trading days from nowDate (exclusive)
+// to effective (inclusive). Both arguments are compared by date in their stored
+// location. Returns -1 if effective is strictly before nowDate.
+func tradingDayDistance(nowDate, effective time.Time, calendar []AlpacaCalendarEntry) int {
+	nowYMD := nowDate.Format("2006-01-02")
+	effYMD := effective.Format("2006-01-02")
+	if effYMD < nowYMD {
+		return -1
+	}
+	if effYMD == nowYMD {
+		return 0
+	}
+	count := 0
+	for _, e := range calendar {
+		if e.Date > nowYMD && e.Date <= effYMD {
+			count++
+		}
+	}
+	return count
+}
