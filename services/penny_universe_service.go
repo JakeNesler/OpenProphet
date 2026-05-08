@@ -21,6 +21,14 @@ type AlpacaCalendarEntry struct {
 	SessionClose string `json:"session_close"` // "HHMM" extended-hours close ET
 }
 
+// EarningsCalendarChecker is the subset of EarningsCalendarService consumed by
+// PennyUniverseService.filter(). Defined as an interface so tests can supply
+// stubs and so the universe service does not depend on the earnings service's
+// concrete refresh machinery.
+type EarningsCalendarChecker interface {
+	IsExcluded(ticker string, now time.Time) bool
+}
+
 // isMarketHours returns "open", "pre", "after", or "closed" based on now vs the calendar entry.
 func isMarketHours(now time.Time, cal AlpacaCalendarEntry) string {
 	loc := nyLoc
@@ -112,10 +120,11 @@ type PennyUniverseService struct {
 	calEntry        AlpacaCalendarEntry
 	calDate         time.Time
 	logger          *logrus.Logger
+	earnings        EarningsCalendarChecker
 }
 
 // NewPennyUniverseService creates the service. Pass a custom httpClient for testing.
-func NewPennyUniverseService(fmpAPIKey, alpacaAPIKey, alpacaSecretKey, alpacaBaseURL string, httpClient *http.Client) *PennyUniverseService {
+func NewPennyUniverseService(fmpAPIKey, alpacaAPIKey, alpacaSecretKey, alpacaBaseURL string, earnings EarningsCalendarChecker, httpClient *http.Client) *PennyUniverseService {
 	if httpClient == nil {
 		httpClient = &http.Client{Timeout: 20 * time.Second}
 	}
@@ -131,6 +140,7 @@ func NewPennyUniverseService(fmpAPIKey, alpacaAPIKey, alpacaSecretKey, alpacaBas
 		alpacaAPIKey:    alpacaAPIKey,
 		alpacaSecretKey: alpacaSecretKey,
 		alpacaBaseURL:   alpacaBaseURL,
+		earnings:        earnings,
 		logger:          logger,
 	}
 }
@@ -189,7 +199,7 @@ func (s *PennyUniverseService) GetTickers() []string {
 
 func (s *PennyUniverseService) refresh() {
 	url := fmt.Sprintf(
-		"%s/api/v3/stock-screener?marketCapMoreThan=50000000&marketCapLowerThan=500000000&priceMoreThan=2&priceLowerThan=10&exchange=NASDAQ,NYSE,AMEX&country=US&limit=500&apikey=%s",
+		"%s/stable/company-screener?marketCapMoreThan=50000000&marketCapLowerThan=500000000&priceMoreThan=2&priceLowerThan=10&exchange=NASDAQ,NYSE,AMEX&country=US&limit=500&apikey=%s",
 		s.fmpBaseURL,
 		s.fmpAPIKey,
 	)
@@ -213,11 +223,14 @@ func (s *PennyUniverseService) refresh() {
 		s.logger.WithError(err).Warn("PennyUniverseService: failed to parse FMP response")
 		return
 	}
-	universe := s.filter(items)
+	universe, excludedForEarnings := s.filter(items)
 	s.mu.Lock()
 	s.universe = universe
 	s.mu.Unlock()
-	s.logger.WithField("count", len(universe)).Info("PennyUniverseService: universe refreshed")
+	s.logger.WithFields(logrus.Fields{
+		"count":                 len(universe),
+		"excluded_for_earnings": excludedForEarnings,
+	}).Info("PennyUniverseService: universe refreshed")
 }
 
 var allowedExchanges = map[string]bool{
@@ -228,8 +241,9 @@ var allowedExchanges = map[string]bool{
 
 var nyLoc, _ = time.LoadLocation("America/New_York")
 
-func (s *PennyUniverseService) filter(items []fmpScreenerItem) []UniverseSymbol {
+func (s *PennyUniverseService) filter(items []fmpScreenerItem) ([]UniverseSymbol, int) {
 	out := make([]UniverseSymbol, 0)
+	excludedForEarnings := 0
 	for _, item := range items {
 		if !allowedExchanges[item.ExchangeShortName] {
 			continue
@@ -244,6 +258,10 @@ func (s *PennyUniverseService) filter(items []fmpScreenerItem) []UniverseSymbol 
 		if dollarVol < 500_000 {
 			continue
 		}
+		if s.earnings != nil && s.earnings.IsExcluded(item.Symbol, time.Now()) {
+			excludedForEarnings++
+			continue
+		}
 		out = append(out, UniverseSymbol{
 			Ticker:       item.Symbol,
 			Name:         item.CompanyName,
@@ -253,7 +271,7 @@ func (s *PennyUniverseService) filter(items []fmpScreenerItem) []UniverseSymbol 
 			AvgDollarVol: dollarVol,
 		})
 	}
-	return out
+	return out, excludedForEarnings
 }
 
 func (s *PennyUniverseService) maybeRefreshCalendar(now time.Time) {

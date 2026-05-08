@@ -17,8 +17,8 @@ func TestPennyUniverseService_Filter(t *testing.T) {
 		{Symbol: "LOWVOL", CompanyName: "Low Vol", MarketCap: 100_000_000, Price: 5.0, Volume: 1_000, ExchangeShortName: "NASDAQ"},
 		{Symbol: "OTC", CompanyName: "OTC Co", MarketCap: 100_000_000, Price: 5.0, Volume: 100_000, ExchangeShortName: "OTC"},
 	}
-	svc := NewPennyUniverseService("dummy", "", "", "", nil)
-	result := svc.filter(items)
+	svc := NewPennyUniverseService("dummy", "", "", "", nil, nil)
+	result, _ := svc.filter(items)
 	if len(result) != 1 {
 		t.Fatalf("expected 1 symbol, got %d", len(result))
 	}
@@ -38,7 +38,7 @@ func TestPennyUniverseService_HTTPRefresh(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	svc := NewPennyUniverseService("testkey", "", "", "", ts.Client())
+	svc := NewPennyUniverseService("testkey", "", "", "", nil, ts.Client())
 	svc.fmpBaseURL = ts.URL
 	svc.refresh()
 	tickers := svc.GetTickers()
@@ -48,24 +48,24 @@ func TestPennyUniverseService_HTTPRefresh(t *testing.T) {
 }
 
 func TestUniverseFilter_ADV_BoundaryExcluded(t *testing.T) {
-	svc := NewPennyUniverseService("key", "", "", "", nil)
+	svc := NewPennyUniverseService("key", "", "", "", nil, nil)
 	items := []fmpScreenerItem{
 		{Symbol: "LOW", CompanyName: "Low Vol", MarketCap: 100_000_000, Price: 5.0,
 			Volume: 99_999, ExchangeShortName: "NASDAQ"}, // dollarVol = 499,995 < 500,000
 	}
-	result := svc.filter(items)
+	result, _ := svc.filter(items)
 	if len(result) != 0 {
 		t.Errorf("expected ADV $499,995 to be excluded, got %d results", len(result))
 	}
 }
 
 func TestUniverseFilter_ADV_BoundaryIncluded(t *testing.T) {
-	svc := NewPennyUniverseService("key", "", "", "", nil)
+	svc := NewPennyUniverseService("key", "", "", "", nil, nil)
 	items := []fmpScreenerItem{
 		{Symbol: "OK", CompanyName: "OK Vol", MarketCap: 100_000_000, Price: 5.0,
 			Volume: 100_000, ExchangeShortName: "NASDAQ"}, // dollarVol = 500,000 >= 500,000
 	}
-	result := svc.filter(items)
+	result, _ := svc.filter(items)
 	if len(result) != 1 {
 		t.Errorf("expected ADV $500,000 to be included, got %d results", len(result))
 	}
@@ -150,5 +150,52 @@ func TestIsMarketHours_BeforeSessionOpen(t *testing.T) {
 	got := isMarketHours(now, cal)
 	if got != "closed" {
 		t.Errorf("expected 'closed' before session open, got %q", got)
+	}
+}
+
+type stubEarningsChecker struct {
+	excluded map[string]bool
+}
+
+func (s *stubEarningsChecker) IsExcluded(ticker string, _ time.Time) bool {
+	return s.excluded[ticker]
+}
+
+func TestUniverseFilter_NilChecker_DoesNotExclude(t *testing.T) {
+	svc := NewPennyUniverseService("k", "", "", "", nil, nil)
+	items := []fmpScreenerItem{
+		{Symbol: "GOOD", CompanyName: "Good", MarketCap: 100_000_000, Price: 5.0, Volume: 100_000, ExchangeShortName: "NASDAQ"},
+	}
+	out, excluded := svc.filter(items)
+	if len(out) != 1 || excluded != 0 {
+		t.Errorf("nil checker: expected 1 included / 0 excluded, got %d / %d", len(out), excluded)
+	}
+}
+
+func TestUniverseFilter_CheckerExcludesTicker(t *testing.T) {
+	checker := &stubEarningsChecker{excluded: map[string]bool{"BAD": true}}
+	svc := NewPennyUniverseService("k", "", "", "", checker, nil)
+	items := []fmpScreenerItem{
+		{Symbol: "GOOD", CompanyName: "Good", MarketCap: 100_000_000, Price: 5.0, Volume: 100_000, ExchangeShortName: "NASDAQ"},
+		{Symbol: "BAD", CompanyName: "Bad", MarketCap: 100_000_000, Price: 5.0, Volume: 100_000, ExchangeShortName: "NASDAQ"},
+	}
+	out, excluded := svc.filter(items)
+	if len(out) != 1 || out[0].Ticker != "GOOD" {
+		t.Errorf("expected only GOOD to remain, got %+v", out)
+	}
+	if excluded != 1 {
+		t.Errorf("expected excluded count 1, got %d", excluded)
+	}
+}
+
+func TestUniverseFilter_CheckerExcludesNothing(t *testing.T) {
+	checker := &stubEarningsChecker{excluded: map[string]bool{}}
+	svc := NewPennyUniverseService("k", "", "", "", checker, nil)
+	items := []fmpScreenerItem{
+		{Symbol: "GOOD", CompanyName: "Good", MarketCap: 100_000_000, Price: 5.0, Volume: 100_000, ExchangeShortName: "NASDAQ"},
+	}
+	out, excluded := svc.filter(items)
+	if len(out) != 1 || excluded != 0 {
+		t.Errorf("expected 1 included / 0 excluded, got %d / %d", len(out), excluded)
 	}
 }

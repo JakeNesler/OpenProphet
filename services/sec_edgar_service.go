@@ -159,23 +159,36 @@ func (s *SECEdgarService) fetchRSS(url string) ([]rssItem, error) {
 	return feed.Channel.Items, nil
 }
 
-func parseAtomDate(s string) (time.Time, bool) {
-	t, err := time.Parse(time.RFC3339, s)
-	if err != nil {
-		return time.Now(), true
+// edgarDateLayouts is the ordered list of timestamp formats accepted on
+// EDGAR feed entries. Most-likely formats are tried first. Includes
+// no-seconds RFC1123 variants (e.g. "Fri, 08 May 2026 17:12 GMT") that
+// EDGAR has been observed to emit in 2026.
+var edgarDateLayouts = []string{
+	time.RFC3339,
+	time.RFC3339Nano,
+	time.RFC1123Z,
+	time.RFC1123,
+	"Mon, 02 Jan 2006 15:04:05 MST",
+	"Mon, 02 Jan 2006 15:04:05 -0700",
+	"Mon, 02 Jan 2006 15:04 MST",
+	"Mon, 02 Jan 2006 15:04 -0700",
+}
+
+func tryParseEdgarDate(s string) (time.Time, bool) {
+	for _, layout := range edgarDateLayouts {
+		if t, err := time.Parse(layout, s); err == nil {
+			return t, false
+		}
 	}
-	return t, false
+	return time.Now(), true
+}
+
+func parseAtomDate(s string) (time.Time, bool) {
+	return tryParseEdgarDate(s)
 }
 
 func parseRSSDate(s string) (time.Time, bool) {
-	t, err := time.Parse(time.RFC1123Z, s)
-	if err != nil {
-		t, err = time.Parse("Mon, 02 Jan 2006 15:04:05 MST", s)
-		if err != nil {
-			return time.Now(), true
-		}
-	}
-	return t, false
+	return tryParseEdgarDate(s)
 }
 
 func (s *SECEdgarService) pollEdgar(tickers map[string]bool) (fallbacks, total int) {
