@@ -21,6 +21,14 @@ type AlpacaCalendarEntry struct {
 	SessionClose string `json:"session_close"` // "HHMM" extended-hours close ET
 }
 
+// EarningsCalendarChecker is the subset of EarningsCalendarService consumed by
+// PennyUniverseService.filter(). Defined as an interface so tests can supply
+// stubs and so the universe service does not depend on the earnings service's
+// concrete refresh machinery.
+type EarningsCalendarChecker interface {
+	IsExcluded(ticker string, now time.Time) bool
+}
+
 // isMarketHours returns "open", "pre", "after", or "closed" based on now vs the calendar entry.
 func isMarketHours(now time.Time, cal AlpacaCalendarEntry) string {
 	loc := nyLoc
@@ -112,10 +120,11 @@ type PennyUniverseService struct {
 	calEntry        AlpacaCalendarEntry
 	calDate         time.Time
 	logger          *logrus.Logger
+	earnings        EarningsCalendarChecker
 }
 
 // NewPennyUniverseService creates the service. Pass a custom httpClient for testing.
-func NewPennyUniverseService(fmpAPIKey, alpacaAPIKey, alpacaSecretKey, alpacaBaseURL string, httpClient *http.Client) *PennyUniverseService {
+func NewPennyUniverseService(fmpAPIKey, alpacaAPIKey, alpacaSecretKey, alpacaBaseURL string, earnings EarningsCalendarChecker, httpClient *http.Client) *PennyUniverseService {
 	if httpClient == nil {
 		httpClient = &http.Client{Timeout: 20 * time.Second}
 	}
@@ -131,6 +140,7 @@ func NewPennyUniverseService(fmpAPIKey, alpacaAPIKey, alpacaSecretKey, alpacaBas
 		alpacaAPIKey:    alpacaAPIKey,
 		alpacaSecretKey: alpacaSecretKey,
 		alpacaBaseURL:   alpacaBaseURL,
+		earnings:        earnings,
 		logger:          logger,
 	}
 }

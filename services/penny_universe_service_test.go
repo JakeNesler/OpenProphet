@@ -17,7 +17,7 @@ func TestPennyUniverseService_Filter(t *testing.T) {
 		{Symbol: "LOWVOL", CompanyName: "Low Vol", MarketCap: 100_000_000, Price: 5.0, Volume: 1_000, ExchangeShortName: "NASDAQ"},
 		{Symbol: "OTC", CompanyName: "OTC Co", MarketCap: 100_000_000, Price: 5.0, Volume: 100_000, ExchangeShortName: "OTC"},
 	}
-	svc := NewPennyUniverseService("dummy", "", "", "", nil)
+	svc := NewPennyUniverseService("dummy", "", "", "", nil, nil)
 	result := svc.filter(items)
 	if len(result) != 1 {
 		t.Fatalf("expected 1 symbol, got %d", len(result))
@@ -38,7 +38,7 @@ func TestPennyUniverseService_HTTPRefresh(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	svc := NewPennyUniverseService("testkey", "", "", "", ts.Client())
+	svc := NewPennyUniverseService("testkey", "", "", "", nil, ts.Client())
 	svc.fmpBaseURL = ts.URL
 	svc.refresh()
 	tickers := svc.GetTickers()
@@ -48,7 +48,7 @@ func TestPennyUniverseService_HTTPRefresh(t *testing.T) {
 }
 
 func TestUniverseFilter_ADV_BoundaryExcluded(t *testing.T) {
-	svc := NewPennyUniverseService("key", "", "", "", nil)
+	svc := NewPennyUniverseService("key", "", "", "", nil, nil)
 	items := []fmpScreenerItem{
 		{Symbol: "LOW", CompanyName: "Low Vol", MarketCap: 100_000_000, Price: 5.0,
 			Volume: 99_999, ExchangeShortName: "NASDAQ"}, // dollarVol = 499,995 < 500,000
@@ -60,7 +60,7 @@ func TestUniverseFilter_ADV_BoundaryExcluded(t *testing.T) {
 }
 
 func TestUniverseFilter_ADV_BoundaryIncluded(t *testing.T) {
-	svc := NewPennyUniverseService("key", "", "", "", nil)
+	svc := NewPennyUniverseService("key", "", "", "", nil, nil)
 	items := []fmpScreenerItem{
 		{Symbol: "OK", CompanyName: "OK Vol", MarketCap: 100_000_000, Price: 5.0,
 			Volume: 100_000, ExchangeShortName: "NASDAQ"}, // dollarVol = 500,000 >= 500,000
