@@ -391,7 +391,9 @@ func TestEarningsRefresh_FMPSuccess_PopulatesEntries(t *testing.T) {
 	defer ts.Close()
 	s := NewEarningsCalendarService("k", "", "", "", ts.Client())
 	s.fmpBaseURL = ts.URL
-	if _, _, err := s.refreshEarnings(time.Now()); err != nil {
+	loc, _ := time.LoadLocation("America/New_York")
+	now := time.Date(2026, 5, 8, 12, 0, 0, 0, loc)
+	if _, _, err := s.refreshEarnings(now); err != nil {
 		t.Fatalf("expected refreshEarnings success, got %v", err)
 	}
 	s.mu.RLock()
@@ -444,7 +446,9 @@ func TestEarningsRefresh_DuplicateEntries_KeepsEarliest(t *testing.T) {
 	defer ts.Close()
 	s := NewEarningsCalendarService("k", "", "", "", ts.Client())
 	s.fmpBaseURL = ts.URL
-	if _, _, err := s.refreshEarnings(time.Now()); err != nil {
+	loc, _ := time.LoadLocation("America/New_York")
+	now := time.Date(2026, 5, 8, 12, 0, 0, 0, loc)
+	if _, _, err := s.refreshEarnings(now); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	s.mu.RLock()
@@ -485,7 +489,9 @@ func TestEarningsRefresh_UnknownTimeNormalizedToEmpty(t *testing.T) {
 	defer ts.Close()
 	s := NewEarningsCalendarService("k", "", "", "", ts.Client())
 	s.fmpBaseURL = ts.URL
-	if _, _, err := s.refreshEarnings(time.Now()); err != nil {
+	loc, _ := time.LoadLocation("America/New_York")
+	now := time.Date(2026, 5, 8, 12, 0, 0, 0, loc)
+	if _, _, err := s.refreshEarnings(now); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	s.mu.RLock()
@@ -501,7 +507,9 @@ func TestEarningsRefresh_UppercaseTimeNormalizedToLowercase(t *testing.T) {
 	defer ts.Close()
 	s := NewEarningsCalendarService("k", "", "", "", ts.Client())
 	s.fmpBaseURL = ts.URL
-	if _, _, err := s.refreshEarnings(time.Now()); err != nil {
+	loc, _ := time.LoadLocation("America/New_York")
+	now := time.Date(2026, 5, 8, 12, 0, 0, 0, loc)
+	if _, _, err := s.refreshEarnings(now); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	s.mu.RLock()
