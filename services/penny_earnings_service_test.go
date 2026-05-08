@@ -1,6 +1,7 @@
 package services
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -516,5 +517,193 @@ func TestEarningsRefresh_UppercaseTimeNormalizedToLowercase(t *testing.T) {
 	defer s.mu.RUnlock()
 	if s.entries["AAA"].Time != "bmo" {
 		t.Errorf("uppercase BMO should normalize to lowercase bmo, got %q", s.entries["AAA"].Time)
+	}
+}
+
+// dualEndpointServer returns one httptest.Server that handles BOTH the FMP earnings
+// path and the Alpaca calendar path. The earnings response is supplied; the calendar
+// response is auto-generated as Mon-Fri starting from "from" date in the request.
+type dualEndpointConfig struct {
+	earningsBody     string
+	earningsStatus   int
+	calendarBody     string // if non-empty, overrides auto-generation
+	calendarStatus   int
+	calendarFailHard bool // if true, 500 on calendar
+}
+
+func dualEndpointServer(t *testing.T, cfg dualEndpointConfig) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasPrefix(r.URL.Path, "/api/v3/earning_calendar"):
+			w.WriteHeader(cfg.earningsStatus)
+			w.Write([]byte(cfg.earningsBody))
+		case strings.HasPrefix(r.URL.Path, "/v2/calendar"):
+			if cfg.calendarFailHard {
+				w.WriteHeader(500)
+				w.Write([]byte(`internal`))
+				return
+			}
+			if cfg.calendarBody != "" {
+				w.WriteHeader(cfg.calendarStatus)
+				w.Write([]byte(cfg.calendarBody))
+				return
+			}
+			from := r.URL.Query().Get("start")
+			loc, _ := time.LoadLocation("America/New_York")
+			start, _ := time.ParseInLocation("2006-01-02", from, loc)
+			cal := monFriCalendar(start, calendarFetchHorizonDays)
+			b, _ := json.Marshal(cal)
+			w.WriteHeader(200)
+			w.Write(b)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+}
+
+func TestEarningsRefresh_FullSuccess_SignalsFirstRefresh(t *testing.T) {
+	loc, _ := time.LoadLocation("America/New_York")
+	now := time.Date(2026, 5, 4, 8, 0, 0, 0, loc)
+	body := `[{"symbol":"AAA","date":"2026-05-12","time":"bmo"}]`
+	ts := dualEndpointServer(t, dualEndpointConfig{
+		earningsBody: body, earningsStatus: 200,
+	})
+	defer ts.Close()
+	s := NewEarningsCalendarService("k", "alpaca-id", "alpaca-secret", ts.URL, ts.Client())
+	s.fmpBaseURL = ts.URL
+
+	s.refresh(now)
+	select {
+	case <-s.firstRefreshDone:
+		// ok
+	default:
+		t.Error("expected firstRefreshDone to be closed after full success")
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if len(s.entries) != 1 || len(s.calendar) == 0 {
+		t.Errorf("expected entries+calendar populated, got entries=%d calendar=%d", len(s.entries), len(s.calendar))
+	}
+	if s.lastRefresh.IsZero() {
+		t.Error("expected lastRefresh to be set")
+	}
+	if s.lastRefreshETDate != "2026-05-04" {
+		t.Errorf("expected lastRefreshETDate=2026-05-04, got %q", s.lastRefreshETDate)
+	}
+}
+
+func TestEarningsRefresh_FMPFails_DoesNotSignalFirstRefresh(t *testing.T) {
+	now := time.Now()
+	ts := dualEndpointServer(t, dualEndpointConfig{
+		earningsBody: `nope`, earningsStatus: 500,
+	})
+	defer ts.Close()
+	s := NewEarningsCalendarService("k", "id", "sec", ts.URL, ts.Client())
+	s.fmpBaseURL = ts.URL
+	s.refresh(now)
+	select {
+	case <-s.firstRefreshDone:
+		t.Error("firstRefreshDone should NOT be closed when FMP fails")
+	default:
+		// ok
+	}
+}
+
+func TestEarningsRefresh_AlpacaFails_DoesNotSignalButUpdatesEntries(t *testing.T) {
+	loc, _ := time.LoadLocation("America/New_York")
+	now := time.Date(2026, 5, 4, 8, 0, 0, 0, loc) // PINNED: not time.Now() — body has 2026-05-12 date
+	body := `[{"symbol":"AAA","date":"2026-05-12","time":"bmo"}]`
+	ts := dualEndpointServer(t, dualEndpointConfig{
+		earningsBody: body, earningsStatus: 200,
+		calendarFailHard: true,
+	})
+	defer ts.Close()
+	s := NewEarningsCalendarService("k", "id", "sec", ts.URL, ts.Client())
+	s.fmpBaseURL = ts.URL
+	s.refresh(now)
+	select {
+	case <-s.firstRefreshDone:
+		t.Error("firstRefreshDone should NOT be closed when calendar fails")
+	default:
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if len(s.entries) != 1 {
+		t.Errorf("expected entries to update even when calendar fails, got %d", len(s.entries))
+	}
+	if len(s.calendar) != 0 {
+		t.Errorf("expected calendar to remain empty when Alpaca fails, got %d", len(s.calendar))
+	}
+}
+
+func TestEarningsRefresh_RunsHTTPOutsideLock(t *testing.T) {
+	// Server holds the FMP request open for 200ms. While it's waiting, we should
+	// be able to acquire RLock on the service. If HTTP work were inside the lock,
+	// this read would block for the full 200ms.
+	release := make(chan struct{})
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-release
+		w.WriteHeader(200)
+		w.Write([]byte(`[]`))
+	}))
+	defer ts.Close()
+	s := NewEarningsCalendarService("k", "id", "sec", ts.URL, ts.Client())
+	s.fmpBaseURL = ts.URL
+
+	done := make(chan struct{})
+	go func() {
+		_, _, _ = s.refreshEarnings(time.Now())
+		close(done)
+	}()
+
+	// Give the goroutine a moment to start the HTTP call.
+	time.Sleep(20 * time.Millisecond)
+
+	// Try to acquire RLock with a tight deadline. If lock is free (HTTP outside lock), this succeeds quickly.
+	gotLock := make(chan struct{})
+	go func() {
+		s.mu.RLock()
+		s.mu.RUnlock()
+		close(gotLock)
+	}()
+	select {
+	case <-gotLock:
+		// success — lock was free during the HTTP call
+	case <-time.After(100 * time.Millisecond):
+		t.Error("RLock blocked while HTTP call was in flight — HTTP work must run outside the lock")
+	}
+	close(release)
+	<-done
+}
+
+func TestEarningsRefresh_RetainsPriorCalendarOnPartialFailure(t *testing.T) {
+	loc, _ := time.LoadLocation("America/New_York")
+	now := time.Date(2026, 5, 4, 8, 0, 0, 0, loc)
+
+	// First call: full success populates calendar
+	body := `[{"symbol":"AAA","date":"2026-05-12","time":"bmo"}]`
+	good := dualEndpointServer(t, dualEndpointConfig{earningsBody: body, earningsStatus: 200})
+	defer good.Close()
+	s := NewEarningsCalendarService("k", "id", "sec", good.URL, good.Client())
+	s.fmpBaseURL = good.URL
+	s.refresh(now)
+	priorCalLen := len(s.calendar)
+	if priorCalLen == 0 {
+		t.Fatal("setup: expected calendar populated after first refresh")
+	}
+
+	// Second call: only Alpaca fails. Calendar should be retained.
+	bad := dualEndpointServer(t, dualEndpointConfig{
+		earningsBody: body, earningsStatus: 200, calendarFailHard: true,
+	})
+	defer bad.Close()
+	s.fmpBaseURL = bad.URL
+	s.alpacaBaseURL = bad.URL
+	s.refresh(now)
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if len(s.calendar) != priorCalLen {
+		t.Errorf("expected prior calendar (%d entries) to be retained, got %d", priorCalLen, len(s.calendar))
 	}
 }

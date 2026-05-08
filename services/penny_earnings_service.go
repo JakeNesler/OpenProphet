@@ -268,3 +268,86 @@ func (s *EarningsCalendarService) refreshEarnings(now time.Time) (parsed, skippe
 
 	return len(parsedMap), skipped, nil
 }
+
+// refreshCalendar fetches the multi-day Alpaca trading-day calendar. Returns the
+// first and last dates in the fetched calendar (for logging) on success.
+func (s *EarningsCalendarService) refreshCalendar(now time.Time) (firstDate, lastDate string, err error) {
+	loc := nyLoc
+	if loc == nil {
+		loc = time.UTC
+	}
+	nowET := now.In(loc)
+	start := nowET.Format("2006-01-02")
+	end := nowET.AddDate(0, 0, calendarFetchHorizonDays).Format("2006-01-02")
+	url := fmt.Sprintf("%s/v2/calendar?start=%s&end=%s", s.alpacaBaseURL, start, end)
+
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		s.logger.WithError(err).Warn("EarningsCalendarService: Alpaca calendar request build failed")
+		return "", "", err
+	}
+	req.Header.Set("APCA-API-KEY-ID", s.alpacaAPIKey)
+	req.Header.Set("APCA-API-SECRET-KEY", s.alpacaSecretKey)
+	resp, err := s.httpClient.Do(req)
+	if err != nil {
+		s.logger.WithError(err).Warn("EarningsCalendarService: Alpaca calendar fetch failed")
+		return "", "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		s.logger.WithField("status", resp.StatusCode).Warn("EarningsCalendarService: Alpaca calendar non-200")
+		return "", "", fmt.Errorf("alpaca calendar returned HTTP %d", resp.StatusCode)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", "", err
+	}
+	var entries []AlpacaCalendarEntry
+	if err := json.Unmarshal(body, &entries); err != nil {
+		s.logger.WithError(err).Warn("EarningsCalendarService: failed to parse Alpaca calendar JSON")
+		return "", "", err
+	}
+	if len(entries) == 0 {
+		s.logger.Warn("EarningsCalendarService: Alpaca calendar returned 0 entries")
+		return "", "", fmt.Errorf("alpaca calendar empty")
+	}
+
+	s.mu.Lock()
+	s.calendar = entries
+	s.mu.Unlock()
+	return entries[0].Date, entries[len(entries)-1].Date, nil
+}
+
+// refresh runs both fetches and updates lastRefresh / lastRefreshETDate.
+// Signals firstRefreshDone only when both fetches succeeded. FMP failure aborts;
+// Alpaca failure leaves prior calendar in place but skips the firstRefreshDone signal.
+// On success, emits a single combined info log.
+func (s *EarningsCalendarService) refresh(now time.Time) {
+	parsed, skipped, err := s.refreshEarnings(now)
+	if err != nil {
+		return
+	}
+	calFrom, calTo, calErr := s.refreshCalendar(now)
+
+	loc := nyLoc
+	if loc == nil {
+		loc = time.UTC
+	}
+	todayET := now.In(loc).Format("2006-01-02")
+
+	s.mu.Lock()
+	s.lastRefresh = now
+	s.lastRefreshETDate = todayET
+	s.mu.Unlock()
+
+	fields := logrus.Fields{
+		"parsed":  parsed,
+		"skipped": skipped,
+	}
+	if calErr == nil {
+		fields["calendar_from"] = calFrom
+		fields["calendar_to"] = calTo
+		s.firstRefreshOnce.Do(func() { close(s.firstRefreshDone) })
+	}
+	s.logger.WithFields(fields).Info("EarningsCalendarService: refresh complete")
+}
