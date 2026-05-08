@@ -14,6 +14,8 @@ type Config struct {
 	AlpacaBaseURL     string
 	AlpacaPaper       bool
 	ClaudeAPIKey      string
+	XAIAPIKey         string
+	AIProvider        string // "claude" or "xai"; auto-detected from available keys if unset
 	FMPAPIKey         string
 	DatabasePath      string
 	ServerPort        string
@@ -40,6 +42,8 @@ func Load() error {
 		AlpacaBaseURL:     getEnvOrDefault("ALPACA_BASE_URL", "https://paper-api.alpaca.markets"),
 		AlpacaPaper:       getEnvOrDefault("ALPACA_PAPER", "true") == "true",
 		ClaudeAPIKey:      os.Getenv("CLAUDE_API_KEY"),
+		XAIAPIKey:         os.Getenv("XAI_API_KEY"),
+		AIProvider:        resolveAIProvider(os.Getenv("AI_PROVIDER"), os.Getenv("CLAUDE_API_KEY"), os.Getenv("XAI_API_KEY")),
 		FMPAPIKey:         os.Getenv("FMP_API_KEY"),
 		DatabasePath:      getEnvOrDefault("DATABASE_PATH", "./data/prophet_trader.db"),
 		ServerPort:        getEnvOrDefault("PORT", getEnvOrDefault("SERVER_PORT", "4534")),
@@ -58,6 +62,18 @@ func Load() error {
 		return fmt.Errorf("OPERATOR_EMAIL must be set — SEC EDGAR policy requires a real contact address in the User-Agent header. Set OPERATOR_EMAIL=your@email.com in .env")
 	}
 	return nil
+}
+
+// resolveAIProvider picks a provider. Explicit env var wins; otherwise infer from which key is set.
+// If both keys are set and no explicit preference, claude is the default.
+func resolveAIProvider(explicit, claudeKey, xaiKey string) string {
+	if explicit != "" {
+		return explicit
+	}
+	if xaiKey != "" && claudeKey == "" {
+		return "xai"
+	}
+	return "claude"
 }
 
 func getEnvOrDefault(key, defaultValue string) string {

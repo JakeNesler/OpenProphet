@@ -7,6 +7,7 @@ const OPENCODE_WIN_PREFIX = process.platform === 'win32' ? ['/c', 'opencode.cmd'
 import { EventEmitter } from 'events';
 import fs from 'fs/promises';
 import path from 'path';
+import { resolvePreflight } from './preflight.js';
 
 // Default max tool rounds; overridden by permissions config at runtime
 
@@ -133,6 +134,7 @@ export class AgentState extends EventEmitter {
     this.recentTrades = [];
     this.stats = {
       totalBeats: 0,
+      skippedBeats: 0,
       toolCalls: 0,
       trades: 0,
       errors: 0,
@@ -183,6 +185,7 @@ export class AgentHarness {
       opencodeEnv = {},
       checkCliAuthFn = checkCliAuth,
       getCurrentPhaseFn = getCurrentPhase,
+      getRuntime = null,
     } = options;
 
     this.state = new AgentState();
@@ -199,6 +202,7 @@ export class AgentHarness {
     this.opencodeEnv = opencodeEnv;
     this.checkCliAuthFn = checkCliAuthFn;
     this.getCurrentPhaseFn = getCurrentPhaseFn;
+    this.getRuntime = getRuntime;
     this.systemPrompt = '';
     this._timer = null;
     this._beating = false;
@@ -538,11 +542,40 @@ ${userBlock}`;
     return this.getHeartbeatForPhase(this.sandboxId, phase) || PHASE_DEFAULTS[phase]?.seconds || 600;
   }
 
+  _getSecondsToNextPhaseBoundary() {
+    const now = new Date();
+    const weekday = now.getDay() >= 1 && now.getDay() <= 5;
+    if (!weekday) return null;
+    const etStr = now.toLocaleTimeString('en-US', {
+      timeZone: 'America/New_York',
+      hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
+    });
+    const [h, m, s] = etStr.split(':').map(Number);
+    const nowSecs = (h * 60 + m) * 60 + s;
+    const boundaries = Object.values(PHASE_DEFAULTS)
+      .filter(cfg => cfg.range)
+      .map(cfg => cfg.range[0] * 60)
+      .sort((a, b) => a - b);
+    for (const bSecs of boundaries) {
+      if (bSecs > nowSecs) return bSecs - nowSecs;
+    }
+    return null;
+  }
+
   _scheduleNext() {
     if (!this.state.running) return;
     // Always clear any existing timer first to prevent dual timers
     if (this._timer) { clearTimeout(this._timer); this._timer = null; }
-    const seconds = this._getHeartbeatSeconds();
+    let seconds = this._getHeartbeatSeconds();
+    // Fire at phase boundaries so agents always wake at market open, market close, etc.
+    const secsToBoundary = this._getSecondsToNextPhaseBoundary();
+    if (secsToBoundary !== null && secsToBoundary > 10 && secsToBoundary < seconds) {
+      seconds = secsToBoundary;
+      this.state.emit('agent_log', {
+        message: `Phase transition in ${Math.round(seconds)}s — scheduling early heartbeat.`,
+        level: 'info',
+      });
+    }
     this.state.heartbeatSeconds = seconds;
     this.state.nextBeatTime = new Date(Date.now() + seconds * 1000).toISOString();
     this.state.emit('schedule', { seconds, nextBeat: this.state.nextBeatTime, phase: this.state.phase });
@@ -588,6 +621,34 @@ ${userBlock}`;
       message: `--- Heartbeat #${beatNum} | ${PHASE_DEFAULTS[phase].label} ---`,
       level: 'info',
     });
+
+    // Pre-flight skip check. Emergency wakes always run the LLM (the whole
+    // point of the wake is for the agent to react). Message beats are
+    // handled in _adHocBeat and never reach this code path.
+    //
+    // First-beat-of-session is NOT exempted: predicates that check actual
+    // world state (positions, signals, time window) already know whether
+    // there is anything to reconcile, so there is no benefit in spending
+    // LLM tokens on a beat the predicate can clearly skip. If you want a
+    // particular agent to always run on its first beat, the predicate
+    // should encode that — not the harness.
+    const isEmergency = !!this._emergencyReason;
+    if (!isEmergency) {
+      const strategyId = this._agentConfig?.strategyId;
+      const runtime = this.getRuntime ? this.getRuntime(this.sandboxId) : null;
+      const preflight = await resolvePreflight(strategyId, runtime, this._agentConfig);
+      if (preflight.skip) {
+        this.state.emit('agent_log', {
+          message: `Beat #${beatNum} skipped (preflight): ${preflight.reason}`,
+          level: 'info',
+        });
+        this.state.emit('beat_skip', { beat: beatNum, phase, reason: preflight.reason });
+        this.state.stats.skippedBeats = (this.state.stats.skippedBeats || 0) + 1;
+        this.state.emit('beat_end', { beat: beatNum, phase, skipped: true });
+        this._beating = false;
+        return;
+      }
+    }
 
     // Build permissions context for the prompt
     const perms = this._resolvePermissions();
@@ -707,6 +768,11 @@ ${userBlock}`;
           ...this.opencodeEnv,
           OPENPROPHET_SANDBOX_ID: this.sandboxId || '',
           OPENPROPHET_ACCOUNT_ID: this.state.activeAccountId || this.accountId || '',
+          // OPENPROPHET_STRATEGY lets the MCP server tag outgoing orders by
+          // strategy without each agent having to remember to pass its own
+          // ID on every place_*_order call. Empty string for agents whose
+          // strategyId is unset (legacy/default behavior unchanged).
+          OPENPROPHET_STRATEGY: this._agentConfig?.strategyId || '',
           ...(allowedTools.length > 0 ? { OPENPROPHET_TOOL_ALLOWLIST: allowedTools.join(',') } : {}),
         },
         stdio: ['pipe', 'pipe', 'pipe'],

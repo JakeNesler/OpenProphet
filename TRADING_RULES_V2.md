@@ -32,6 +32,13 @@
 - Prevents: Over-diversification (diworsification)
 - Focus: Quality over quantity
 
+**Rule:** Maximum 40% of portfolio deployed in V2 positions at any time (segment cap)
+- Calculate: sum of `position_value` across all V2 positions / `portfolio_value` ≤ 0.40
+- This is the V2 strategy's lane in the multi-agent capital model. The other lanes are HARVEST (12%), PENNY (30%), and TREND (18%) — total ≤ 100%
+- Reconciles with the existing "50-70% cash" rule under Portfolio Construction: at the 40% cap, V2 alone leaves 60% available; the other agents draw from that 60% within their own caps
+- If a candidate trade would push V2 deployed above 40%, skip the entry (or close an existing V2 position first to make room)
+- This cap applies regardless of conviction; high-conviction setups do not override it
+
 ---
 
 ## Day Trading

@@ -48,6 +48,7 @@ func NewLocalStorage(dbPath string) (*LocalStorage, error) {
 		&models.DBManagedPosition{},
 		&models.DBHarvestCondor{},
 		&models.DBHarvestIVSnapshot{},
+		&models.DBSegmentPnL{},
 	); err != nil {
 		return nil, fmt.Errorf("failed to migrate database: %w", err)
 	}
@@ -130,6 +131,7 @@ func (s *LocalStorage) GetBars(symbol string, start, end time.Time) ([]*interfac
 func (s *LocalStorage) SaveOrder(order *interfaces.Order) error {
 	dbOrder := &models.DBOrder{
 		OrderID:        order.ID,
+		ClientOrderID:  order.ClientOrderID,
 		Symbol:         order.Symbol,
 		Qty:            order.Qty,
 		Side:           order.Side,
@@ -143,6 +145,7 @@ func (s *LocalStorage) SaveOrder(order *interfaces.Order) error {
 		SubmittedAt:    order.SubmittedAt,
 		FilledAt:       order.FilledAt,
 		CanceledAt:     order.CanceledAt,
+		StrategyName:   order.Strategy,
 	}
 
 	result := s.db.Save(dbOrder)
@@ -162,8 +165,17 @@ func (s *LocalStorage) GetOrder(orderID string) (*interfaces.Order, error) {
 		return nil, fmt.Errorf("failed to get order: %w", result.Error)
 	}
 
+	// Strategy preference: explicit StrategyName column wins; fall back to
+	// reverse-extraction from ClientOrderID if the column was never written
+	// (legacy rows or fills that arrived before the DBOrder write).
+	strategy := dbOrder.StrategyName
+	if strategy == "" {
+		strategy = interfaces.ParseStrategyFromClientOrderID(dbOrder.ClientOrderID)
+	}
+
 	return &interfaces.Order{
 		ID:             dbOrder.OrderID,
+		ClientOrderID:  dbOrder.ClientOrderID,
 		Symbol:         dbOrder.Symbol,
 		Qty:            dbOrder.Qty,
 		Side:           dbOrder.Side,
@@ -177,7 +189,49 @@ func (s *LocalStorage) GetOrder(orderID string) (*interfaces.Order, error) {
 		SubmittedAt:    dbOrder.SubmittedAt,
 		FilledAt:       dbOrder.FilledAt,
 		CanceledAt:     dbOrder.CanceledAt,
+		Strategy:       strategy,
 	}, nil
+}
+
+// GetSymbolStrategyAttribution returns a symbol → agent-strategy map derived
+// from the most recent buy-side order per symbol. Used by the position-by-
+// strategy filter to attribute broker-truth positions back to the agent that
+// opened them.
+//
+// Source priority per symbol:
+//  1. DBOrder.StrategyName (set by tagged buy orders via the regular path)
+//  2. ParseStrategyFromClientOrderID(DBOrder.ClientOrderID) — fallback for
+//     fills where the StrategyName column was never written but the broker
+//     still preserved our encoded client_order_id
+//
+// Positions held only via DBManagedPosition (PennyProphet's path today) are
+// NOT included here — that table's Strategy field uses overloaded trading-
+// style values ("DAY_TRADE" etc) rather than agent IDs. Reconciling that
+// namespace is tracked as a separate Phase 1 follow-up.
+func (s *LocalStorage) GetSymbolStrategyAttribution() (map[string]string, error) {
+	var dbOrders []*models.DBOrder
+	if err := s.db.
+		Where("side = ?", "buy").
+		Order("submitted_at DESC").
+		Find(&dbOrders).Error; err != nil {
+		return nil, fmt.Errorf("query buy orders for attribution: %w", err)
+	}
+
+	out := make(map[string]string)
+	for _, o := range dbOrders {
+		// Symbols already attributed by a more recent order win — skip.
+		if _, seen := out[o.Symbol]; seen {
+			continue
+		}
+		strategy := o.StrategyName
+		if strategy == "" {
+			strategy = interfaces.ParseStrategyFromClientOrderID(o.ClientOrderID)
+		}
+		if strategy != "" {
+			out[o.Symbol] = strategy
+		}
+	}
+	return out, nil
 }
 
 // GetOrders retrieves orders by status

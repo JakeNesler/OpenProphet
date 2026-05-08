@@ -175,9 +175,11 @@ Do NOT enter a position if `get_penny_candidates` returns no results.
 
 **Rule:** Maximum 8% of portfolio in any single penny position, regardless of score.
 **Rule:** Maximum 10 open penny positions simultaneously.
-**Rule:** Maximum 60% of portfolio deployed in penny positions at any time.
+**Rule:** Maximum 30% of portfolio deployed in penny positions at any time (segment cap).
 
-**Note:** The deployed cap (60%) typically binds before the position count cap (10). At 6% average sizing, 10 positions = 60% deployed — both hit simultaneously.
+**Note on segment cap:** This is PennyProphet's lane in the multi-agent capital model. The other lanes are V2 (40%), HARVEST (12%), and TREND (18%) — total ≤ 100%. The cap was reduced from 60% to 30% as part of the multi-strategy capital allocation; in the prior single-aggressive-strategy regime, 60% made sense, but in a shared account with V2 as the primary, 30% is the appropriate share.
+
+**Note on which cap binds first:** With the 30% segment cap, the position count cap (10) is no longer the binding constraint in normal operation. At the 8% hard per-position cap, a maximum of ~3-4 high-conviction positions fit; at the 2-3% midcap-conviction tier, ~10 positions fit but the segment cap binds at 10 × 3% = 30%. In practice, the segment cap will be the first binding constraint when PennyProphet is finding signals.
 
 ---
 
@@ -270,7 +272,7 @@ Before every penny stock entry:
 - [ ] `get_penny_signal_detail` confirms dominant signal type?
 - [ ] Position size within tier limits (2–7%, hard cap 8%)?
 - [ ] Total open penny positions < 10?
-- [ ] Total deployed capital < 60% of portfolio?
+- [ ] Total deployed capital < 30% of portfolio?
 - [ ] Daily P&L > −5% (circuit breaker not triggered)?
 - [ ] `place_managed_position` stop and target pre-set?
 - [ ] For social signals: is it still market hours with ≥30 minutes to close?

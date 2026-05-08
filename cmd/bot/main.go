@@ -85,11 +85,19 @@ func main() {
 	economicFeedsService := services.NewEconomicFeedsService()
 	economicFeedsController := controllers.NewEconomicFeedsController(economicFeedsService)
 
-	// Create Claude service and intelligence controller
-	claudeService := services.NewClaudeService(cfg.ClaudeAPIKey)
+	// Create AI news cleaner (provider selected via AI_PROVIDER env var or auto-detected)
+	var aiService services.NewsCleanerService
+	switch cfg.AIProvider {
+	case "xai":
+		aiService = services.NewXAIService(cfg.XAIAPIKey)
+		logger.Info("AI news cleaning: using xAI (Grok)")
+	default:
+		aiService = services.NewClaudeService(cfg.ClaudeAPIKey)
+		logger.Info("AI news cleaning: using Claude")
+	}
 	analysisService := services.NewTechnicalAnalysisService(dataService)
-	stockAnalysisService := services.NewStockAnalysisService(dataService, newsService, claudeService)
-	intelligenceController := controllers.NewIntelligenceController(newsService, claudeService, analysisService, stockAnalysisService, dataService)
+	stockAnalysisService := services.NewStockAnalysisService(dataService, newsService, aiService)
+	intelligenceController := controllers.NewIntelligenceController(newsService, aiService, analysisService, stockAnalysisService, dataService)
 
 	// Test account connection
 	logger.Debug("Testing Alpaca connection...")
@@ -198,8 +206,18 @@ func main() {
 
 	logger.Debug("Harvest service initialized")
 
+	// Initialize Trend signal service (used by TrendProphet for daily-bar signals)
+	trendSignalSvc := services.NewTrendSignalService(dataService)
+	trendController := controllers.NewTrendController(trendSignalSvc)
+	logger.Debug("Trend signal service initialized")
+
+	// Initialize Segment P&L service (used by segment-scoped circuit breakers)
+	segmentPnLSvc := services.NewSegmentPnLService(storageService, tradingService)
+	segmentPnLController := controllers.NewSegmentPnLController(segmentPnLSvc)
+	logger.Debug("Segment P&L service initialized")
+
 	// Setup HTTP server
-	router := setupRouter(orderController, newsController, intelligenceController, positionController, activityController, economicFeedsController, pennyController, guardController, harvestController)
+	router := setupRouter(orderController, newsController, intelligenceController, positionController, activityController, economicFeedsController, pennyController, guardController, harvestController, trendController, segmentPnLController)
 
 	// Start data cleanup routine
 	go startDataCleanup(ctx, storageService, cfg.DataRetentionDays, logger)
@@ -229,7 +247,7 @@ func main() {
 	}
 }
 
-func setupRouter(orderController *controllers.OrderController, newsController *controllers.NewsController, intelligenceController *controllers.IntelligenceController, positionController *controllers.PositionManagementController, activityController *controllers.ActivityController, economicFeedsController *controllers.EconomicFeedsController, pennyController *controllers.PennyController, guardController *controllers.GuardController, harvestController *controllers.HarvestController) *gin.Engine {
+func setupRouter(orderController *controllers.OrderController, newsController *controllers.NewsController, intelligenceController *controllers.IntelligenceController, positionController *controllers.PositionManagementController, activityController *controllers.ActivityController, economicFeedsController *controllers.EconomicFeedsController, pennyController *controllers.PennyController, guardController *controllers.GuardController, harvestController *controllers.HarvestController, trendController *controllers.TrendController, segmentPnLController *controllers.SegmentPnLController) *gin.Engine {
 	router := gin.Default()
 	router.SetTrustedProxies([]string{"127.0.0.1"})
 
@@ -338,6 +356,13 @@ func setupRouter(orderController *controllers.OrderController, newsController *c
 			harvest.POST("/condors/:id/close", harvestController.HandleCloseCondor)
 			harvest.POST("/iv", harvestController.HandleRecordIV)
 		}
+
+		trend := api.Group("/trend")
+		{
+			trend.GET("/signal/:symbol", trendController.HandleGetSignal)
+		}
+
+		api.GET("/segment-pnl/:strategy", segmentPnLController.HandleGetSegmentPnL)
 	}
 
 	// Serve dashboard
