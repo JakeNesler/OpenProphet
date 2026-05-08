@@ -1,4 +1,4 @@
-# OpenProphet
+# ClaudeProphetAndFriends
 
 **Autonomous AI trading agent with a web dashboard, MCP tools, and a Go trading backend**
 
@@ -182,10 +182,10 @@ OpenProphet
 ### 1. Clone and Install
 
 ```bash
-git clone https://github.com/JakeNesler/OpenProphet.git
-cd OpenProphet
+git clone https://github.com/NeverLucky2/ClaudeProphetAndFriends
+cd ClaudeProphetAndFriends
 npm install
-go build -o prophet_bot ./cmd/bot
+go build -o prophet_bot.exe ./cmd/bot
 cp opencode.example.jsonc opencode.jsonc
 ```
 
@@ -278,7 +278,7 @@ You can also use OpenCode directly for manual trading with the same MCP tools:
 
 ```bash
 # Start the Go backend first
-./prophet_bot
+.\prophet_bot.exe
 
 # Then run OpenCode interactively with the trading tools
 opencode
@@ -302,7 +302,7 @@ If you just want the MCP tools without the autonomous agent — for use with Cla
 
 ```bash
 # Start Go backend
-./prophet_bot
+.\prophet_bot.exe
 
 # Option A: Use with OpenCode interactively
 opencode
