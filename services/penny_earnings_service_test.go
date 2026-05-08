@@ -707,3 +707,21 @@ func TestEarningsRefresh_RetainsPriorCalendarOnPartialFailure(t *testing.T) {
 		t.Errorf("expected prior calendar (%d entries) to be retained, got %d", priorCalLen, len(s.calendar))
 	}
 }
+
+func TestEarningsShouldRefreshNow_FirstRunReturnsTrue(t *testing.T) {
+	if !shouldRefreshNow("2026-05-04", "") {
+		t.Error("expected true on first run (lastRefreshETDate empty)")
+	}
+}
+
+func TestEarningsShouldRefreshNow_SameDayReturnsFalse(t *testing.T) {
+	if shouldRefreshNow("2026-05-04", "2026-05-04") {
+		t.Error("expected false when same ET day")
+	}
+}
+
+func TestEarningsShouldRefreshNow_NextDayReturnsTrue(t *testing.T) {
+	if !shouldRefreshNow("2026-05-05", "2026-05-04") {
+		t.Error("expected true on next ET day")
+	}
+}

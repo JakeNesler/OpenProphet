@@ -75,8 +75,38 @@ func NewEarningsCalendarService(
 	}
 }
 
-// Start, IsExcluded, WaitForFirstRefresh, refresh implemented in subsequent tasks.
-func (s *EarningsCalendarService) Start(ctx context.Context)                          {}
+// Start runs an initial refresh, then wakes every refreshCheckInterval and runs
+// another refresh when the ET calendar day has rolled over. Exits on ctx cancellation.
+func (s *EarningsCalendarService) Start(ctx context.Context) {
+	loc := nyLoc
+	if loc == nil {
+		loc = time.UTC
+	}
+	s.refresh(time.Now())
+	ticker := time.NewTicker(refreshCheckInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			now := time.Now()
+			todayET := now.In(loc).Format("2006-01-02")
+			s.mu.RLock()
+			last := s.lastRefreshETDate
+			s.mu.RUnlock()
+			if shouldRefreshNow(todayET, last) {
+				s.refresh(now)
+			}
+		}
+	}
+}
+
+// shouldRefreshNow returns true if a refresh should fire because the ET calendar
+// day has rolled over since the last successful refresh (or one has never run).
+func shouldRefreshNow(todayETDate, lastRefreshETDate string) bool {
+	return lastRefreshETDate != todayETDate
+}
 
 // IsExcluded returns true if the ticker has an effective earnings date within the
 // next earningsExclusionDays trading days. Fail-open semantics: returns false if
