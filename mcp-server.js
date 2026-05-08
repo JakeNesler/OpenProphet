@@ -1304,6 +1304,34 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         inputSchema: { type: 'object', properties: {} },
       },
       {
+        name: 'get_trend_signal',
+        description: 'Get TrendProphet daily-bar trend signal for a single ETF. Returns Donchian-100 high, Donchian-50 low, SMA-200, ATR-20 (Wilder), last close, and bars_count. Universe: TLT, GLD, USO, DBC, UUP, EEM. Returns 422 if bars_count<250 (insufficient history); 400 if symbol is outside the universe.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            symbol: {
+              type: 'string',
+              description: 'ETF ticker (must be in TrendProphet universe: TLT, GLD, USO, DBC, UUP, EEM)',
+              enum: ['TLT', 'GLD', 'USO', 'DBC', 'UUP', 'EEM'],
+            },
+          },
+          required: ['symbol'],
+        },
+      },
+      {
+        name: 'get_segment_pnl',
+        description: 'Get live unrealized P&L, deployed dollars, and deployed percent for the calling agent\'s strategy. Used by segment-scoped circuit breakers to decide whether the strategy has tripped its loss threshold. v1 limitation: unrealized P&L only (intraday realized closes not yet included). Strategy is auto-resolved from the agent\'s configuration; pass `strategy` to override (rare).',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            strategy: {
+              type: 'string',
+              description: 'Optional strategy ID. If omitted, defaults to the calling agent\'s configured strategy.',
+            },
+          },
+        },
+      },
+      {
         name: 'open_iron_condor',
         description: 'Open a new iron condor position for a Harvest underlying. Provide the four OCC option symbols, strikes, contract count, and credit. Returns condor_id, order_id, and status.',
         inputSchema: {
@@ -1502,12 +1530,18 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'place_buy_order': {
-        // Transform quantity to qty for API compatibility
+        // Strategy attribution: harness sets OPENPROPHET_STRATEGY per agent
+        // (see agent/harness.js). The Go controller encodes this into the
+        // broker's client_order_id as "{strategy}:{uuid}" so fills carry the
+        // tag through reconciliation. Empty string is a no-op (legacy
+        // behavior preserved for agents without a configured strategyId).
+        const strategy = process.env.OPENPROPHET_STRATEGY || '';
         const requestData = {
           symbol: args.symbol,
           qty: args.quantity,
           order_type: args.order_type,
-          ...(args.limit_price && { limit_price: args.limit_price })
+          ...(args.limit_price && { limit_price: args.limit_price }),
+          ...(strategy && { strategy }),
         };
         const data = await callTradingBot('/orders/buy', 'POST', requestData);
         return {
@@ -1521,12 +1555,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'place_sell_order': {
-        // Transform quantity to qty for API compatibility
+        const strategy = process.env.OPENPROPHET_STRATEGY || '';
         const requestData = {
           symbol: args.symbol,
           qty: args.quantity,
           order_type: args.order_type,
-          ...(args.limit_price && { limit_price: args.limit_price })
+          ...(args.limit_price && { limit_price: args.limit_price }),
+          ...(strategy && { strategy }),
         };
         const data = await callTradingBot('/orders/sell', 'POST', requestData);
         return {
@@ -1540,7 +1575,17 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'place_managed_position': {
-        const data = await callTradingBot('/positions/managed', 'POST', args);
+        // Strategy attribution: harness sets OPENPROPHET_STRATEGY per agent.
+        // Forwarded as agent_strategy so the entry order is tagged at the
+        // broker (DBOrder.StrategyName) and the managed-position row records
+        // the owning agent (DBManagedPosition.AgentStrategy). Distinct from
+        // args.strategy which is the trade-style label (DAY_TRADE etc).
+        const agentStrategy = process.env.OPENPROPHET_STRATEGY || '';
+        const requestData = {
+          ...args,
+          ...(agentStrategy && { agent_strategy: agentStrategy }),
+        };
+        const data = await callTradingBot('/positions/managed', 'POST', requestData);
         return {
           content: [
             {
@@ -2045,6 +2090,7 @@ ${allNews.map((article, i) =>
       }
 
       case 'place_options_order': {
+        const strategy = process.env.OPENPROPHET_STRATEGY || '';
         const requestData = {
           symbol: args.symbol,
           underlying: args.underlying,
@@ -2052,7 +2098,8 @@ ${allNews.map((article, i) =>
           side: args.side,
           type: args.order_type,
           ...(args.position_intent && { position_intent: args.position_intent }),
-          ...(args.limit_price && { limit_price: args.limit_price })
+          ...(args.limit_price && { limit_price: args.limit_price }),
+          ...(strategy && { strategy }),
         };
         const data = await callTradingBot('/options/order', 'POST', requestData);
         return {
@@ -2767,6 +2814,23 @@ Worst Trade: ${stats.worst_result_pct.toFixed(1)}% ($${stats.worst_result_dollar
 
       case 'get_harvest_expirations': {
         const data = await callTradingBot(`/harvest/expirations/${encodeURIComponent(args.symbol)}`);
+        return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
+      }
+
+      case 'get_trend_signal': {
+        const data = await callTradingBot(`/trend/signal/${encodeURIComponent(args.symbol)}`);
+        return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
+      }
+
+      case 'get_segment_pnl': {
+        // Default to the agent's configured strategy when no override is passed.
+        const strategy = (args && args.strategy) || process.env.OPENPROPHET_STRATEGY || '';
+        if (!strategy) {
+          return {
+            content: [{ type: 'text', text: JSON.stringify({ error: 'no strategy resolved (agent has no strategyId and no override provided)' }, null, 2) }],
+          };
+        }
+        const data = await callTradingBot(`/segment-pnl/${encodeURIComponent(strategy)}`);
         return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
       }
 

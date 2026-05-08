@@ -12,6 +12,7 @@ import (
 
 	"github.com/alpacahq/alpaca-trade-api-go/v3/alpaca"
 	"github.com/alpacahq/alpaca-trade-api-go/v3/marketdata"
+	"github.com/google/uuid"
 	"github.com/shopspring/decimal"
 	"github.com/sirupsen/logrus"
 )
@@ -57,7 +58,11 @@ func NewAlpacaTradingService(apiKey, secretKey, baseURL string, isPaper bool) (*
 	}, nil
 }
 
-// PlaceOrder places a new order
+// PlaceOrder places a new order. If order.Strategy is set, the strategy is
+// encoded into the broker's client_order_id as "{strategy}:{uuid}" so the
+// tag survives fills, restarts, and reconciliation. order.ClientOrderID is
+// populated on the input order when the encoding is applied (so the caller
+// can persist it via SaveOrder).
 func (s *AlpacaTradingService) PlaceOrder(ctx context.Context, order *interfaces.Order) (*interfaces.OrderResult, error) {
 	qty := decimal.NewFromFloat(order.Qty)
 	req := alpaca.PlaceOrderRequest{
@@ -78,17 +83,34 @@ func (s *AlpacaTradingService) PlaceOrder(ctx context.Context, order *interfaces
 		req.StopPrice = &stopPrice
 	}
 
+	// Strategy tagging via client_order_id. Only encoded when the caller
+	// supplies a non-empty Strategy — leaves untagged orders unchanged so
+	// existing call sites work without modification.
+	if order.Strategy != "" {
+		clientOrderID := fmt.Sprintf("%s:%s", order.Strategy, uuid.NewString())
+		req.ClientOrderID = clientOrderID
+		order.ClientOrderID = clientOrderID
+	}
+
 	s.logger.WithFields(logrus.Fields{
-		"symbol": order.Symbol,
-		"side":   order.Side,
-		"qty":    order.Qty,
-		"type":   order.Type,
+		"symbol":   order.Symbol,
+		"side":     order.Side,
+		"qty":      order.Qty,
+		"type":     order.Type,
+		"strategy": order.Strategy,
 	}).Info("Placing order")
 
 	alpacaOrder, err := s.client.PlaceOrder(req)
 	if err != nil {
 		s.logger.WithError(err).Error("Failed to place order")
 		return nil, fmt.Errorf("failed to place order: %w", err)
+	}
+
+	// Capture the broker-assigned client_order_id back onto the input order
+	// in case the broker generated one (when we did not). This makes
+	// downstream persistence consistent regardless of who created the ID.
+	if order.ClientOrderID == "" {
+		order.ClientOrderID = alpacaOrder.ClientOrderID
 	}
 
 	return &interfaces.OrderResult{
@@ -190,14 +212,16 @@ func (s *AlpacaTradingService) GetAccount(ctx context.Context) (*interfaces.Acco
 // Helper function to convert Alpaca order to our interface
 func (s *AlpacaTradingService) convertAlpacaOrder(ao *alpaca.Order) *interfaces.Order {
 	order := &interfaces.Order{
-		ID:          ao.ID,
-		Symbol:      ao.Symbol,
-		Qty:         ao.Qty.InexactFloat64(),
-		Side:        string(ao.Side),
-		Type:        string(ao.Type),
-		TimeInForce: string(ao.TimeInForce),
-		Status:      string(ao.Status),
-		SubmittedAt: ao.SubmittedAt,
+		ID:            ao.ID,
+		Symbol:        ao.Symbol,
+		Qty:           ao.Qty.InexactFloat64(),
+		Side:          string(ao.Side),
+		Type:          string(ao.Type),
+		TimeInForce:   string(ao.TimeInForce),
+		Status:        string(ao.Status),
+		SubmittedAt:   ao.SubmittedAt,
+		ClientOrderID: ao.ClientOrderID,
+		Strategy:      interfaces.ParseStrategyFromClientOrderID(ao.ClientOrderID),
 	}
 
 	if ao.LimitPrice != nil {
@@ -231,7 +255,9 @@ func (s *AlpacaTradingService) convertAlpacaOrder(ao *alpaca.Order) *interfaces.
 	return order
 }
 
-// PlaceOptionsOrder places a new options order
+// PlaceOptionsOrder places a new options order. Strategy attribution mirrors
+// PlaceOrder: when order.Strategy is set, the broker's client_order_id is
+// encoded as "{strategy}:{uuid}" so fills carry the tag through reconciliation.
 func (s *AlpacaTradingService) PlaceOptionsOrder(ctx context.Context, order *interfaces.OptionsOrder) (*interfaces.OrderResult, error) {
 	qty := decimal.NewFromFloat(order.Qty)
 	req := alpaca.PlaceOrderRequest{
@@ -247,17 +273,28 @@ func (s *AlpacaTradingService) PlaceOptionsOrder(ctx context.Context, order *int
 		req.LimitPrice = &limitPrice
 	}
 
+	if order.Strategy != "" {
+		clientOrderID := fmt.Sprintf("%s:%s", order.Strategy, uuid.NewString())
+		req.ClientOrderID = clientOrderID
+		order.ClientOrderID = clientOrderID
+	}
+
 	s.logger.WithFields(logrus.Fields{
-		"symbol": order.Symbol,
-		"side":   order.Side,
-		"qty":    order.Qty,
-		"type":   order.Type,
+		"symbol":   order.Symbol,
+		"side":     order.Side,
+		"qty":      order.Qty,
+		"type":     order.Type,
+		"strategy": order.Strategy,
 	}).Info("Placing options order")
 
 	alpacaOrder, err := s.client.PlaceOrder(req)
 	if err != nil {
 		s.logger.WithError(err).Error("Failed to place options order")
 		return nil, fmt.Errorf("failed to place options order: %w", err)
+	}
+
+	if order.ClientOrderID == "" {
+		order.ClientOrderID = alpacaOrder.ClientOrderID
 	}
 
 	return &interfaces.OrderResult{
@@ -433,12 +470,13 @@ func (s *AlpacaTradingService) ListOptionsPositions(ctx context.Context) ([]*int
 
 // alpacaMlegRequest is the JSON body for Alpaca's multi-leg order endpoint.
 type alpacaMlegRequest struct {
-	Type        string          `json:"type"`
-	OrderClass  string          `json:"order_class"`
-	TimeInForce string          `json:"time_in_force"`
-	LimitPrice  string          `json:"limit_price,omitempty"` // string per Alpaca spec
-	Qty         string          `json:"qty"`
-	Legs        []alpacaMlegLeg `json:"legs"`
+	Type          string          `json:"type"`
+	OrderClass    string          `json:"order_class"`
+	TimeInForce   string          `json:"time_in_force"`
+	LimitPrice    string          `json:"limit_price,omitempty"` // string per Alpaca spec
+	Qty           string          `json:"qty"`
+	ClientOrderID string          `json:"client_order_id,omitempty"`
+	Legs          []alpacaMlegLeg `json:"legs"`
 }
 
 type alpacaMlegLeg struct {
@@ -479,6 +517,12 @@ func (s *AlpacaTradingService) PlaceMultiLegOrder(ctx context.Context, order Mul
 		LimitPrice:  limitPriceStr,
 		Qty:         fmt.Sprintf("%d", order.Contracts),
 		Legs:        legs,
+	}
+
+	// Strategy tagging — same encoding as PlaceOrder so reconciliation can
+	// recover the strategy from broker fills via ParseStrategyFromClientOrderID.
+	if order.Strategy != "" {
+		body.ClientOrderID = fmt.Sprintf("%s:%s", order.Strategy, uuid.NewString())
 	}
 	jsonBody, err := json.Marshal(body)
 	if err != nil {

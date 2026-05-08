@@ -54,6 +54,10 @@ type BuyRequest struct {
 	LimitPrice  *float64            `json:"limit_price,omitempty"`
 	StopPrice   *float64            `json:"stop_price,omitempty"`
 	AgentSource services.AgentSource `json:"agent_source,omitempty"` // "main" or "penny"; defaults to "main"
+	// Strategy is the per-agent attribution tag (e.g. "trend", "harvest",
+	// "penny-momentum"). Encoded into the broker's client_order_id so the
+	// tag survives fills and reconciliation. Empty for untagged orders.
+	Strategy    string              `json:"strategy,omitempty"`
 }
 
 // SellRequest represents a sell order request
@@ -65,6 +69,8 @@ type SellRequest struct {
 	LimitPrice  *float64            `json:"limit_price,omitempty"`
 	StopPrice   *float64            `json:"stop_price,omitempty"`
 	AgentSource services.AgentSource `json:"agent_source,omitempty"` // "main" or "penny"; defaults to "main"
+	// Strategy attribution; see BuyRequest.Strategy.
+	Strategy    string              `json:"strategy,omitempty"`
 }
 
 // Buy executes a buy order
@@ -115,6 +121,7 @@ func (oc *OrderController) Buy(ctx context.Context, req BuyRequest) (*interfaces
 		StopPrice:   req.StopPrice,
 		Status:      "pending",
 		SubmittedAt: time.Now(),
+		Strategy:    req.Strategy,
 	}
 
 	// Place the order
@@ -177,6 +184,7 @@ func (oc *OrderController) Sell(ctx context.Context, req SellRequest) (*interfac
 		StopPrice:   req.StopPrice,
 		Status:      "pending",
 		SubmittedAt: time.Now(),
+		Strategy:    req.Strategy,
 	}
 
 	// Place the order
@@ -304,7 +312,15 @@ func (oc *OrderController) HandleCancelOrder(c *gin.Context) {
 	c.JSON(200, gin.H{"message": "Order canceled successfully"})
 }
 
-// HandleGetPositions handles HTTP get positions requests
+// HandleGetPositions handles GET /api/v1/positions[?strategy=X].
+//
+// Without ?strategy: returns all broker positions (legacy behavior).
+// With ?strategy: filters to positions whose most recent buy order was
+// tagged with the requested strategy. Managed-position entries placed via
+// PennyProphet now flow through the same DBOrder tagging path
+// (services.PositionManager.placeEntryOrder forwards AgentStrategy onto
+// the entry order), so they are attributable here as long as the entry
+// order's DBOrder row has a non-empty StrategyName.
 func (oc *OrderController) HandleGetPositions(c *gin.Context) {
 	positions, err := oc.GetPositions()
 	if err != nil {
@@ -312,7 +328,30 @@ func (oc *OrderController) HandleGetPositions(c *gin.Context) {
 		return
 	}
 
-	c.JSON(200, positions)
+	strategyFilter := c.Query("strategy")
+	if strategyFilter == "" {
+		c.JSON(200, positions)
+		return
+	}
+
+	attribution, err := oc.storageService.GetSymbolStrategyAttribution()
+	if err != nil {
+		c.JSON(500, gin.H{"error": "failed to build strategy attribution: " + err.Error()})
+		return
+	}
+
+	filtered := make([]*interfaces.Position, 0)
+	for _, pos := range positions {
+		if attribution[pos.Symbol] == strategyFilter {
+			filtered = append(filtered, pos)
+		}
+	}
+
+	c.JSON(200, gin.H{
+		"strategy":  strategyFilter,
+		"count":     len(filtered),
+		"positions": filtered,
+	})
 }
 
 // HandleGetAccount handles HTTP get account requests
@@ -435,6 +474,7 @@ type OptionsOrderRequest struct {
 	Type          string   `json:"type"` // "market", "limit"
 	TimeInForce   string   `json:"time_in_force"` // "day", "gtc"
 	LimitPrice    *float64 `json:"limit_price,omitempty"`
+	Strategy      string   `json:"strategy,omitempty"` // strategy attribution; see BuyRequest.Strategy
 }
 
 // PlaceOptionsOrder handles POST /api/options/order
@@ -469,6 +509,7 @@ func (oc *OrderController) PlaceOptionsOrder(c *gin.Context) {
 		Type:          req.Type,
 		TimeInForce:   req.TimeInForce,
 		LimitPrice:    req.LimitPrice,
+		Strategy:      req.Strategy,
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -479,6 +520,27 @@ func (oc *OrderController) PlaceOptionsOrder(c *gin.Context) {
 		oc.logger.WithError(err).Error("Failed to place options order")
 		c.JSON(500, gin.H{"error": err.Error()})
 		return
+	}
+
+	// Persist to DBOrder for audit trail. Without this, options orders never
+	// appear in get_orders queries and have no historical record by ID.
+	// Options-specific fields (Underlying, PositionIntent) are not stored
+	// here in v1 — Symbol (the OCC string) preserves the essential info.
+	dbOrder := &interfaces.Order{
+		ID:            result.OrderID,
+		ClientOrderID: order.ClientOrderID,
+		Symbol:        order.Symbol,
+		Qty:           order.Qty,
+		Side:          order.Side,
+		Type:          order.Type,
+		TimeInForce:   order.TimeInForce,
+		LimitPrice:    order.LimitPrice,
+		Status:        result.Status,
+		SubmittedAt:   time.Now(),
+		Strategy:      order.Strategy,
+	}
+	if err := oc.storageService.SaveOrder(dbOrder); err != nil {
+		oc.logger.WithError(err).Warn("Failed to save options order to database")
 	}
 
 	c.JSON(200, result)

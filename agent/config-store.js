@@ -226,6 +226,32 @@ Be decisive. Never ask the user questions. Always log trade reasoning with log_d
       defaultHeartbeatProfile: 'penny_stock',
       createdAt: new Date().toISOString(),
     },
+    {
+      id: 'trend-prophet',
+      name: 'TrendProphet',
+      description: 'Mechanical multi-asset trend-follower on ETFs. Daily Donchian-100 breakout entries; Donchian-50 trailing exits. Universe: TLT, GLD, USO, DBC, UUP, EEM.',
+      systemPromptTemplate: 'custom',
+      customSystemPrompt: `You are TrendProphet, a mechanical multi-asset trend-following agent. You are not a reasoning agent. You are a rule executor wrapped in a language model.
+
+Your ONLY job is to follow your trading rules exactly. Do not improvise. Do not add commentary. Do not make directional judgments. Helpful improvisation is the failure mode.
+
+Read your Strategy Rules section carefully — it contains your complete heartbeat procedure. Follow it step by step on every heartbeat.
+
+Key tools: get_datetime, get_account, get_positions, get_quote, get_trend_signal, place_buy_order, place_sell_order, log_decision, log_activity.
+
+Use get_trend_signal({ symbol }) to read the daily-bar Donchian-100 high, Donchian-50 low, SMA-200, ATR-20 (Wilder), and last_close for any ticker in your universe (TLT, GLD, USO, DBC, UUP, EEM). Do not compute these values yourself — the endpoint is the single source of truth for signal computation.`,
+      strategyId: 'trend',
+      model: 'anthropic/claude-sonnet-4-6',
+      heartbeatOverrides: {
+        pre_market: 86400,
+        market_open: 86400,
+        midday: 86400,
+        market_close: 86400,
+        after_hours: 3600,
+        closed: 86400,
+      },
+      createdAt: new Date().toISOString(),
+    },
   ];
 }
 
@@ -248,7 +274,7 @@ function defaultStrategies() {
       createdAt: new Date().toISOString(),
     },
     {
-      id: '563dfa8d',
+      id: 'v2-options',
       name: 'Aggressive Options v2',
       description: 'Aggressive options with scalping overlay + loss-review circuit breakers',
       rulesFile: 'TRADING_RULES_V2.md',
@@ -260,6 +286,14 @@ function defaultStrategies() {
       name: 'Penny Stock Momentum',
       description: 'Multi-signal penny stock strategy: social (Reddit/StockTwits), regulatory (EDGAR/PR wires), technical (volume/gap). Signal-gated tiered sizing.',
       rulesFile: 'TRADING_RULES_PENNY.md',
+      customRules: null,
+      createdAt: new Date().toISOString(),
+    },
+    {
+      id: 'trend',
+      name: 'Multi-Asset Trend Following',
+      description: 'Daily-bar Donchian breakouts on an ETF universe (TLT, GLD, USO, DBC, UUP, EEM). Long-only, mechanical, crisis-alpha sleeve.',
+      rulesFile: 'TRADING_RULES_TREND.md',
       customRules: null,
       createdAt: new Date().toISOString(),
     },

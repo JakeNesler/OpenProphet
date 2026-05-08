@@ -10,6 +10,13 @@ import (
 type DBOrder struct {
 	gorm.Model
 	OrderID        string `gorm:"uniqueIndex"`
+	// ClientOrderID is the broker-side tag we control. For shared-account
+	// strategy attribution we encode strategy as a prefix: "{strategy}:{uuid}".
+	// Alpaca preserves this through fills, so the strategy tag survives the
+	// round-trip even when DBOrder writes race ahead of fill webhooks. Empty
+	// for orders placed before Phase 1 of the shared-account migration.
+	// See docs/shared-account-backend-spec.md.
+	ClientOrderID  string `gorm:"index"`
 	Symbol         string `gorm:"index"`
 	Qty            float64
 	Side           string
@@ -40,6 +47,22 @@ type DBBar struct {
 	Volume    int64
 	VWAP      float64
 	Timeframe string
+}
+
+// DBSegmentPnL represents an end-of-day snapshot of P&L for one strategy.
+// Written by the EOD reconciliation job (not yet implemented). Used as a
+// historical record so segment-scoped circuit breakers can reference prior-
+// session closing values without recomputing from raw positions/trades.
+type DBSegmentPnL struct {
+	gorm.Model
+	Strategy        string    `gorm:"index:idx_strategy_date"`
+	Date            time.Time `gorm:"index:idx_strategy_date"`
+	RealizedPnL     float64
+	UnrealizedPnL   float64
+	DeployedDollars float64
+	DeployedPercent float64
+	PositionCount   int
+	PortfolioValue  float64
 }
 
 // DBPosition represents a position snapshot in the database
@@ -105,7 +128,16 @@ type DBManagedPosition struct {
 	PositionID        string `gorm:"uniqueIndex"`
 	Symbol            string `gorm:"index"`
 	Side              string
+	// Strategy is the trading-style classification (DAY_TRADE / SWING_TRADE /
+	// LONG_TERM) and is part of the place_managed_position public contract.
+	// Do NOT overload this with agent IDs — use AgentStrategy below.
 	Strategy          string
+	// AgentStrategy is the owning agent's strategyId (e.g. "penny-momentum",
+	// "trend"). Populated end-to-end from OPENPROPHET_STRATEGY at the MCP
+	// boundary so segment-scoped P&L and reconciliation can attribute managed
+	// positions to the right agent. Empty for rows written before this column
+	// existed; readers must fall back to DBOrder attribution in that case.
+	AgentStrategy     string `gorm:"index"`
 
 	// Entry details
 	Quantity          float64

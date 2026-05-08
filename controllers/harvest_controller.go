@@ -139,6 +139,7 @@ func (hc *HarvestController) HandleOpenCondor(c *gin.Context) {
 		Contracts:   req.Contracts,
 		LimitPrice:  req.CreditPerContract,
 		TimeInForce: "day",
+		Strategy:    "harvest",
 		Legs: []services.MultiLegOrderLeg{
 			{Symbol: req.ShortPutSymbol, Side: "sell", PositionIntent: "sell_to_open"},
 			{Symbol: req.LongPutSymbol, Side: "buy", PositionIntent: "buy_to_open"},
@@ -244,6 +245,7 @@ func (hc *HarvestController) HandleCloseCondor(c *gin.Context) {
 		Contracts:   condor.Contracts,
 		LimitPrice:  limitPrice,
 		TimeInForce: "day",
+		Strategy:    "harvest",
 		Legs: []services.MultiLegOrderLeg{
 			{Symbol: condor.ShortPutSymbol, Side: "buy", PositionIntent: "buy_to_close"},
 			{Symbol: condor.LongPutSymbol, Side: "sell", PositionIntent: "sell_to_close"},

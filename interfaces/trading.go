@@ -2,8 +2,26 @@ package interfaces
 
 import (
 	"context"
+	"strings"
 	"time"
 )
+
+// ParseStrategyFromClientOrderID extracts the strategy prefix from a tagged
+// client_order_id of the form "{strategy}:{uuid}". Returns "" if the ID is
+// empty, has no colon, or starts with one. This is the reverse of the
+// encoding done by AlpacaTradingService.PlaceOrder when Order.Strategy is
+// non-empty; it lets fill processors recover the strategy tag even when the
+// originating DBOrder write was lost or skipped.
+func ParseStrategyFromClientOrderID(coid string) string {
+	if coid == "" {
+		return ""
+	}
+	idx := strings.Index(coid, ":")
+	if idx <= 0 {
+		return ""
+	}
+	return coid[:idx]
+}
 
 // TradingService defines the interface for executing trades
 type TradingService interface {
@@ -38,6 +56,7 @@ type StorageService interface {
 	SaveOrder(order *Order) error
 	GetOrder(orderID string) (*Order, error)
 	GetOrders(status string) ([]*Order, error)
+	GetSymbolStrategyAttribution() (map[string]string, error)
 	CleanupOldData(before time.Time) error
 }
 
@@ -68,6 +87,15 @@ type Order struct {
 	SubmittedAt   time.Time
 	FilledAt      *time.Time
 	CanceledAt    *time.Time
+	// Strategy identifies which agent owns this order. When set on a
+	// PlaceOrder call, the trading service encodes it into the broker's
+	// client_order_id as "{strategy}:{uuid}" so the tag survives fills,
+	// restarts, and reconciliation. Empty for untagged orders.
+	Strategy      string
+	// ClientOrderID is the broker-side identifier we control. Populated
+	// after a tagged PlaceOrder (or read back via GetOrder/ListOrders).
+	// Empty for untagged orders or pre-Phase-1 records.
+	ClientOrderID string
 }
 
 type OrderRequest struct {
@@ -78,6 +106,8 @@ type OrderRequest struct {
 	TimeInForce string
 	LimitPrice  *float64
 	StopPrice   *float64
+	// Strategy attribution; see Order.Strategy.
+	Strategy    string
 }
 
 type OrderResult struct {
@@ -156,6 +186,11 @@ type OptionsOrder struct {
 	Type          string // "market", "limit"
 	TimeInForce   string // "day", "gtc"
 	LimitPrice    *float64
+	// Strategy attribution; encoded into client_order_id by PlaceOptionsOrder.
+	// See Order.Strategy.
+	Strategy      string
+	// ClientOrderID populated after a tagged PlaceOptionsOrder.
+	ClientOrderID string
 }
 
 type OptionsQuote struct {

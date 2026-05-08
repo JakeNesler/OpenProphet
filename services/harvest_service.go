@@ -183,6 +183,10 @@ type MultiLegOrder struct {
 	Contracts   int
 	LimitPrice  float64 // net credit limit (positive = we receive credit)
 	TimeInForce string  // "day"
+	// Strategy identifies the agent that owns this combo. Encoded into
+	// Alpaca's client_order_id as "{strategy}:{uuid}" so the tag survives
+	// fills and reconciliation. Empty string is a no-op (legacy behavior).
+	Strategy    string
 }
 
 // MultiLegOrderLeg is one leg of the combo.

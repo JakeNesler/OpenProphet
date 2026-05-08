@@ -20,6 +20,10 @@ type ManagedPosition struct {
 	Symbol            string                 `json:"symbol"`
 	Side              string                 `json:"side"` // "buy" or "sell"
 	Strategy          string                 `json:"strategy"` // "SWING_TRADE", "LONG_TERM", "DAY_TRADE"
+	// AgentStrategy is the owning agent's strategyId (e.g. "penny-momentum",
+	// "trend"). Distinct from Strategy, which is the trading-style label.
+	// Populated from OPENPROPHET_STRATEGY at the MCP boundary.
+	AgentStrategy     string                 `json:"agent_strategy,omitempty"`
 
 	// Entry details
 	Quantity          float64                `json:"quantity"`
@@ -72,6 +76,7 @@ type PlaceManagedPositionRequest struct {
 	Symbol            string      `json:"symbol" binding:"required"`
 	Side              string      `json:"side" binding:"required"` // "buy" or "sell"
 	Strategy          string      `json:"strategy"`                // "SWING_TRADE", "LONG_TERM", "DAY_TRADE"
+	AgentStrategy     string      `json:"agent_strategy,omitempty"` // agent strategyId from OPENPROPHET_STRATEGY (e.g. "penny-momentum")
 	AgentSource       AgentSource `json:"agent_source,omitempty"`  // "main" or "penny"; defaults to "main"
 	AllocationDollars float64     `json:"allocation_dollars" binding:"required,gt=0"`
 
@@ -204,6 +209,7 @@ func (pm *PositionManager) PlaceManagedPosition(ctx context.Context, req *PlaceM
 		Symbol:            req.Symbol,
 		Side:              req.Side,
 		Strategy:          req.Strategy,
+		AgentStrategy:     req.AgentStrategy,
 		Quantity:          quantity,
 		EntryPrice:        entryPrice,
 		EntryOrderType:    req.EntryStrategy,
@@ -267,6 +273,10 @@ func (pm *PositionManager) placeEntryOrder(ctx context.Context, position *Manage
 		TimeInForce: "gtc",
 		Status:      "pending",
 		SubmittedAt: time.Now(),
+		// Propagate the owning agent's strategy so the broker's
+		// client_order_id is encoded as "{agent_strategy}:{uuid}" and the
+		// resulting DBOrder row is attributable. Empty for legacy callers.
+		Strategy:    position.AgentStrategy,
 	}
 
 	if orderType == "limit" {
@@ -865,6 +875,7 @@ func (pm *PositionManager) managedPositionToDB(pos *ManagedPosition) *models.DBM
 		Symbol:            pos.Symbol,
 		Side:              pos.Side,
 		Strategy:          pos.Strategy,
+		AgentStrategy:     pos.AgentStrategy,
 		Quantity:          pos.Quantity,
 		EntryPrice:        pos.EntryPrice,
 		EntryOrderID:      pos.EntryOrderID,
@@ -918,6 +929,7 @@ func (pm *PositionManager) dbToManagedPosition(dbPos *models.DBManagedPosition) 
 		Symbol:            dbPos.Symbol,
 		Side:              dbPos.Side,
 		Strategy:          dbPos.Strategy,
+		AgentStrategy:     dbPos.AgentStrategy,
 		Quantity:          dbPos.Quantity,
 		EntryPrice:        dbPos.EntryPrice,
 		EntryOrderID:      dbPos.EntryOrderID,

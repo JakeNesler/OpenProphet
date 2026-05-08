@@ -7,6 +7,7 @@ const OPENCODE_WIN_PREFIX = process.platform === 'win32' ? ['/c', 'opencode.cmd'
 import { EventEmitter } from 'events';
 import fs from 'fs/promises';
 import path from 'path';
+import { resolvePreflight } from './preflight.js';
 
 // Default max tool rounds; overridden by permissions config at runtime
 
@@ -133,6 +134,7 @@ export class AgentState extends EventEmitter {
     this.recentTrades = [];
     this.stats = {
       totalBeats: 0,
+      skippedBeats: 0,
       toolCalls: 0,
       trades: 0,
       errors: 0,
@@ -183,6 +185,7 @@ export class AgentHarness {
       opencodeEnv = {},
       checkCliAuthFn = checkCliAuth,
       getCurrentPhaseFn = getCurrentPhase,
+      getRuntime = null,
     } = options;
 
     this.state = new AgentState();
@@ -199,6 +202,7 @@ export class AgentHarness {
     this.opencodeEnv = opencodeEnv;
     this.checkCliAuthFn = checkCliAuthFn;
     this.getCurrentPhaseFn = getCurrentPhaseFn;
+    this.getRuntime = getRuntime;
     this.systemPrompt = '';
     this._timer = null;
     this._beating = false;
@@ -618,6 +622,34 @@ ${userBlock}`;
       level: 'info',
     });
 
+    // Pre-flight skip check. Emergency wakes always run the LLM (the whole
+    // point of the wake is for the agent to react). Message beats are
+    // handled in _adHocBeat and never reach this code path.
+    //
+    // First-beat-of-session is NOT exempted: predicates that check actual
+    // world state (positions, signals, time window) already know whether
+    // there is anything to reconcile, so there is no benefit in spending
+    // LLM tokens on a beat the predicate can clearly skip. If you want a
+    // particular agent to always run on its first beat, the predicate
+    // should encode that — not the harness.
+    const isEmergency = !!this._emergencyReason;
+    if (!isEmergency) {
+      const strategyId = this._agentConfig?.strategyId;
+      const runtime = this.getRuntime ? this.getRuntime(this.sandboxId) : null;
+      const preflight = await resolvePreflight(strategyId, runtime, this._agentConfig);
+      if (preflight.skip) {
+        this.state.emit('agent_log', {
+          message: `Beat #${beatNum} skipped (preflight): ${preflight.reason}`,
+          level: 'info',
+        });
+        this.state.emit('beat_skip', { beat: beatNum, phase, reason: preflight.reason });
+        this.state.stats.skippedBeats = (this.state.stats.skippedBeats || 0) + 1;
+        this.state.emit('beat_end', { beat: beatNum, phase, skipped: true });
+        this._beating = false;
+        return;
+      }
+    }
+
     // Build permissions context for the prompt
     const perms = this._resolvePermissions();
     const permLines = [];
@@ -736,6 +768,11 @@ ${userBlock}`;
           ...this.opencodeEnv,
           OPENPROPHET_SANDBOX_ID: this.sandboxId || '',
           OPENPROPHET_ACCOUNT_ID: this.state.activeAccountId || this.accountId || '',
+          // OPENPROPHET_STRATEGY lets the MCP server tag outgoing orders by
+          // strategy without each agent having to remember to pass its own
+          // ID on every place_*_order call. Empty string for agents whose
+          // strategyId is unset (legacy/default behavior unchanged).
+          OPENPROPHET_STRATEGY: this._agentConfig?.strategyId || '',
           ...(allowedTools.length > 0 ? { OPENPROPHET_TOOL_ALLOWLIST: allowedTools.join(',') } : {}),
         },
         stdio: ['pipe', 'pipe', 'pipe'],

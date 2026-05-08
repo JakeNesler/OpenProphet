@@ -21,7 +21,7 @@ import {
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = path.join(__dirname, '..');
 const HARNESS_EVENTS = [
-  'status', 'agent_log', 'agent_text', 'beat_start', 'beat_end',
+  'status', 'agent_log', 'agent_text', 'beat_start', 'beat_end', 'beat_skip',
   'tool_call', 'tool_result', 'heartbeat_change', 'schedule', 'trade',
 ];
 
@@ -97,6 +97,7 @@ export class AgentOrchestrator extends EventEmitter {
       getHeartbeatForPhase: getHeartbeatForSandboxPhase,
       getPermissions: getPermissionsForSandbox,
       chatStore: this.chatStore,
+      getRuntime: (id) => this.getSandboxRuntime(id),
       opencodeEnv: {
         TRADING_BOT_URL: tradingBotUrl,
         AGENT_URL: this.agentUrl,
