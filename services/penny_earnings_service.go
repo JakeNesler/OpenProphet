@@ -73,7 +73,51 @@ func NewEarningsCalendarService(
 
 // Start, IsExcluded, WaitForFirstRefresh, refresh implemented in subsequent tasks.
 func (s *EarningsCalendarService) Start(ctx context.Context)                          {}
-func (s *EarningsCalendarService) IsExcluded(ticker string, now time.Time) bool       { return false }
+
+// IsExcluded returns true if the ticker has an effective earnings date within the
+// next earningsExclusionDays trading days. Fail-open semantics: returns false if
+// the cache has never been populated or if required calendar data is missing.
+func (s *EarningsCalendarService) IsExcluded(ticker string, now time.Time) bool {
+	s.mu.RLock()
+	entry, hasEntry := s.entries[ticker]
+	calendar := s.calendar
+	lastRefresh := s.lastRefresh
+	s.mu.RUnlock()
+
+	if lastRefresh.IsZero() {
+		return false
+	}
+
+	if time.Since(lastRefresh) > staleThreshold {
+		if s.maybeWarn(now) {
+			s.logger.Warnf("earnings calendar is stale (last refresh > %s ago) — still applying cached exclusions", staleThreshold)
+		}
+	}
+
+	if !hasEntry {
+		return false
+	}
+
+	if len(calendar) == 0 {
+		if s.maybeWarn(now) {
+			s.logger.Warn("earnings calendar trading-day cache empty — exclusion temporarily disabled")
+		}
+		return false
+	}
+
+	loc := nyLoc
+	if loc == nil {
+		loc = time.UTC
+	}
+	nowET := now.In(loc)
+	nowDate := time.Date(nowET.Year(), nowET.Month(), nowET.Day(), 0, 0, 0, 0, loc)
+	effective := s.effectiveDate(entry, calendar)
+	distance := tradingDayDistance(nowDate, effective, calendar)
+	if distance < 0 {
+		return false
+	}
+	return distance <= earningsExclusionDays
+}
 func (s *EarningsCalendarService) WaitForFirstRefresh(timeout time.Duration) bool     { return false }
 
 // tradingDayDistance returns the number of trading days from nowDate (exclusive)

@@ -173,3 +173,158 @@ func TestEarningsMaybeWarn_SecondCallAfterIntervalReturnsTrue(t *testing.T) {
 		t.Error("expected maybeWarn after interval to return true")
 	}
 }
+
+// helper: build a service in a fresh, fully-populated state at a known "today"
+func earningsServiceAt(today time.Time, entries map[string]earningsEntry, calendar []AlpacaCalendarEntry) *EarningsCalendarService {
+	s := &EarningsCalendarService{
+		entries:          entries,
+		calendar:         calendar,
+		lastRefresh:      today,
+		firstRefreshDone: make(chan struct{}),
+		logger:           logrus.New(),
+	}
+	return s
+}
+
+func TestEarningsIsExcluded_NeverRefreshed_returnsFalse(t *testing.T) {
+	s := &EarningsCalendarService{
+		entries:          map[string]earningsEntry{},
+		firstRefreshDone: make(chan struct{}),
+		logger:           logrus.New(),
+	}
+	if s.IsExcluded("AAA", time.Now()) {
+		t.Error("expected false when lastRefresh is zero")
+	}
+}
+
+func TestEarningsIsExcluded_UnknownTicker_returnsFalse(t *testing.T) {
+	loc, _ := time.LoadLocation("America/New_York")
+	mon := time.Date(2026, 5, 4, 12, 0, 0, 0, loc)
+	cal := monFriCalendar(time.Date(2026, 5, 4, 0, 0, 0, 0, loc), 10)
+	s := earningsServiceAt(mon, map[string]earningsEntry{}, cal)
+	if s.IsExcluded("AAA", mon) {
+		t.Error("expected false for unknown ticker")
+	}
+}
+
+func TestEarningsIsExcluded_PastEarnings_returnsFalse(t *testing.T) {
+	loc, _ := time.LoadLocation("America/New_York")
+	mon := time.Date(2026, 5, 4, 12, 0, 0, 0, loc)
+	prevFri := time.Date(2026, 5, 1, 0, 0, 0, 0, loc)
+	cal := monFriCalendar(prevFri, 10)
+	entries := map[string]earningsEntry{
+		"AAA": {Ticker: "AAA", Date: prevFri, Time: "bmo"},
+	}
+	s := earningsServiceAt(mon, entries, cal)
+	if s.IsExcluded("AAA", mon) {
+		t.Error("expected false for past earnings")
+	}
+}
+
+func TestEarningsIsExcluded_SameDayBMO_returnsTrue(t *testing.T) {
+	loc, _ := time.LoadLocation("America/New_York")
+	mon := time.Date(2026, 5, 4, 12, 0, 0, 0, loc)
+	cal := monFriCalendar(time.Date(2026, 5, 4, 0, 0, 0, 0, loc), 10)
+	entries := map[string]earningsEntry{
+		"AAA": {Ticker: "AAA", Date: time.Date(2026, 5, 4, 0, 0, 0, 0, loc), Time: "bmo"},
+	}
+	s := earningsServiceAt(mon, entries, cal)
+	if !s.IsExcluded("AAA", mon) {
+		t.Error("expected true for same-day BMO earnings (distance 0)")
+	}
+}
+
+func TestEarningsIsExcluded_ThreeTradingDaysOut_returnsTrue(t *testing.T) {
+	loc, _ := time.LoadLocation("America/New_York")
+	mon := time.Date(2026, 5, 4, 12, 0, 0, 0, loc)
+	thu := time.Date(2026, 5, 7, 0, 0, 0, 0, loc) // 3 trading days from Mon
+	cal := monFriCalendar(time.Date(2026, 5, 4, 0, 0, 0, 0, loc), 10)
+	entries := map[string]earningsEntry{
+		"AAA": {Ticker: "AAA", Date: thu, Time: "bmo"},
+	}
+	s := earningsServiceAt(mon, entries, cal)
+	if !s.IsExcluded("AAA", mon) {
+		t.Error("expected true for 3-trading-days-out BMO")
+	}
+}
+
+func TestEarningsIsExcluded_FourTradingDaysOut_returnsFalse(t *testing.T) {
+	loc, _ := time.LoadLocation("America/New_York")
+	mon := time.Date(2026, 5, 4, 12, 0, 0, 0, loc)
+	fri := time.Date(2026, 5, 8, 0, 0, 0, 0, loc) // 4 trading days from Mon
+	cal := monFriCalendar(time.Date(2026, 5, 4, 0, 0, 0, 0, loc), 10)
+	entries := map[string]earningsEntry{
+		"AAA": {Ticker: "AAA", Date: fri, Time: "bmo"},
+	}
+	s := earningsServiceAt(mon, entries, cal)
+	if s.IsExcluded("AAA", mon) {
+		t.Error("expected false for 4-trading-days-out BMO")
+	}
+}
+
+func TestEarningsIsExcluded_EmptyCalendar_returnsFalseAndWarns(t *testing.T) {
+	loc, _ := time.LoadLocation("America/New_York")
+	mon := time.Date(2026, 5, 4, 12, 0, 0, 0, loc)
+	entries := map[string]earningsEntry{
+		"AAA": {Ticker: "AAA", Date: mon, Time: "bmo"},
+	}
+	s := earningsServiceAt(mon, entries, nil)
+	if s.IsExcluded("AAA", mon) {
+		t.Error("expected false when calendar is empty (cannot compute distance)")
+	}
+	// lastWarnTime should now be set (warn was emitted)
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.lastWarnTime.IsZero() {
+		t.Error("expected maybeWarn to have fired (lastWarnTime should be non-zero)")
+	}
+}
+
+func TestEarningsIsExcluded_StaleAndEmptyCalendar_SharesThrottle(t *testing.T) {
+	loc, _ := time.LoadLocation("America/New_York")
+	mon := time.Date(2026, 5, 4, 12, 0, 0, 0, loc)
+	entries := map[string]earningsEntry{
+		"AAA": {Ticker: "AAA", Date: mon, Time: "bmo"},
+	}
+	s := earningsServiceAt(mon, entries, nil) // empty calendar
+	s.lastRefresh = mon.Add(-48 * time.Hour) // also stale
+
+	// First call: both stale and empty-calendar conditions true.
+	// Expect IsExcluded → false (calendar empty), and exactly ONE warn fired (shared throttle).
+	_ = s.IsExcluded("AAA", mon)
+	s.mu.RLock()
+	first := s.lastWarnTime
+	s.mu.RUnlock()
+	if first.IsZero() {
+		t.Fatal("expected at least one warn to fire on first call")
+	}
+
+	// Second call within the throttle interval: lastWarnTime should NOT advance.
+	_ = s.IsExcluded("AAA", mon.Add(1*time.Minute))
+	s.mu.RLock()
+	second := s.lastWarnTime
+	s.mu.RUnlock()
+	if !second.Equal(first) {
+		t.Errorf("expected lastWarnTime unchanged within throttle interval, got %v vs %v", first, second)
+	}
+}
+
+func TestEarningsIsExcluded_StaleData_stillApplies(t *testing.T) {
+	loc, _ := time.LoadLocation("America/New_York")
+	mon := time.Date(2026, 5, 4, 12, 0, 0, 0, loc)
+	cal := monFriCalendar(time.Date(2026, 5, 4, 0, 0, 0, 0, loc), 10)
+	entries := map[string]earningsEntry{
+		"AAA": {Ticker: "AAA", Date: time.Date(2026, 5, 4, 0, 0, 0, 0, loc), Time: "bmo"},
+	}
+	s := earningsServiceAt(mon, entries, cal)
+	// Force stale: lastRefresh is 48h before "now"
+	s.lastRefresh = mon.Add(-48 * time.Hour)
+	if !s.IsExcluded("AAA", mon) {
+		t.Error("expected stale-but-populated cache to still apply exclusion")
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.lastWarnTime.IsZero() {
+		t.Error("expected stale warn to have fired")
+	}
+}
