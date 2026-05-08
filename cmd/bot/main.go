@@ -158,7 +158,13 @@ func main() {
 	}
 
 	// Initialize penny stock signal pipeline
-	pennyUniverseService := services.NewPennyUniverseService(cfg.FMPAPIKey, cfg.AlpacaAPIKey, cfg.AlpacaSecretKey, cfg.AlpacaBaseURL, nil)
+	earningsService := services.NewEarningsCalendarService(cfg.FMPAPIKey, cfg.AlpacaAPIKey, cfg.AlpacaSecretKey, cfg.AlpacaBaseURL, nil)
+	go earningsService.Start(ctx)
+	if !earningsService.WaitForFirstRefresh(services.FirstRefreshWaitTimeout) {
+		logger.Warn("earnings calendar first refresh did not complete within timeout — universe will start in fail-open mode")
+	}
+
+	pennyUniverseService := services.NewPennyUniverseService(cfg.FMPAPIKey, cfg.AlpacaAPIKey, cfg.AlpacaSecretKey, cfg.AlpacaBaseURL, earningsService, nil)
 	pennyScreenerService := services.NewPennyScreenerService(cfg.AlpacaAPIKey, cfg.AlpacaSecretKey, pennyUniverseService)
 	secEdgarService := services.NewSECEdgarService(pennyUniverseService, nil, cfg.OperatorEmail)
 	socialSignalService := services.NewSocialSignalService(pennyUniverseService, nil)
