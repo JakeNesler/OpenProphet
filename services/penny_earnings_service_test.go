@@ -328,3 +328,38 @@ func TestEarningsIsExcluded_StaleData_stillApplies(t *testing.T) {
 		t.Error("expected stale warn to have fired")
 	}
 }
+
+func TestEarningsWaitForFirstRefresh_TimesOutWhenNotSignaled(t *testing.T) {
+	s := &EarningsCalendarService{
+		firstRefreshDone: make(chan struct{}),
+		logger:           logrus.New(),
+	}
+	if s.WaitForFirstRefresh(50 * time.Millisecond) {
+		t.Error("expected timeout when firstRefreshDone is never closed")
+	}
+}
+
+func TestEarningsWaitForFirstRefresh_ReturnsTrueWhenChannelClosed(t *testing.T) {
+	s := &EarningsCalendarService{
+		firstRefreshDone: make(chan struct{}),
+		logger:           logrus.New(),
+	}
+	close(s.firstRefreshDone)
+	if !s.WaitForFirstRefresh(50 * time.Millisecond) {
+		t.Error("expected true when firstRefreshDone is closed")
+	}
+}
+
+func TestEarningsWaitForFirstRefresh_CompletesWhenSignaledMidWait(t *testing.T) {
+	s := &EarningsCalendarService{
+		firstRefreshDone: make(chan struct{}),
+		logger:           logrus.New(),
+	}
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		s.firstRefreshOnce.Do(func() { close(s.firstRefreshDone) })
+	}()
+	if !s.WaitForFirstRefresh(200 * time.Millisecond) {
+		t.Error("expected WaitForFirstRefresh to return true after mid-wait signal")
+	}
+}

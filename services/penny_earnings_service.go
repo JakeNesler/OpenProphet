@@ -118,7 +118,16 @@ func (s *EarningsCalendarService) IsExcluded(ticker string, now time.Time) bool 
 	}
 	return distance <= earningsExclusionDays
 }
-func (s *EarningsCalendarService) WaitForFirstRefresh(timeout time.Duration) bool     { return false }
+// WaitForFirstRefresh blocks until the first successful refresh has signaled
+// firstRefreshDone, or the timeout elapses. Returns true if the signal arrived first.
+func (s *EarningsCalendarService) WaitForFirstRefresh(timeout time.Duration) bool {
+	select {
+	case <-s.firstRefreshDone:
+		return true
+	case <-time.After(timeout):
+		return false
+	}
+}
 
 // tradingDayDistance returns the number of trading days from nowDate (exclusive)
 // to effective (inclusive). Both arguments are compared by date in their stored
