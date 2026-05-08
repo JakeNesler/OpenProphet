@@ -223,11 +223,14 @@ func (s *PennyUniverseService) refresh() {
 		s.logger.WithError(err).Warn("PennyUniverseService: failed to parse FMP response")
 		return
 	}
-	universe := s.filter(items)
+	universe, excludedForEarnings := s.filter(items)
 	s.mu.Lock()
 	s.universe = universe
 	s.mu.Unlock()
-	s.logger.WithField("count", len(universe)).Info("PennyUniverseService: universe refreshed")
+	s.logger.WithFields(logrus.Fields{
+		"count":                 len(universe),
+		"excluded_for_earnings": excludedForEarnings,
+	}).Info("PennyUniverseService: universe refreshed")
 }
 
 var allowedExchanges = map[string]bool{
@@ -238,8 +241,9 @@ var allowedExchanges = map[string]bool{
 
 var nyLoc, _ = time.LoadLocation("America/New_York")
 
-func (s *PennyUniverseService) filter(items []fmpScreenerItem) []UniverseSymbol {
+func (s *PennyUniverseService) filter(items []fmpScreenerItem) ([]UniverseSymbol, int) {
 	out := make([]UniverseSymbol, 0)
+	excludedForEarnings := 0
 	for _, item := range items {
 		if !allowedExchanges[item.ExchangeShortName] {
 			continue
@@ -254,6 +258,10 @@ func (s *PennyUniverseService) filter(items []fmpScreenerItem) []UniverseSymbol 
 		if dollarVol < 500_000 {
 			continue
 		}
+		if s.earnings != nil && s.earnings.IsExcluded(item.Symbol, time.Now()) {
+			excludedForEarnings++
+			continue
+		}
 		out = append(out, UniverseSymbol{
 			Ticker:       item.Symbol,
 			Name:         item.CompanyName,
@@ -263,7 +271,7 @@ func (s *PennyUniverseService) filter(items []fmpScreenerItem) []UniverseSymbol 
 			AvgDollarVol: dollarVol,
 		})
 	}
-	return out
+	return out, excludedForEarnings
 }
 
 func (s *PennyUniverseService) maybeRefreshCalendar(now time.Time) {
