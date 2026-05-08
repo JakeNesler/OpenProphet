@@ -3,6 +3,8 @@ package services
 import (
 	"testing"
 	"time"
+
+	"github.com/sirupsen/logrus"
 )
 
 // monFriCalendar returns a list of AlpacaCalendarEntry for Mon-Fri across the given week range,
@@ -146,5 +148,28 @@ func TestEarningsEffectiveDate_DateBeforeCalendarStart_returnsFirstCalendarDay(t
 	// First trading day in calendar on or after dateBeforeCal is Mon 2026-05-04
 	if got.Format("2006-01-02") != monStart.Format("2006-01-02") {
 		t.Errorf("expected %s (first cal day), got %s", monStart.Format("2006-01-02"), got.Format("2006-01-02"))
+	}
+}
+
+func TestEarningsMaybeWarn_FirstCallReturnsTrue(t *testing.T) {
+	s := &EarningsCalendarService{logger: logrus.New()}
+	if !s.maybeWarn(time.Now()) {
+		t.Error("expected first maybeWarn call to return true")
+	}
+}
+
+func TestEarningsMaybeWarn_SecondCallWithinIntervalReturnsFalse(t *testing.T) {
+	now := time.Now()
+	s := &EarningsCalendarService{logger: logrus.New(), lastWarnTime: now}
+	if s.maybeWarn(now.Add(1 * time.Minute)) {
+		t.Error("expected second maybeWarn within interval to return false")
+	}
+}
+
+func TestEarningsMaybeWarn_SecondCallAfterIntervalReturnsTrue(t *testing.T) {
+	now := time.Now()
+	s := &EarningsCalendarService{logger: logrus.New(), lastWarnTime: now}
+	if !s.maybeWarn(now.Add(staleWarnInterval + time.Second)) {
+		t.Error("expected maybeWarn after interval to return true")
 	}
 }

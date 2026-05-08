@@ -127,3 +127,17 @@ func (s *EarningsCalendarService) effectiveDate(entry earningsEntry, calendar []
 	}
 	return entry.Date
 }
+
+// maybeWarn returns true if a warning should be emitted right now (caller emits the log message)
+// and updates lastWarnTime under write-lock. Returns false if the previous warn was within
+// staleWarnInterval. The shared throttle covers all warn types (stale, empty calendar, etc.)
+// to keep logs from flooding when multiple conditions co-occur.
+func (s *EarningsCalendarService) maybeWarn(now time.Time) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.lastWarnTime.IsZero() && now.Sub(s.lastWarnTime) < staleWarnInterval {
+		return false
+	}
+	s.lastWarnTime = now
+	return true
+}
