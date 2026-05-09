@@ -111,7 +111,7 @@ const DEFAULT_AGENT_OVERRIDES = {
   strategyId: undefined,
   customStrategyRules: null,
   heartbeatOverrides: {},
-  sessionMode: 'continuous', // 'continuous' or 'fresh' - 'fresh' starts new session each beat
+  sessionMode: 'continuous', // 'continuous' | 'fresh' | 'daily' — 'fresh' resets each beat; 'daily' resets at the first pre_market beat each day to bound continuous-session context growth
 };
 
 function defaultAgents() {
@@ -249,6 +249,16 @@ Use get_trend_signal({ symbol }) to read the daily-bar Donchian-100 high, Donchi
         market_close: 86400,
         after_hours: 3600,
         closed: 86400,
+      },
+      // scheduledBeats.exclusive=true makes the harness ignore phase intervals and
+      // boundary snapping entirely; the agent fires only at the listed ET wall-clock
+      // times on weekdays. windowMinutes matches the agent's own 4:55–5:05 PM
+      // accepted-window (TRADING_RULES_TREND.md "Heartbeat Schedule").
+      scheduledBeats: {
+        times: ['17:00'],
+        weekdaysOnly: true,
+        exclusive: true,
+        windowMinutes: 5,
       },
       createdAt: new Date().toISOString(),
     },
@@ -804,6 +814,12 @@ export function getResolvedAgentForSandbox(sandboxId) {
       ...(baseAgent?.heartbeatOverrides || {}),
       ...(overrides.heartbeatOverrides || {}),
     },
+    // Sandbox-level override replaces the agent default wholesale (vs. shallow-merging
+    // a structured field like times[]/weekdaysOnly/exclusive partially, which would be
+    // surprising). Empty {} from overrides is treated as "no override".
+    scheduledBeats: (overrides.scheduledBeats && Object.keys(overrides.scheduledBeats).length > 0)
+      ? overrides.scheduledBeats
+      : (baseAgent?.scheduledBeats || null),
     sandboxId,
     accountId: sandbox.accountId,
     customStrategyRules: overrides.customStrategyRules ?? null,
@@ -815,6 +831,13 @@ export function getResolvedAgentForSandbox(sandboxId) {
   if (overrides.customSystemPrompt !== null) resolved.customSystemPrompt = overrides.customSystemPrompt;
   if (Object.prototype.hasOwnProperty.call(overrides, 'strategyId') && overrides.strategyId !== undefined) {
     resolved.strategyId = overrides.strategyId;
+  }
+  // sessionMode is read by the harness to decide whether to reset _sessionId
+  // each beat ('fresh'), each pre_market boundary ('daily'), or never
+  // ('continuous'). Sandbox override wins; otherwise inherit from the agent
+  // definition; otherwise undefined (treated as 'continuous' by the harness).
+  if (Object.prototype.hasOwnProperty.call(overrides, 'sessionMode') && overrides.sessionMode != null) {
+    resolved.sessionMode = overrides.sessionMode;
   }
 
   return resolved;

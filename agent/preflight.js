@@ -12,19 +12,26 @@
 // See docs/preflight-skip-spec.md for the full design.
 
 // PennyProphet predicate. Skips the LLM beat when there are no candidates
-// above the composite-score threshold AND no open positions to manage.
+// above the composite-score threshold AND no open positions to manage AND
+// no open broker orders pending fill.
 //
 // Today each agent runs in its own paper account (per data/agent-config.json),
 // so "no positions in this sandbox" reliably means "no PennyProphet positions"
 // without needing strategy-tag filtering. When the shared-account work lands
 // (see docs/shared-account-backend-spec.md), this predicate should filter
 // positions by strategy="penny" tag instead of relying on account isolation.
+//
+// The open-orders check closes a gap: a buy submitted via place_buy_order
+// before the broker fills it does not yet appear in /positions, but the agent
+// may still need to react (cancel on price drift, follow up on partial fills).
+// Counting open orders ensures we don't skip the beat while one is in flight.
 async function pennyPreflight(runtime, agentConfig) {
   const { goAxios } = runtime;
 
-  const [candidatesResp, positionsResp] = await Promise.all([
+  const [candidatesResp, positionsResp, ordersResp] = await Promise.all([
     goAxios.get('/api/v1/penny/candidates?min_score=60'),
     goAxios.get('/api/v1/positions'),
+    goAxios.get('/api/v1/orders?status=open'),
   ]);
 
   // Validate response shapes before deciding. A malformed response (e.g., a
@@ -36,23 +43,102 @@ async function pennyPreflight(runtime, agentConfig) {
   if (!Array.isArray(positionsResp.data)) {
     return { skip: false, reason: 'positions response shape unexpected' };
   }
+  if (!Array.isArray(ordersResp.data)) {
+    return { skip: false, reason: 'orders response shape unexpected' };
+  }
 
   const candidateCount = candidatesResp.data.count;
   const positions = positionsResp.data;
+  const openOrders = ordersResp.data;
 
-  if (candidateCount === 0 && positions.length === 0) {
+  if (candidateCount === 0 && positions.length === 0 && openOrders.length === 0) {
     return {
       skip: true,
-      reason: 'no candidates above min_score=60 and no open positions',
+      reason: 'no candidates above min_score=60, no open positions, no open orders',
     };
   }
 
-  return {
-    skip: false,
-    reason: candidateCount > 0
-      ? `${candidateCount} candidate(s) above threshold`
-      : `${positions.length} open position(s) to manage`,
-  };
+  if (candidateCount > 0) {
+    return { skip: false, reason: `${candidateCount} candidate(s) above threshold` };
+  }
+  if (positions.length > 0) {
+    return { skip: false, reason: `${positions.length} open position(s) to manage` };
+  }
+  return { skip: false, reason: `${openOrders.length} open order(s) pending fill` };
+}
+
+// isClosedPhase returns { closed, reason } for a given Date. Mirrors the
+// 'closed' bucket from harness.js getCurrentPhase(): weekends, OR weekdays
+// before 04:00 ET (240 min), OR weekdays at/after 20:00 ET (1200 min).
+//
+// Duplicated from harness.js to avoid an import cycle (harness.js imports
+// from preflight.js). Same pattern as outOfTrendWindow below. If the phase
+// boundaries in harness.js PHASE_DEFAULTS change, update this function too.
+export function isClosedPhase(now) {
+  const day = now.getDay();
+  if (day === 0 || day === 6) {
+    return { closed: true, reason: 'weekend' };
+  }
+  const etTime = now.toLocaleTimeString('en-US', {
+    timeZone: 'America/New_York',
+    hour: '2-digit', minute: '2-digit', hour12: false,
+  });
+  const [h, m] = etTime.split(':').map(Number);
+  const mins = h * 60 + m;
+  if (mins < 240) {
+    return { closed: true, reason: `${etTime} ET — overnight (pre-4am)` };
+  }
+  if (mins >= 1200) {
+    return { closed: true, reason: `${etTime} ET — overnight (post-8pm)` };
+  }
+  return { closed: false, reason: '' };
+}
+
+// Prophet predicate. Only considers skipping during the 'closed' phase
+// (overnight 8pm-4am ET on weekdays + full weekends). All other phases
+// always run the LLM because Prophet's mandates depend on them:
+//   - pre_market: read daily_brief, scan bulletins, plan entries
+//   - market_open / midday / market_close: monitor positions, execute
+//   - after_hours: scan after-hours earnings, log activity
+//
+// During 'closed', if there are no open positions AND no open broker orders,
+// there is literally nothing to manage — the broker is shut, news will be
+// re-read at 6am via the daily_briefing scheduler job, and the harness fires
+// an early heartbeat exactly at the next phase boundary (pre_market start)
+// so we don't miss the morning wake-up.
+async function prophetPreflight(runtime, agentConfig) {
+  const phase = isClosedPhase(new Date());
+  if (!phase.closed) {
+    return { skip: false, reason: 'phase active — Prophet runs' };
+  }
+
+  const { goAxios } = runtime;
+  const [positionsResp, ordersResp] = await Promise.all([
+    goAxios.get('/api/v1/positions'),
+    goAxios.get('/api/v1/orders?status=open'),
+  ]);
+
+  if (!Array.isArray(positionsResp.data)) {
+    return { skip: false, reason: 'positions response shape unexpected' };
+  }
+  if (!Array.isArray(ordersResp.data)) {
+    return { skip: false, reason: 'orders response shape unexpected' };
+  }
+
+  const positions = positionsResp.data;
+  const openOrders = ordersResp.data;
+
+  if (positions.length === 0 && openOrders.length === 0) {
+    return {
+      skip: true,
+      reason: `closed phase (${phase.reason}), no positions, no open orders`,
+    };
+  }
+
+  if (positions.length > 0) {
+    return { skip: false, reason: `${positions.length} open position(s) to evaluate` };
+  }
+  return { skip: false, reason: `${openOrders.length} open order(s) pending fill` };
 }
 
 const TREND_UNIVERSE = ['TLT', 'GLD', 'USO', 'DBC', 'UUP', 'EEM'];
@@ -145,6 +231,15 @@ async function trendPreflight(runtime, agentConfig) {
 // up. The probe is one expirations call + one chain call against SPY (the
 // most liquid); if SPY's chain is empty for the target expiration, the other
 // underlyings will be too (same data feed).
+//
+// Lifecycle invariant: state.open_condors counts both OPEN and CLOSING rows
+// (see database/storage.go ListOpenHarvestCondors). A condor row is created
+// with status=OPEN immediately when the entry order is placed, before broker
+// fill, so a pending-fill condor still keeps the agent awake — no gap there.
+//
+// Drift risk: the 12.0% deployed-buying-power cap below is duplicated from
+// TRADING_RULES_HARVEST.md and the Harvest design spec. If the strategy cap
+// changes, both this file and the rules doc must be updated together.
 async function harvestPreflight(runtime, agentConfig) {
   const { goAxios } = runtime;
 
@@ -207,6 +302,7 @@ export const PREFLIGHT_REGISTRY = {
   'penny-momentum': pennyPreflight,
   'trend':          trendPreflight,
   'harvest':        harvestPreflight,
+  'v2-options':     prophetPreflight,
 };
 
 const PREFLIGHT_TIMEOUT_MS = 2000;

@@ -6,8 +6,22 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"sync"
 	"time"
 )
+
+// rssCacheEntry stores a cached RSS feed result with its fetch timestamp.
+type rssCacheEntry struct {
+	items     []NewsItem
+	fetchedAt time.Time
+}
+
+// rssCacheTTL is how long a successful RSS fetch is reused before re-fetching.
+// 60s is short enough that breaking news still surfaces within one heartbeat
+// and long enough to dedupe back-to-back calls (e.g. agent calls
+// get_marketwatch_bulletins followed by get_quick_market_intelligence, which
+// internally fetches the same feed). Failures are NOT cached.
+const rssCacheTTL = 60 * time.Second
 
 // NewsItem represents a single news article from the RSS feed
 type NewsItem struct {
@@ -53,6 +67,12 @@ type RSSFeed struct {
 // NewsService handles fetching news from various sources
 type NewsService struct {
 	httpClient *http.Client
+
+	// rssCache holds short-TTL RSS results keyed by feed URL. Read paths
+	// (fetchRSSFeedCached) take rssMu under RLock; writes take Lock. Cache
+	// entries are immutable once stored (NewsItem slices are not mutated).
+	rssMu    sync.RWMutex
+	rssCache map[string]rssCacheEntry
 }
 
 // NewNewsService creates a new news service
@@ -61,7 +81,35 @@ func NewNewsService() *NewsService {
 		httpClient: &http.Client{
 			Timeout: 30 * time.Second,
 		},
+		rssCache: make(map[string]rssCacheEntry),
 	}
+}
+
+// fetchRSSFeedCached returns a cached RSS feed if it was fetched within
+// rssCacheTTL, otherwise fetches fresh and stores the result. Errors are
+// returned to the caller and are not cached, so a transient upstream failure
+// doesn't poison subsequent calls.
+//
+// The cache stores the post-parse []NewsItem slice; downstream filtering
+// (filterStale, dedup) runs on each call so callers see consistent semantics
+// regardless of cache hit or miss.
+func (ns *NewsService) fetchRSSFeedCached(feedURL string) ([]NewsItem, error) {
+	ns.rssMu.RLock()
+	entry, ok := ns.rssCache[feedURL]
+	ns.rssMu.RUnlock()
+	if ok && time.Since(entry.fetchedAt) < rssCacheTTL {
+		return entry.items, nil
+	}
+
+	items, err := ns.fetchRSSFeed(feedURL)
+	if err != nil {
+		return nil, err
+	}
+
+	ns.rssMu.Lock()
+	ns.rssCache[feedURL] = rssCacheEntry{items: items, fetchedAt: time.Now()}
+	ns.rssMu.Unlock()
+	return items, nil
 }
 
 // GetGoogleNews fetches the latest news from Google News RSS feed
@@ -118,7 +166,7 @@ func filterStale(items []NewsItem, maxAge time.Duration) []NewsItem {
 // GetMarketWatchTopStories fetches top stories from MarketWatch
 func (ns *NewsService) GetMarketWatchTopStories() ([]NewsItem, error) {
 	url := "https://feeds.content.dowjones.io/public/rss/mw_topstories"
-	items, err := ns.fetchRSSFeed(url)
+	items, err := ns.fetchRSSFeedCached(url)
 	if err != nil {
 		return nil, err
 	}
@@ -128,7 +176,7 @@ func (ns *NewsService) GetMarketWatchTopStories() ([]NewsItem, error) {
 // GetMarketWatchRealtimeHeadlines fetches real-time headlines from MarketWatch
 func (ns *NewsService) GetMarketWatchRealtimeHeadlines() ([]NewsItem, error) {
 	url := "https://feeds.content.dowjones.io/public/rss/mw_realtimeheadlines"
-	items, err := ns.fetchRSSFeed(url)
+	items, err := ns.fetchRSSFeedCached(url)
 	if err != nil {
 		return nil, err
 	}
@@ -138,7 +186,7 @@ func (ns *NewsService) GetMarketWatchRealtimeHeadlines() ([]NewsItem, error) {
 // GetMarketWatchBulletins fetches breaking news bulletins from MarketWatch
 func (ns *NewsService) GetMarketWatchBulletins() ([]NewsItem, error) {
 	url := "https://feeds.content.dowjones.io/public/rss/mw_bulletins"
-	items, err := ns.fetchRSSFeed(url)
+	items, err := ns.fetchRSSFeedCached(url)
 	if err != nil {
 		return nil, err
 	}
@@ -148,7 +196,7 @@ func (ns *NewsService) GetMarketWatchBulletins() ([]NewsItem, error) {
 // GetMarketWatchMarketPulse fetches market pulse updates from MarketWatch
 func (ns *NewsService) GetMarketWatchMarketPulse() ([]NewsItem, error) {
 	url := "https://feeds.content.dowjones.io/public/rss/mw_marketpulse"
-	items, err := ns.fetchRSSFeed(url)
+	items, err := ns.fetchRSSFeedCached(url)
 	if err != nil {
 		return nil, err
 	}

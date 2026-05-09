@@ -3,10 +3,13 @@ package services
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math"
 	"net/http"
+	"net/url"
+	"os"
 	"regexp"
 	"sort"
 	"strings"
@@ -19,6 +22,14 @@ import (
 const socialRefreshInterval = 30 * time.Second
 const stockTwitsRefreshInterval = 2 * time.Minute
 const socialHalfLifeHours = 4.0
+
+const (
+	redditTokenURL  = "https://www.reddit.com/api/v1/access_token"
+	redditOAuthBase = "https://oauth.reddit.com"
+	redditTokenSkew = 5 * time.Minute // refresh this much before stated expiry
+)
+
+var errRedditUnauthorized = errors.New("reddit: unauthorized")
 
 var tickerRegex = regexp.MustCompile(`\$([A-Z]{2,5})\b`)
 
@@ -68,21 +79,64 @@ type SocialSignalService struct {
 	entries    map[string]socialEntry
 	baselines  map[string]*mentionBaseline
 	logger     *logrus.Logger
+
+	// Reddit OAuth (script-app flow)
+	redditClientID     string
+	redditClientSecret string
+	redditUsername     string
+	redditPassword     string
+	redditUserAgent    string
+	redditEnabled      bool
+
+	redditTokenMu     sync.Mutex
+	redditAccessToken string
+	redditTokenExpiry time.Time
 }
 
-// NewSocialSignalService creates the service.
+// NewSocialSignalService creates the service. Reddit OAuth is enabled when all four
+// of REDDIT_CLIENT_ID, REDDIT_CLIENT_SECRET, REDDIT_USERNAME, REDDIT_PASSWORD are set;
+// when any is missing, Reddit polls are skipped (StockTwits still runs). Optional
+// REDDIT_USER_AGENT overrides the default `go:prophet-penny-bot:1.0 (by /u/<username>)`.
 func NewSocialSignalService(universe *PennyUniverseService, httpClient *http.Client) *SocialSignalService {
 	if httpClient == nil {
 		httpClient = &http.Client{Timeout: 10 * time.Second}
 	}
 	logger := logrus.New()
 	logger.SetFormatter(&logrus.TextFormatter{FullTimestamp: true})
+
+	clientID := os.Getenv("REDDIT_CLIENT_ID")
+	clientSecret := os.Getenv("REDDIT_CLIENT_SECRET")
+	username := os.Getenv("REDDIT_USERNAME")
+	password := os.Getenv("REDDIT_PASSWORD")
+	enabled := clientID != "" && clientSecret != "" && username != "" && password != ""
+
+	ua := os.Getenv("REDDIT_USER_AGENT")
+	if ua == "" {
+		uaUser := username
+		if uaUser == "" {
+			uaUser = "anonymous"
+		}
+		ua = fmt.Sprintf("go:prophet-penny-bot:1.0 (by /u/%s)", uaUser)
+	}
+
+	if enabled {
+		logger.Infof("SocialSignalService: Reddit OAuth enabled (user=%s)", username)
+	} else {
+		logger.Warn("SocialSignalService: Reddit OAuth disabled — set REDDIT_CLIENT_ID, REDDIT_CLIENT_SECRET, REDDIT_USERNAME, REDDIT_PASSWORD to enable. Reddit polls will be skipped.")
+	}
+
 	return &SocialSignalService{
-		httpClient: httpClient,
-		universe:   universe,
-		entries:    make(map[string]socialEntry),
-		baselines:  make(map[string]*mentionBaseline),
-		logger:     logger,
+		httpClient:         httpClient,
+		universe:           universe,
+		entries:            make(map[string]socialEntry),
+		baselines:          make(map[string]*mentionBaseline),
+		logger:             logger,
+		redditClientID:     clientID,
+		redditClientSecret: clientSecret,
+		redditUsername:     username,
+		redditPassword:     password,
+		redditUserAgent:    ua,
+		redditEnabled:      enabled,
 	}
 }
 
@@ -143,33 +197,21 @@ type redditListing struct {
 }
 
 func (s *SocialSignalService) pollReddit() {
+	if !s.redditEnabled {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
 	subreddits := []string{"pennystocks", "RobinHoodPennyStocks"}
 	tickers := tickerSet(s.universe.GetTickers())
 	now := time.Now()
 	counts := make(map[string]int)
 
 	for _, sub := range subreddits {
-		url := fmt.Sprintf("https://www.reddit.com/r/%s/new.json?limit=100", sub)
-		req, err := http.NewRequest("GET", url, nil)
-		if err != nil {
-			continue
-		}
-		req.Header.Set("User-Agent", "ProphetBot/1.0 (contact: trading@example.com)")
-		resp, err := s.httpClient.Do(req)
+		listing, err := s.fetchRedditSubreddit(ctx, sub)
 		if err != nil {
 			s.logger.WithError(err).Warnf("SocialSignalService: Reddit r/%s failed", sub)
-			continue
-		}
-		if resp.StatusCode != http.StatusOK {
-			resp.Body.Close()
-			s.logger.WithField("status", resp.StatusCode).Warnf("SocialSignalService: Reddit r/%s non-200", sub)
-			continue
-		}
-		body, _ := io.ReadAll(resp.Body)
-		resp.Body.Close()
-
-		var listing redditListing
-		if err := json.Unmarshal(body, &listing); err != nil {
 			continue
 		}
 		for _, child := range listing.Data.Children {
@@ -185,6 +227,117 @@ func (s *SocialSignalService) pollReddit() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.recomputeRedditScores(now, counts)
+}
+
+// fetchRedditSubreddit pulls /r/<sub>/new via the OAuth API. On 401, the cached
+// token is cleared and the request is retried once (covers token revocation /
+// silent expiry between cache and call).
+func (s *SocialSignalService) fetchRedditSubreddit(ctx context.Context, sub string) (*redditListing, error) {
+	listing, err := s.doRedditRequest(ctx, sub)
+	if err == nil {
+		return listing, nil
+	}
+	if errors.Is(err, errRedditUnauthorized) {
+		s.clearRedditToken()
+		return s.doRedditRequest(ctx, sub)
+	}
+	return nil, err
+}
+
+func (s *SocialSignalService) doRedditRequest(ctx context.Context, sub string) (*redditListing, error) {
+	token, err := s.ensureRedditToken(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("ensure token: %w", err)
+	}
+	endpoint := fmt.Sprintf("%s/r/%s/new?limit=100", redditOAuthBase, sub)
+	req, err := http.NewRequestWithContext(ctx, "GET", endpoint, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("User-Agent", s.redditUserAgent)
+	req.Header.Set("Authorization", "bearer "+token)
+	resp, err := s.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusUnauthorized {
+		return nil, errRedditUnauthorized
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("http %d", resp.StatusCode)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read body: %w", err)
+	}
+	var listing redditListing
+	if err := json.Unmarshal(body, &listing); err != nil {
+		return nil, fmt.Errorf("parse listing: %w", err)
+	}
+	return &listing, nil
+}
+
+// ensureRedditToken returns a non-expired bearer token, refreshing via the
+// password-grant flow when the cache is empty or within redditTokenSkew of expiry.
+// Reddit's password-grant issues short-lived (~3600s) tokens with no refresh_token,
+// so refresh = repeat the grant — which is fine; it's cheap and infrequent.
+func (s *SocialSignalService) ensureRedditToken(ctx context.Context) (string, error) {
+	s.redditTokenMu.Lock()
+	defer s.redditTokenMu.Unlock()
+
+	if s.redditAccessToken != "" && time.Now().Add(redditTokenSkew).Before(s.redditTokenExpiry) {
+		return s.redditAccessToken, nil
+	}
+
+	form := url.Values{}
+	form.Set("grant_type", "password")
+	form.Set("username", s.redditUsername)
+	form.Set("password", s.redditPassword)
+
+	req, err := http.NewRequestWithContext(ctx, "POST", redditTokenURL, strings.NewReader(form.Encode()))
+	if err != nil {
+		return "", err
+	}
+	req.SetBasicAuth(s.redditClientID, s.redditClientSecret)
+	req.Header.Set("User-Agent", s.redditUserAgent)
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	resp, err := s.httpClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("token request: %w", err)
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("token http %d: %s", resp.StatusCode, strings.TrimSpace(string(raw)))
+	}
+	var tk struct {
+		AccessToken string  `json:"access_token"`
+		TokenType   string  `json:"token_type"`
+		ExpiresIn   float64 `json:"expires_in"`
+		Scope       string  `json:"scope"`
+		Error       string  `json:"error"`
+	}
+	if err := json.Unmarshal(raw, &tk); err != nil {
+		return "", fmt.Errorf("token parse: %w", err)
+	}
+	if tk.Error != "" {
+		return "", fmt.Errorf("token error: %s", tk.Error)
+	}
+	if tk.AccessToken == "" {
+		return "", errors.New("token: empty access_token in response")
+	}
+	s.redditAccessToken = tk.AccessToken
+	s.redditTokenExpiry = time.Now().Add(time.Duration(tk.ExpiresIn) * time.Second)
+	return s.redditAccessToken, nil
+}
+
+func (s *SocialSignalService) clearRedditToken() {
+	s.redditTokenMu.Lock()
+	defer s.redditTokenMu.Unlock()
+	s.redditAccessToken = ""
+	s.redditTokenExpiry = time.Time{}
 }
 
 func (s *SocialSignalService) recomputeRedditScores(now time.Time, counts map[string]int) {
