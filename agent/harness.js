@@ -34,9 +34,32 @@ export function getCurrentPhase() {
   return 'closed';
 }
 
+// buildGuardrailBlock formats permission/limit lines for inclusion in the
+// system prompt. Returns an empty string when there are no guardrails to
+// surface. Pulled out of _beat() so the block can live in the system prompt
+// (sent once per session) instead of being prepended every heartbeat.
+//
+// When permissions change, server.js calls reloadConfig({resetSession:true}),
+// which rebuilds the system prompt — so guardrail edits still take effect on
+// the next beat without per-beat re-injection.
+export function buildGuardrailBlock(perms = {}) {
+  const lines = [];
+  if (!perms.allowLiveTrading) lines.push('READ-ONLY MODE: Do NOT place any orders. Analysis and monitoring only.');
+  if (!perms.allowOptions) lines.push('Options trading is DISABLED.');
+  if (!perms.allowStocks) lines.push('Stock trading is DISABLED.');
+  if (!perms.allow0DTE) lines.push('0DTE options are NOT allowed.');
+  if (perms.maxPositionPct) lines.push(`Max position size: ${perms.maxPositionPct}% of portfolio.`);
+  if (perms.maxDeployedPct) lines.push(`Max deployed capital: ${perms.maxDeployedPct}%.`);
+  if (perms.maxDailyLoss) lines.push(`Max daily loss: ${perms.maxDailyLoss}% — auto-pause if exceeded.`);
+  if (perms.maxOpenPositions) lines.push(`Max open positions: ${perms.maxOpenPositions}.`);
+  if (perms.maxOrderValue > 0) lines.push(`Max single order value: $${perms.maxOrderValue}.`);
+  if (perms.blockedTools?.length) lines.push(`Blocked tools (do NOT call): ${perms.blockedTools.join(', ')}.`);
+  return lines.length ? `## Guardrails\n${lines.join('\n')}` : '';
+}
+
 // ── System Prompt Builder ──────────────────────────────────────────
 export async function buildSystemPrompt(agentConfig, options = {}) {
-  const { getStrategyById = () => null } = options;
+  const { getStrategyById = () => null, permissions = null } = options;
   let strategyRules = '';
   if (agentConfig.customStrategyRules) {
     strategyRules = agentConfig.customStrategyRules;
@@ -100,7 +123,10 @@ Heartbeat control:
 - If you need information, use your tools.
 - Each heartbeat is independent - gather data, decide, act, summarize.`;
 
-  return `${identity}\n\n${rulesBlock}\n\n${systemInstructions}`;
+  const guardrailBlock = buildGuardrailBlock(permissions || {});
+  const sections = [identity, rulesBlock, systemInstructions];
+  if (guardrailBlock) sections.push(guardrailBlock);
+  return sections.join('\n\n');
 }
 
 // ── Check CLI auth ─────────────────────────────────────────────────
@@ -216,6 +242,7 @@ export class AgentHarness {
     this._sessionEpoch = 0;
     this._emergencyQueued = null;
     this._emergencyReason = null;
+    this._lastBeatPhase = null; // tracked across beats for sessionMode='daily' boundary detection
   }
 
   _resolveSandbox() {
@@ -285,7 +312,21 @@ export class AgentHarness {
       level: 'success',
     });
 
-    await this._beat();
+    // Hybrid startup for scheduledBeats.exclusive agents: only fire the immediate
+    // beat if we're inside the agent's accepted window (windowMinutes around any
+    // scheduled time). Outside the window, the agent's own rules would reject the
+    // beat anyway — skip it to avoid burning an LLM invocation on a noop.
+    const sb = this._agentConfig?.scheduledBeats;
+    if (sb?.exclusive && sb.times?.length && !this._isWithinScheduledWindow()) {
+      const nextSecs = this._getSecondsToNextScheduledBeat();
+      const nextBeat = nextSecs !== null ? new Date(Date.now() + nextSecs * 1000).toISOString() : 'unknown';
+      this.state.emit('agent_log', {
+        message: `Startup outside scheduled window — skipping immediate beat. Next beat: ${nextBeat} (in ${nextSecs !== null ? Math.round(nextSecs / 60) : '?'} min).`,
+        level: 'info',
+      });
+    } else {
+      await this._beat();
+    }
     this._scheduleNext();
   }
 
@@ -306,6 +347,7 @@ export class AgentHarness {
     this.state.activeModel = model;
     this.systemPrompt = await buildSystemPrompt(this._agentConfig, {
       getStrategyById: this.getStrategyById,
+      permissions: this._resolvePermissions(),
     });
 
     if (resetSession) {
@@ -562,10 +604,89 @@ ${userBlock}`;
     return null;
   }
 
+  // Returns ET wall-clock weekday (1=Mon..7=Sun) and seconds-since-midnight ET.
+  // Used by scheduledBeats helpers; differs from _getSecondsToNextPhaseBoundary
+  // which uses local-timezone weekday (kept as-is to avoid changing existing behavior).
+  _getETNow() {
+    const now = new Date();
+    const dayName = now.toLocaleDateString('en-US', { timeZone: 'America/New_York', weekday: 'long' });
+    const dayMap = { Monday: 1, Tuesday: 2, Wednesday: 3, Thursday: 4, Friday: 5, Saturday: 6, Sunday: 7 };
+    const weekday = dayMap[dayName] || 1;
+    const etStr = now.toLocaleTimeString('en-US', {
+      timeZone: 'America/New_York',
+      hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
+    });
+    const [h, m, s] = etStr.split(':').map(Number);
+    return { weekday, secsOfDay: h * 3600 + m * 60 + s };
+  }
+
+  // Returns seconds until the next scheduledBeats.times occurrence in ET, skipping
+  // weekends if weekdaysOnly is set. Returns null when scheduledBeats isn't configured
+  // or has no times. setTimeout's max delay is ~24.8 days; we look only 8 days ahead
+  // (worst case = Friday post-window → Monday's window) so we're well within range.
+  // DST drift is acceptable: _scheduleNext re-runs after each beat and self-corrects.
+  _getSecondsToNextScheduledBeat() {
+    const sb = this._agentConfig?.scheduledBeats;
+    if (!sb?.times?.length) return null;
+    const weekdaysOnly = sb.weekdaysOnly !== false;
+    const targets = sb.times.map(t => {
+      const [h, m] = String(t).split(':').map(Number);
+      return h * 3600 + m * 60;
+    }).sort((a, b) => a - b);
+    const { weekday: nowDow, secsOfDay: nowSecs } = this._getETNow();
+    for (let dayOffset = 0; dayOffset < 8; dayOffset++) {
+      const dow = ((nowDow - 1 + dayOffset) % 7) + 1; // 1=Mon..7=Sun
+      if (weekdaysOnly && (dow === 6 || dow === 7)) continue;
+      for (const t of targets) {
+        const offset = dayOffset * 86400 + t - nowSecs;
+        if (offset > 0) return offset;
+      }
+    }
+    return null;
+  }
+
+  // True when the current ET wall-clock time is within scheduledBeats.windowMinutes
+  // of any scheduled time today. Used at startup to decide whether to fire an
+  // immediate beat (hybrid behavior: only beat on start if we're inside the window
+  // the agent's own rules would accept).
+  _isWithinScheduledWindow() {
+    const sb = this._agentConfig?.scheduledBeats;
+    if (!sb?.times?.length) return false;
+    const windowSecs = (sb.windowMinutes ?? 0) * 60;
+    if (windowSecs <= 0) return false;
+    const weekdaysOnly = sb.weekdaysOnly !== false;
+    const { weekday: nowDow, secsOfDay: nowSecs } = this._getETNow();
+    if (weekdaysOnly && (nowDow === 6 || nowDow === 7)) return false;
+    for (const t of sb.times) {
+      const [h, m] = String(t).split(':').map(Number);
+      const tSecs = h * 3600 + m * 60;
+      if (Math.abs(nowSecs - tSecs) <= windowSecs) return true;
+    }
+    return false;
+  }
+
   _scheduleNext() {
     if (!this.state.running) return;
     // Always clear any existing timer first to prevent dual timers
     if (this._timer) { clearTimeout(this._timer); this._timer = null; }
+
+    // scheduledBeats.exclusive: agent fires only at the configured ET wall-clock
+    // times, ignoring phase intervals and the phase-boundary snap entirely. Used
+    // for daily-cadence agents like TrendProphet that must hit a specific window.
+    const sb = this._agentConfig?.scheduledBeats;
+    if (sb?.exclusive && sb.times?.length) {
+      const scheduledSecs = this._getSecondsToNextScheduledBeat();
+      if (scheduledSecs !== null) {
+        this.state.heartbeatSeconds = scheduledSecs;
+        this.state.nextBeatTime = new Date(Date.now() + scheduledSecs * 1000).toISOString();
+        this.state.emit('schedule', { seconds: scheduledSecs, nextBeat: this.state.nextBeatTime, phase: this.state.phase });
+        this._timer = setTimeout(() => this._runBeatCycle(), scheduledSecs * 1000);
+        return;
+      }
+      // Defensive: scheduledSecs should never be null when times.length > 0; fall
+      // through to phase-based scheduling rather than getting stuck.
+    }
+
     let seconds = this._getHeartbeatSeconds();
     // Fire at phase boundaries so agents always wake at market open, market close, etc.
     const secsToBoundary = this._getSecondsToNextPhaseBoundary();
@@ -616,6 +737,25 @@ ${userBlock}`;
     this.state.phase = phase;
     const model = this.state.activeModel;
 
+    // sessionMode='daily': reset session on the first beat of each new day
+    // (transition into pre_market). Bounds continuous-session context growth
+    // for high-frequency agents — each day starts with just system prompt +
+    // first heartbeat instead of N days of replay. Activity logs / decisions
+    // remain queryable via tools, so cross-day memory isn't truly lost.
+    if (this._agentConfig?.sessionMode === 'daily'
+        && phase === 'pre_market'
+        && this._lastBeatPhase != null
+        && this._lastBeatPhase !== 'pre_market'
+        && this._sessionId) {
+      this.state.emit('agent_log', {
+        message: `[session] Daily reset — clearing session ${this._sessionId} on ${this._lastBeatPhase}→pre_market transition.`,
+        level: 'info',
+      });
+      this._sessionId = null;
+      this._sessionEpoch += 1;
+    }
+    this._lastBeatPhase = phase;
+
     this.state.emit('beat_start', { beat: beatNum, phase, time: this.state.lastBeatTime });
     this.state.emit('agent_log', {
       message: `--- Heartbeat #${beatNum} | ${PHASE_DEFAULTS[phase].label} ---`,
@@ -650,25 +790,16 @@ ${userBlock}`;
       }
     }
 
-    // Build permissions context for the prompt
-    const perms = this._resolvePermissions();
-    const permLines = [];
-    if (!perms.allowLiveTrading) permLines.push('READ-ONLY MODE: Do NOT place any orders. Analysis and monitoring only.');
-    if (!perms.allowOptions) permLines.push('Options trading is DISABLED.');
-    if (!perms.allowStocks) permLines.push('Stock trading is DISABLED.');
-    if (!perms.allow0DTE) permLines.push('0DTE options are NOT allowed.');
-    if (perms.maxPositionPct) permLines.push(`Max position size: ${perms.maxPositionPct}% of portfolio.`);
-    if (perms.maxDeployedPct) permLines.push(`Max deployed capital: ${perms.maxDeployedPct}%.`);
-    if (perms.maxDailyLoss) permLines.push(`Max daily loss: ${perms.maxDailyLoss}% — auto-pause if exceeded.`);
-    if (perms.maxOpenPositions) permLines.push(`Max open positions: ${perms.maxOpenPositions}.`);
-    if (perms.maxOrderValue > 0) permLines.push(`Max single order value: $${perms.maxOrderValue}.`);
-    if (perms.blockedTools?.length) permLines.push(`Blocked tools (do NOT call): ${perms.blockedTools.join(', ')}.`);
-    const permStr = permLines.length ? '\n\nGUARDRAILS:\n' + permLines.join('\n') : '';
+    // Guardrails are baked into the system prompt by reloadConfig() — sent
+    // once per session instead of every beat. When permissions change,
+    // server.js calls reloadConfig({resetSession:true}), which rebuilds the
+    // system prompt and resets the session so updates take effect on the
+    // next beat. No per-beat injection needed here.
 
     const emergencyPrefix = this._emergencyReason
       ? `\n\n[EMERGENCY ALERT] The mid-session market scanner detected a breaking development that requires your immediate attention:\n${this._emergencyReason}\n\nReview this alert and assess whether it requires immediate position action before your routine duties.`
       : '';
-    const prompt = `[HEARTBEAT #${beatNum}] Phase: ${PHASE_DEFAULTS[phase].label}. Time: ${new Date().toLocaleString('en-US', { timeZone: 'America/New_York' })} ET. Current heartbeat interval: ${this.state.heartbeatSeconds}s.${permStr}${emergencyPrefix}\n\nPerform your duties for this phase.`;
+    const prompt = `[HEARTBEAT #${beatNum}] Phase: ${PHASE_DEFAULTS[phase].label}. Time: ${new Date().toLocaleString('en-US', { timeZone: 'America/New_York' })} ET. Current heartbeat interval: ${this.state.heartbeatSeconds}s.${emergencyPrefix}\n\nPerform your duties for this phase.`;
 
     try {
       const result = await this._runClaude(prompt, model);

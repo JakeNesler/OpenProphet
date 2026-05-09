@@ -1010,6 +1010,7 @@
         <span id="status-text">Stopped</span>
       </div>
       <button class="btn primary sm" id="btn-start" onclick="startAgent()">Start</button>
+      <button class="btn sm" id="btn-start-all" onclick="startAllAgents()" title="Start every sandbox that isn't already running">Start All</button>
       <button class="btn sm" id="btn-pause" onclick="pauseAgent()" style="display:none">Pause</button>
       <button class="btn sm" id="btn-resume" onclick="resumeAgent()" style="display:none">Resume</button>
       <button class="btn danger sm" id="btn-stop" onclick="stopAgent()" style="display:none">Stop</button>
@@ -1902,6 +1903,55 @@ async function startAgent() {
     if (sid) logToSandbox(sid, `<div class="log-entry error"><span class="time">${fmtTime()}</span>Start error: ${esc(e.message)}</div>`);
   }
   btn.textContent = 'Start'; btn.disabled = false;
+}
+async function startAllAgents() {
+  const btn = document.getElementById('btn-start-all');
+  const sandboxes = getSandboxEntries();
+  if (!sandboxes.length) {
+    log('No sandboxes to start.', 'warning');
+    return;
+  }
+  const runtimes = window._healthState?.sandboxes || [];
+  const isRunning = (id) => !!runtimes.find(r => r.sandboxId === id && r.state?.running);
+  const targets = sandboxes.filter(s => !isRunning(s.id));
+  if (!targets.length) {
+    log('All sandboxes are already running.', 'info');
+    return;
+  }
+
+  btn.textContent = `Starting ${targets.length}...`;
+  btn.disabled = true;
+  log(`Starting ${targets.length} sandbox${targets.length === 1 ? '' : 'es'}: ${targets.map(s => s.name || s.id).join(', ')}`, 'info');
+
+  const results = await Promise.allSettled(
+    targets.map(s =>
+      fetch('/api/sandboxes/' + encodeURIComponent(s.id) + '/start', { method: 'POST' })
+        .then(r => r.json())
+        .then(d => ({ id: s.id, name: s.name || s.id, ok: !!d.ok, error: d.error }))
+    )
+  );
+
+  let started = 0, failed = 0;
+  for (const r of results) {
+    if (r.status === 'fulfilled' && r.value.ok) {
+      started++;
+      logToSandbox(r.value.id, `<div class="log-entry success"><span class="time">${fmtTime()}</span>Agent started (via Start All)</div>`);
+    } else {
+      failed++;
+      const msg = r.status === 'fulfilled' ? (r.value.error || 'unknown error') : r.reason?.message;
+      const id = r.status === 'fulfilled' ? r.value.id : null;
+      const name = r.status === 'fulfilled' ? r.value.name : 'unknown';
+      log(`Start All — ${name} failed: ${msg}`, 'error');
+      if (id) logToSandbox(id, `<div class="log-entry error"><span class="time">${fmtTime()}</span>Start failed: ${esc(msg || '')}</div>`);
+    }
+  }
+  log(`Start All complete: ${started} started, ${failed} failed.`, failed ? 'warning' : 'success');
+
+  btn.textContent = 'Start All';
+  btn.disabled = false;
+  checkHealth();
+  renderSandboxTabs();
+  refreshSandboxButtons();
 }
 async function stopAgent() {
   const sid = getEffectiveSandboxId();

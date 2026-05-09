@@ -1,5 +1,12 @@
 # Penny Stock Trading Rules — PennyProphet
 
+> **Note:** The authoritative copy of these rules now lives inline in
+> `data/agent-config.json` under `strategies[].id == "penny-momentum"`,
+> field `customRules`. This file is a human-readable mirror only — the
+> agent does NOT read it at runtime. Edit the JSON (or use the
+> `adapt-strategy-penny` skill) to change agent behavior. Updates here
+> will not take effect.
+
 **Updated:** 2026-05-02
 **Style:** High-risk, high-reward penny stock momentum trading
 
