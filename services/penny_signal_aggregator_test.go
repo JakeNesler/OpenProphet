@@ -278,3 +278,94 @@ func TestAggregator_Blacklist_AttemptCountIncrements(t *testing.T) {
 	// Since AttemptCount isn't exposed, we verify the invariant via observable behavior:
 	// the entry survives and is still blacklisted.
 }
+
+func TestGetCandidates_SuppressesDilutionBlocked(t *testing.T) {
+	universe := &PennyUniverseService{}
+	screener := &PennyScreenerService{scores: map[string]TechnicalEntry{}}
+	earnings := &EarningsCalendarService{
+		entries:  map[string]earningsEntry{},
+		calendar: []AlpacaCalendarEntry{{Date: "2026-05-10"}},
+		logger:   logrus.New(),
+	}
+	edgar := &SECEdgarService{
+		entries:        make(map[string]regulatoryEntry),
+		dilutionBlocks: make(map[string]dilutionEntry),
+		logger:         logrus.New(),
+		nowFunc:        func() time.Time { return time.Date(2026, 5, 10, 12, 0, 0, 0, time.UTC) },
+		earnings:       earnings,
+	}
+	edgar.dilutionBlocks["BLOCKED"] = dilutionEntry{
+		Ticker:   "BLOCKED",
+		FormType: "S-1",
+		FiledAt:  time.Date(2026, 5, 10, 9, 0, 0, 0, time.UTC),
+		Bucket:   "takedown",
+	}
+	social := &SocialSignalService{}
+	agg := NewPennySignalAggregator(universe, screener, edgar, social)
+
+	SeedCandidateForTest(agg, CandidateScore{
+		Ticker:            "OPEN",
+		CompositeScore:    80,
+		CompositeEligible: true,
+	})
+	SeedCandidateForTest(agg, CandidateScore{
+		Ticker:            "BLOCKED",
+		CompositeScore:    85,
+		CompositeEligible: true,
+	})
+
+	got := agg.GetCandidates(60)
+	if len(got) != 1 {
+		t.Fatalf("expected 1 candidate after dilution suppression, got %d", len(got))
+	}
+	if got[0].Ticker != "OPEN" {
+		t.Errorf("expected OPEN to remain, got %q", got[0].Ticker)
+	}
+}
+
+// Regression guard: a dilution block must not delete the underlying score data;
+// GetSignalDetail must still return the candidate so operator audit / log_decision
+// trails remain intact. This pins the Section 3 design decision that block ≠ exit
+// and block ≠ data deletion.
+func TestDilutionBlockDoesNotDeleteSignalDetail(t *testing.T) {
+	earnings := &EarningsCalendarService{
+		entries:  map[string]earningsEntry{},
+		calendar: []AlpacaCalendarEntry{{Date: "2026-05-10"}},
+		logger:   logrus.New(),
+	}
+	edgar := &SECEdgarService{
+		entries:        make(map[string]regulatoryEntry),
+		dilutionBlocks: make(map[string]dilutionEntry),
+		logger:         logrus.New(),
+		nowFunc:        func() time.Time { return time.Date(2026, 5, 10, 12, 0, 0, 0, time.UTC) },
+		earnings:       earnings,
+	}
+	edgar.dilutionBlocks["HELD"] = dilutionEntry{
+		Ticker:   "HELD",
+		FormType: "S-1",
+		FiledAt:  time.Date(2026, 5, 10, 9, 0, 0, 0, time.UTC),
+		Bucket:   "takedown",
+	}
+	agg := NewPennySignalAggregator(&PennyUniverseService{}, &PennyScreenerService{}, edgar, &SocialSignalService{})
+	SeedCandidateForTest(agg, CandidateScore{
+		Ticker:            "HELD",
+		CompositeScore:    85,
+		CompositeEligible: true,
+		TechnicalScore:    35,
+		RegulatoryScore:   30,
+		SocialScore:       20,
+	})
+
+	// Block suppresses the candidate from GetCandidates...
+	if cands := agg.GetCandidates(60); len(cands) != 0 {
+		t.Errorf("expected 0 candidates from GetCandidates, got %d", len(cands))
+	}
+	// ...but GetSignalDetail still returns the underlying score for audit.
+	detail := agg.GetSignalDetail("HELD")
+	if detail == nil {
+		t.Fatal("GetSignalDetail returned nil; block must not delete signal data")
+	}
+	if detail.CompositeScore != 85 {
+		t.Errorf("expected composite=85 preserved, got %f", detail.CompositeScore)
+	}
+}

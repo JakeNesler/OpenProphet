@@ -22,9 +22,11 @@ type BracketBlacklistEntry struct {
 }
 
 // Lock ordering: PennySignalAggregator.mu must always be acquired before
-// BracketBlacklist.mu. GetCandidates holds a.mu.RLock while calling
-// blacklist.IsBlacklisted (which acquires b.mu.RLock). No code path may
-// acquire BracketBlacklist.mu before PennySignalAggregator.mu.
+// BracketBlacklist.mu and before SECEdgarService.dilutionMu. GetCandidates
+// holds a.mu.RLock while calling blacklist.IsBlacklisted (b.mu.RLock) and
+// edgar.IsDilutionBlocked (which may take dilutionMu.Lock during eviction).
+// No code path may acquire BracketBlacklist.mu or SECEdgarService.dilutionMu
+// before PennySignalAggregator.mu.
 type BracketBlacklist struct {
 	mu      sync.RWMutex
 	entries map[string]BracketBlacklistEntry
@@ -124,7 +126,7 @@ func (a *PennySignalAggregator) Start(ctx context.Context) {
 }
 
 // GetCandidates returns all scored candidates above minScore that are composite-eligible
-// and not blacklisted, sorted by composite score descending.
+// and not blacklisted (bracket rejection or dilution).
 func (a *PennySignalAggregator) GetCandidates(minScore float64) []CandidateScore {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
@@ -134,6 +136,14 @@ func (a *PennySignalAggregator) GetCandidates(minScore float64) []CandidateScore
 			continue
 		}
 		if a.blacklist.IsBlacklisted(c.Ticker) {
+			continue
+		}
+		if blocked, reason := a.edgar.IsDilutionBlocked(c.Ticker); blocked {
+			a.logger.WithFields(logrus.Fields{
+				"ticker":    c.Ticker,
+				"composite": c.CompositeScore,
+				"reason":    reason,
+			}).Info("dilution block: candidate suppressed")
 			continue
 		}
 		out = append(out, c)
