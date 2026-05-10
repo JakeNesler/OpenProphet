@@ -306,3 +306,40 @@ Before every penny stock entry:
 - OTC/Pink Sheet stocks
 - Twitter/X signals (add in v2)
 - FDA event calendar (add in v2)
+
+---
+
+## Dilution Filter
+
+The signal pipeline suppresses any candidate whose issuer has filed a
+dilution-related SEC document within a recent trading-day window. The
+filter is **capital protection**, not alpha — it removes setups that look
+attractive on technical/regulatory/social signals but where the issuer
+has signaled active or imminent share dilution.
+
+### Form-type coverage
+
+| Form | Bucket | Window |
+|---|---|---|
+| S-1, S-1/A, F-1, F-1/A | takedown | 2 trading days |
+| 424B* (any prospectus supplement) | takedown | 2 trading days |
+| Bare S-3, S-3/A, F-3, F-3/A | shelf | 5 trading days |
+| 8-K with item-3.02 in title or summary | takedown | 2 trading days |
+| 8-K item-1.01 + equity-financing keyword | takedown | 2 trading days |
+| 8-K item-8.01 + offering keyword | takedown | 2 trading days |
+
+### Behavior
+
+- A blocked ticker is **never returned** by `get_penny_candidates`,
+  regardless of composite score.
+- `get_penny_signal_detail` still returns the underlying score for a
+  blocked ticker (block ≠ data deletion).
+- A dilution block on a ticker the agent **already holds** does NOT
+  trigger a forced exit. The dominant-signal stop rules remain the exit
+  authority. The block is logged for operator review.
+
+### Operator controls
+
+- `PENNY_DILUTION_FILTER_MODE=shadow` (default): blocks are logged but
+  candidates are not suppressed.
+- `PENNY_DILUTION_FILTER_MODE=enforce`: blocks suppress candidates.
