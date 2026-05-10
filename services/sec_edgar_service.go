@@ -372,3 +372,88 @@ func dilutionReason(e dilutionEntry, distance int) string {
 	}
 	return fmt.Sprintf("%s %s filed %d trading days ago", e.FormType, e.Bucket, distance)
 }
+
+// dilutionFormSpec maps an EDGAR `type=` query parameter to the bucket label
+// and a human-readable form-type tag for log lines. Order matters only for
+// log clarity — multiple specs can match the same atom feed entry but each
+// fetch covers exactly one type= value.
+type dilutionFormSpec struct {
+	queryType string // EDGAR getcurrent type= parameter
+	bucket    string // "takedown" or "shelf"
+}
+
+// dilutionFormSpecs is the canonical fan-out list for pollDilutionForms.
+var dilutionFormSpecs = []dilutionFormSpec{
+	{queryType: "S-1", bucket: "takedown"},
+	{queryType: "S-3", bucket: "shelf"},
+	{queryType: "424", bucket: "takedown"},
+	{queryType: "F-1", bucket: "takedown"},
+	{queryType: "F-3", bucket: "shelf"},
+}
+
+// applyDilutionFiling fetches one EDGAR atom feed for the given type, walks
+// each entry, and records a dilution block for any entry whose title contains
+// a universe ticker. Used both by the production poll loop and by unit tests
+// (which point url at an httptest server serving a fixture).
+func (s *SECEdgarService) applyDilutionFiling(formType, bucket, url string, tickers map[string]bool) {
+	entries, err := s.fetchAtom(url)
+	if err != nil {
+		s.logger.WithError(err).WithField("form", formType).
+			Warn("SECEdgarService: dilution poll failed for form")
+		return
+	}
+	for _, entry := range entries {
+		ticker := extractTickerFromTitle(entry.Title, tickers)
+		if ticker == "" {
+			continue
+		}
+		filedAt, isFallback := parseAtomDate(entry.Updated)
+		if isFallback {
+			s.logger.Warnf("dilution block: skipping %s — unparseable timestamp %q", ticker, entry.Updated)
+			continue
+		}
+		// FormType uses the title's actual form (e.g. "S-3/A") when extractable
+		// for log fidelity; falls back to the queried form type otherwise.
+		actualForm := extractFormFromTitle(entry.Title, formType)
+		s.upsertDilutionBlock(ticker, actualForm, bucket, filedAt, "")
+	}
+}
+
+// extractFormFromTitle pulls the actual form type from an EDGAR title like
+// "S-3/A - ABCD CORP (0001234567) (Filer)". Falls back to the queried form if
+// the title doesn't follow the expected leading-form-token pattern.
+func extractFormFromTitle(title, fallback string) string {
+	upper := strings.ToUpper(title)
+	for _, candidate := range []string{"S-1/A", "S-1", "S-3/A", "S-3", "F-1/A", "F-1", "F-3/A", "F-3", "424B2", "424B3", "424B4", "424B5"} {
+		if strings.HasPrefix(upper, candidate+" ") || strings.HasPrefix(upper, candidate+"-") {
+			return candidate
+		}
+	}
+	return fallback
+}
+
+// upsertDilutionBlock writes a dilution entry, applying the replacement rule:
+// takedown beats shelf (never downgrade); same bucket replaces (refreshes
+// window); shelf does not replace an existing takedown.
+func (s *SECEdgarService) upsertDilutionBlock(ticker, formType, bucket string, filedAt time.Time, sourceURL string) {
+	s.dilutionMu.Lock()
+	defer s.dilutionMu.Unlock()
+	existing, ok := s.dilutionBlocks[ticker]
+	if ok && existing.Bucket == "takedown" && bucket == "shelf" {
+		return // Don't downgrade.
+	}
+	s.dilutionBlocks[ticker] = dilutionEntry{
+		Ticker:    ticker,
+		FormType:  formType,
+		FiledAt:   filedAt,
+		Bucket:    bucket,
+		SourceURL: sourceURL,
+	}
+	s.logger.WithFields(logrus.Fields{
+		"ticker":   ticker,
+		"form":     formType,
+		"bucket":   bucket,
+		"filed_at": filedAt.Format(time.RFC3339),
+		"source":   sourceURL,
+	}).Warn("dilution block created")
+}

@@ -3,6 +3,8 @@ package services
 import (
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -413,5 +415,141 @@ func TestIsDilutionBlocked_NoCalendarFailsClosed(t *testing.T) {
 	blocked, _ := svc.IsDilutionBlocked("ABCD")
 	if !blocked {
 		t.Error("expected fail-closed (still blocked) when calendar is empty")
+	}
+}
+
+func loadFixture(t *testing.T, name string) string {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join("testdata", "edgar", "dilution", name))
+	if err != nil {
+		t.Fatalf("read fixture %s: %v", name, err)
+	}
+	return string(b)
+}
+
+func TestPollDilutionForms_S1Block(t *testing.T) {
+	body := loadFixture(t, "s1-fixture.atom")
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/atom+xml")
+		w.Write([]byte(body))
+	}))
+	defer ts.Close()
+
+	svc := newTestEdgarWithCalendar([]AlpacaCalendarEntry{{Date: "2026-05-10"}})
+	svc.httpClient = ts.Client()
+	tickers := map[string]bool{"ABCD": true}
+
+	svc.applyDilutionFiling("S-1", "takedown", ts.URL, tickers)
+
+	svc.dilutionMu.RLock()
+	entry, ok := svc.dilutionBlocks["ABCD"]
+	svc.dilutionMu.RUnlock()
+	if !ok {
+		t.Fatal("expected ABCD to be blocked")
+	}
+	if entry.Bucket != "takedown" {
+		t.Errorf("expected bucket=takedown, got %q", entry.Bucket)
+	}
+	if entry.FormType != "S-1" {
+		t.Errorf("expected FormType=S-1, got %q", entry.FormType)
+	}
+}
+
+func TestPollDilutionForms_S3IsShelf(t *testing.T) {
+	body := loadFixture(t, "s3-shelf-fixture.atom")
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(body))
+	}))
+	defer ts.Close()
+
+	svc := newTestEdgarWithCalendar([]AlpacaCalendarEntry{{Date: "2026-05-10"}})
+	svc.httpClient = ts.Client()
+	svc.applyDilutionFiling("S-3", "shelf", ts.URL, map[string]bool{"ABCD": true})
+
+	svc.dilutionMu.RLock()
+	entry := svc.dilutionBlocks["ABCD"]
+	svc.dilutionMu.RUnlock()
+	if entry.Bucket != "shelf" {
+		t.Errorf("expected bucket=shelf, got %q", entry.Bucket)
+	}
+}
+
+func TestPollDilutionForms_S3AmendmentStillShelf(t *testing.T) {
+	body := loadFixture(t, "s3-amendment-fixture.atom")
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(body))
+	}))
+	defer ts.Close()
+
+	svc := newTestEdgarWithCalendar([]AlpacaCalendarEntry{{Date: "2026-05-10"}})
+	svc.httpClient = ts.Client()
+	svc.applyDilutionFiling("S-3", "shelf", ts.URL, map[string]bool{"ABCD": true})
+
+	entry := svc.dilutionBlocks["ABCD"]
+	if entry.Bucket != "shelf" {
+		t.Errorf("S-3/A must remain in shelf bucket (not promoted to takedown), got %q", entry.Bucket)
+	}
+}
+
+func TestPollDilutionForms_424Takedown(t *testing.T) {
+	body := loadFixture(t, "424b5-fixture.atom")
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(body))
+	}))
+	defer ts.Close()
+
+	svc := newTestEdgarWithCalendar([]AlpacaCalendarEntry{{Date: "2026-05-10"}})
+	svc.httpClient = ts.Client()
+	svc.applyDilutionFiling("424", "takedown", ts.URL, map[string]bool{"ABCD": true})
+
+	entry := svc.dilutionBlocks["ABCD"]
+	if entry.Bucket != "takedown" {
+		t.Errorf("expected bucket=takedown for 424B5, got %q", entry.Bucket)
+	}
+}
+
+func TestPollDilutionForms_NonUniverseIgnored(t *testing.T) {
+	body := loadFixture(t, "non-universe-ticker-fixture.atom")
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(body))
+	}))
+	defer ts.Close()
+
+	svc := newTestEdgarWithCalendar([]AlpacaCalendarEntry{{Date: "2026-05-10"}})
+	svc.httpClient = ts.Client()
+	svc.applyDilutionFiling("S-1", "takedown", ts.URL, map[string]bool{"ABCD": true})
+
+	if len(svc.dilutionBlocks) != 0 {
+		t.Errorf("non-universe ticker should not produce a block, got %d blocks", len(svc.dilutionBlocks))
+	}
+}
+
+func TestPollDilutionForms_ShelfDoesNotReplaceTakedown(t *testing.T) {
+	svc := newTestEdgarWithCalendar([]AlpacaCalendarEntry{{Date: "2026-05-10"}})
+	// Pre-seed a takedown.
+	svc.dilutionBlocks["ABCD"] = dilutionEntry{
+		Ticker:   "ABCD",
+		FormType: "S-1",
+		FiledAt:  time.Now(),
+		Bucket:   "takedown",
+	}
+	// Now apply a shelf filing — must not downgrade.
+	svc.upsertDilutionBlock("ABCD", "S-3", "shelf", time.Now(), "https://example.com")
+	if svc.dilutionBlocks["ABCD"].Bucket != "takedown" {
+		t.Error("shelf filing must not downgrade an active takedown block")
+	}
+}
+
+func TestPollDilutionForms_TakedownReplacesShelf(t *testing.T) {
+	svc := newTestEdgarWithCalendar([]AlpacaCalendarEntry{{Date: "2026-05-10"}})
+	svc.dilutionBlocks["ABCD"] = dilutionEntry{
+		Ticker:   "ABCD",
+		FormType: "S-3",
+		FiledAt:  time.Now(),
+		Bucket:   "shelf",
+	}
+	svc.upsertDilutionBlock("ABCD", "S-1", "takedown", time.Now(), "https://example.com")
+	if svc.dilutionBlocks["ABCD"].Bucket != "takedown" {
+		t.Error("takedown filing must replace an active shelf block")
 	}
 }
