@@ -302,6 +302,7 @@ func TestGetCandidates_SuppressesDilutionBlocked(t *testing.T) {
 	}
 	social := &SocialSignalService{}
 	agg := NewPennySignalAggregator(universe, screener, edgar, social)
+	agg.dilutionMode = "enforce"
 
 	SeedCandidateForTest(agg, CandidateScore{
 		Ticker:            "OPEN",
@@ -347,6 +348,7 @@ func TestDilutionBlockDoesNotDeleteSignalDetail(t *testing.T) {
 		Bucket:   "takedown",
 	}
 	agg := NewPennySignalAggregator(&PennyUniverseService{}, &PennyScreenerService{}, edgar, &SocialSignalService{})
+	agg.dilutionMode = "enforce"
 	SeedCandidateForTest(agg, CandidateScore{
 		Ticker:            "HELD",
 		CompositeScore:    85,
@@ -367,5 +369,74 @@ func TestDilutionBlockDoesNotDeleteSignalDetail(t *testing.T) {
 	}
 	if detail.CompositeScore != 85 {
 		t.Errorf("expected composite=85 preserved, got %f", detail.CompositeScore)
+	}
+}
+
+func TestDilutionFilterMode_ShadowDoesNotSuppress(t *testing.T) {
+	earnings := &EarningsCalendarService{
+		calendar: []AlpacaCalendarEntry{{Date: "2026-05-10"}},
+		entries:  map[string]earningsEntry{},
+		logger:   logrus.New(),
+	}
+	edgar := &SECEdgarService{
+		entries:        make(map[string]regulatoryEntry),
+		dilutionBlocks: make(map[string]dilutionEntry),
+		logger:         logrus.New(),
+		nowFunc:        func() time.Time { return time.Date(2026, 5, 10, 12, 0, 0, 0, time.UTC) },
+		earnings:       earnings,
+	}
+	edgar.dilutionBlocks["BLOCKED"] = dilutionEntry{
+		Ticker:   "BLOCKED",
+		FormType: "S-1",
+		FiledAt:  time.Date(2026, 5, 10, 9, 0, 0, 0, time.UTC),
+		Bucket:   "takedown",
+	}
+	agg := NewPennySignalAggregator(&PennyUniverseService{}, &PennyScreenerService{}, edgar, &SocialSignalService{})
+	agg.dilutionMode = "shadow"
+	SeedCandidateForTest(agg, CandidateScore{
+		Ticker: "BLOCKED", CompositeScore: 85, CompositeEligible: true,
+	})
+
+	got := agg.GetCandidates(60)
+	if len(got) != 1 {
+		t.Errorf("shadow mode must NOT suppress; expected 1 candidate, got %d", len(got))
+	}
+}
+
+func TestDilutionFilterMode_EnforceSuppresses(t *testing.T) {
+	earnings := &EarningsCalendarService{
+		calendar: []AlpacaCalendarEntry{{Date: "2026-05-10"}},
+		entries:  map[string]earningsEntry{},
+		logger:   logrus.New(),
+	}
+	edgar := &SECEdgarService{
+		entries:        make(map[string]regulatoryEntry),
+		dilutionBlocks: make(map[string]dilutionEntry),
+		logger:         logrus.New(),
+		nowFunc:        func() time.Time { return time.Date(2026, 5, 10, 12, 0, 0, 0, time.UTC) },
+		earnings:       earnings,
+	}
+	edgar.dilutionBlocks["BLOCKED"] = dilutionEntry{
+		Ticker:   "BLOCKED",
+		FormType: "S-1",
+		FiledAt:  time.Date(2026, 5, 10, 9, 0, 0, 0, time.UTC),
+		Bucket:   "takedown",
+	}
+	agg := NewPennySignalAggregator(&PennyUniverseService{}, &PennyScreenerService{}, edgar, &SocialSignalService{})
+	agg.dilutionMode = "enforce"
+	SeedCandidateForTest(agg, CandidateScore{
+		Ticker: "BLOCKED", CompositeScore: 85, CompositeEligible: true,
+	})
+
+	got := agg.GetCandidates(60)
+	if len(got) != 0 {
+		t.Errorf("enforce mode must suppress; expected 0 candidates, got %d", len(got))
+	}
+}
+
+func TestDilutionFilterMode_DefaultIsShadow(t *testing.T) {
+	agg := NewPennySignalAggregator(&PennyUniverseService{}, &PennyScreenerService{}, nil, &SocialSignalService{})
+	if agg.dilutionMode != "shadow" {
+		t.Errorf("expected default dilutionMode=shadow, got %q", agg.dilutionMode)
 	}
 }

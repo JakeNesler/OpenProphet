@@ -3,6 +3,7 @@ package services
 import (
 	"context"
 	"math"
+	"os"
 	"sort"
 	"sync"
 	"time"
@@ -45,14 +46,15 @@ func (b *BracketBlacklist) IsBlacklisted(ticker string) bool {
 
 // PennySignalAggregator combines three sub-scores into composite CandidateScore entries.
 type PennySignalAggregator struct {
-	universe   *PennyUniverseService
-	screener   *PennyScreenerService
-	edgar      *SECEdgarService
-	social     *SocialSignalService
-	mu         sync.RWMutex
-	candidates map[string]CandidateScore
-	blacklist  *BracketBlacklist
-	logger     *logrus.Logger
+	universe     *PennyUniverseService
+	screener     *PennyScreenerService
+	edgar        *SECEdgarService
+	social       *SocialSignalService
+	mu           sync.RWMutex
+	candidates   map[string]CandidateScore
+	blacklist    *BracketBlacklist
+	logger       *logrus.Logger
+	dilutionMode string // "shadow" (log only) or "enforce" (suppress); default "shadow"
 }
 
 // NewPennySignalAggregator creates the aggregator.
@@ -64,14 +66,20 @@ func NewPennySignalAggregator(
 ) *PennySignalAggregator {
 	logger := logrus.New()
 	logger.SetFormatter(&logrus.TextFormatter{FullTimestamp: true})
+	mode := os.Getenv("PENNY_DILUTION_FILTER_MODE")
+	if mode != "enforce" {
+		mode = "shadow"
+	}
+	logger.WithField("mode", mode).Info("PennySignalAggregator: dilution filter mode")
 	return &PennySignalAggregator{
-		universe:   universe,
-		screener:   screener,
-		edgar:      edgar,
-		social:     social,
-		candidates: make(map[string]CandidateScore),
-		blacklist:  newBracketBlacklist(),
-		logger:     logger,
+		universe:     universe,
+		screener:     screener,
+		edgar:        edgar,
+		social:       social,
+		candidates:   make(map[string]CandidateScore),
+		blacklist:    newBracketBlacklist(),
+		logger:       logger,
+		dilutionMode: mode,
 	}
 }
 
@@ -138,13 +146,18 @@ func (a *PennySignalAggregator) GetCandidates(minScore float64) []CandidateScore
 		if a.blacklist.IsBlacklisted(c.Ticker) {
 			continue
 		}
-		if blocked, reason := a.edgar.IsDilutionBlocked(c.Ticker); blocked {
-			a.logger.WithFields(logrus.Fields{
-				"ticker":    c.Ticker,
-				"composite": c.CompositeScore,
-				"reason":    reason,
-			}).Info("dilution block: candidate suppressed")
-			continue
+		if a.edgar != nil {
+			if blocked, reason := a.edgar.IsDilutionBlocked(c.Ticker); blocked {
+				a.logger.WithFields(logrus.Fields{
+					"ticker":    c.Ticker,
+					"composite": c.CompositeScore,
+					"reason":    reason,
+					"mode":      a.dilutionMode,
+				}).Info("dilution block detected on candidate")
+				if a.dilutionMode == "enforce" {
+					continue
+				}
+			}
 		}
 		out = append(out, c)
 	}
