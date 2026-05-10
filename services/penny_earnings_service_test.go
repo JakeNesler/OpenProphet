@@ -725,3 +725,26 @@ func TestEarningsShouldRefreshNow_NextDayReturnsTrue(t *testing.T) {
 		t.Error("expected true on next ET day")
 	}
 }
+
+func TestEarningsCalendarService_Calendar_ReturnsSnapshot(t *testing.T) {
+	svc := &EarningsCalendarService{
+		entries: map[string]earningsEntry{},
+		calendar: []AlpacaCalendarEntry{
+			{Date: "2026-05-11"},
+			{Date: "2026-05-12"},
+		},
+		logger: logrus.New(),
+	}
+	got := svc.Calendar()
+	if len(got) != 2 {
+		t.Fatalf("expected 2 entries, got %d", len(got))
+	}
+	if got[0].Date != "2026-05-11" {
+		t.Errorf("expected first date 2026-05-11, got %q", got[0].Date)
+	}
+	// Mutating the returned slice must not affect internal state.
+	got[0].Date = "MUTATED"
+	if svc.calendar[0].Date == "MUTATED" {
+		t.Error("Calendar() returned reference to internal slice; expected defensive copy")
+	}
+}
