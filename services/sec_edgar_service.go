@@ -357,7 +357,12 @@ func (s *SECEdgarService) IsDilutionBlocked(ticker string) (bool, string) {
 	}
 	if distance > window {
 		s.dilutionMu.Lock()
-		delete(s.dilutionBlocks, ticker)
+		// Re-check identity: a concurrent upsertDilutionBlock could have
+		// replaced this entry with a fresh filing between our RUnlock above
+		// and the Lock here. Only delete if we still see the same stale entry.
+		if cur, ok := s.dilutionBlocks[ticker]; ok && cur.FiledAt.Equal(entry.FiledAt) && cur.FormType == entry.FormType {
+			delete(s.dilutionBlocks, ticker)
+		}
 		s.dilutionMu.Unlock()
 		return false, ""
 	}

@@ -467,8 +467,11 @@ func TestPollDilutionForms_S3IsShelf(t *testing.T) {
 	svc.applyDilutionFiling("S-3", "shelf", ts.URL, map[string]bool{"ABCD": true})
 
 	svc.dilutionMu.RLock()
-	entry := svc.dilutionBlocks["ABCD"]
+	entry, ok := svc.dilutionBlocks["ABCD"]
 	svc.dilutionMu.RUnlock()
+	if !ok {
+		t.Fatal("expected ABCD to be blocked")
+	}
 	if entry.Bucket != "shelf" {
 		t.Errorf("expected bucket=shelf, got %q", entry.Bucket)
 	}
@@ -505,6 +508,56 @@ func TestPollDilutionForms_424Takedown(t *testing.T) {
 	entry := svc.dilutionBlocks["ABCD"]
 	if entry.Bucket != "takedown" {
 		t.Errorf("expected bucket=takedown for 424B5, got %q", entry.Bucket)
+	}
+}
+
+func TestPollDilutionForms_F1Takedown(t *testing.T) {
+	body := loadFixture(t, "f1-fixture.atom")
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(body))
+	}))
+	defer ts.Close()
+
+	svc := newTestEdgarWithCalendar([]AlpacaCalendarEntry{{Date: "2026-05-10"}})
+	svc.httpClient = ts.Client()
+	svc.applyDilutionFiling("F-1", "takedown", ts.URL, map[string]bool{"ABCD": true})
+
+	svc.dilutionMu.RLock()
+	entry, ok := svc.dilutionBlocks["ABCD"]
+	svc.dilutionMu.RUnlock()
+	if !ok {
+		t.Fatal("expected ABCD to be blocked by F-1 filing")
+	}
+	if entry.Bucket != "takedown" {
+		t.Errorf("expected bucket=takedown for F-1, got %q", entry.Bucket)
+	}
+	if entry.FormType != "F-1" {
+		t.Errorf("expected FormType=F-1, got %q", entry.FormType)
+	}
+}
+
+func TestPollDilutionForms_F3IsShelf(t *testing.T) {
+	body := loadFixture(t, "f3-fixture.atom")
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(body))
+	}))
+	defer ts.Close()
+
+	svc := newTestEdgarWithCalendar([]AlpacaCalendarEntry{{Date: "2026-05-10"}})
+	svc.httpClient = ts.Client()
+	svc.applyDilutionFiling("F-3", "shelf", ts.URL, map[string]bool{"ABCD": true})
+
+	svc.dilutionMu.RLock()
+	entry, ok := svc.dilutionBlocks["ABCD"]
+	svc.dilutionMu.RUnlock()
+	if !ok {
+		t.Fatal("expected ABCD to be blocked by F-3 filing")
+	}
+	if entry.Bucket != "shelf" {
+		t.Errorf("expected bucket=shelf for F-3 (foreign shelf), got %q", entry.Bucket)
+	}
+	if entry.FormType != "F-3" {
+		t.Errorf("expected FormType=F-3, got %q", entry.FormType)
 	}
 }
 
