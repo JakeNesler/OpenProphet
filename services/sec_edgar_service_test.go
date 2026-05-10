@@ -418,6 +418,41 @@ func TestIsDilutionBlocked_NoCalendarFailsClosed(t *testing.T) {
 	}
 }
 
+// Regression guard for C2: IsDilutionBlocked must compute the trading-day
+// distance using ET dates, not the system local timezone. On a UTC-running
+// production host, time.Now() at 02:00 UTC corresponds to 22:00 ET on the
+// prior trading day. If the eviction code uses UTC dates, it will compute
+// distance one day ahead of the ET-keyed trading calendar and evict blocks
+// ~5 hours early.
+func TestIsDilutionBlocked_UsesETDateForEviction(t *testing.T) {
+	// Mon 2026-05-11 03:00 UTC == Sun 2026-05-10 23:00 ET.
+	// In ET this is Sunday (no trading day yet) — not Monday yet.
+	// Calendar contains 2026-05-08 (Fri), 2026-05-11 (Mon).
+	// Filing happened 2026-05-08 (Fri ET).
+	// In ET trading days: distance Fri→pre-Mon-open = 0 trading days elapsed.
+	// In UTC if mistakenly used: distance would compute as 1 trading day.
+	cal := []AlpacaCalendarEntry{
+		{Date: "2026-05-04"}, {Date: "2026-05-05"}, {Date: "2026-05-06"},
+		{Date: "2026-05-07"}, {Date: "2026-05-08"},
+		{Date: "2026-05-11"}, {Date: "2026-05-12"}, {Date: "2026-05-13"},
+	}
+	svc := newTestEdgarWithCalendar(cal)
+	// Use a fixed UTC instant that is "Sunday late evening ET":
+	// 2026-05-11T03:00:00Z UTC = 2026-05-10T23:00:00 ET.
+	svc.nowFunc = func() time.Time { return time.Date(2026, 5, 11, 3, 0, 0, 0, time.UTC) }
+	// Filing on Friday 2026-05-08 16:00 ET = 2026-05-08T20:00 UTC.
+	svc.dilutionBlocks["ABCD"] = dilutionEntry{
+		Ticker:   "ABCD",
+		FormType: "S-1",
+		FiledAt:  time.Date(2026, 5, 8, 20, 0, 0, 0, time.UTC),
+		Bucket:   "takedown",
+	}
+	blocked, _ := svc.IsDilutionBlocked("ABCD")
+	if !blocked {
+		t.Error("filing on Fri ET, eviction-check at Sun-night ET → must still be blocked (0 trading days elapsed in ET); was UTC-day arithmetic used by mistake?")
+	}
+}
+
 func loadFixture(t *testing.T, name string) string {
 	t.Helper()
 	b, err := os.ReadFile(filepath.Join("testdata", "edgar", "dilution", name))

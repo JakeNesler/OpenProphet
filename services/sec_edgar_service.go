@@ -403,8 +403,14 @@ func (s *SECEdgarService) IsDilutionBlocked(ticker string) (bool, string) {
 	}
 
 	now := s.nowFunc()
-	nowDate := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
-	filedDate := time.Date(entry.FiledAt.Year(), entry.FiledAt.Month(), entry.FiledAt.Day(), 0, 0, 0, 0, entry.FiledAt.Location())
+	loc := nyLoc
+	if loc == nil {
+		loc = time.UTC
+	}
+	nowET := now.In(loc)
+	nowDate := time.Date(nowET.Year(), nowET.Month(), nowET.Day(), 0, 0, 0, 0, loc)
+	filedET := entry.FiledAt.In(loc)
+	filedDate := time.Date(filedET.Year(), filedET.Month(), filedET.Day(), 0, 0, 0, 0, loc)
 	distance := tradingDayDistance(filedDate, nowDate, calendar)
 	window := dilutionTakedownWindowDays
 	if entry.Bucket == "shelf" {
