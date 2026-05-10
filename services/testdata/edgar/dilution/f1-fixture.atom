@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <title>Latest filings</title>
+  <entry>
+    <title>F-1 - ABCD CORP (0001234567) (Filer)</title>
+    <updated>2026-05-09T16:42:00-04:00</updated>
+    <summary>F-1 registration statement filed by ABCD CORP</summary>
+  </entry>
+</feed>

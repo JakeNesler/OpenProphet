@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Additional false-positive guard. Item 1.01 entries for licensing
+  agreements must not be treated as dilution events.
+-->
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <title>Latest filings</title>
+  <entry>
+    <title>8-K - ABCD CORP (0001234567) (Filer)</title>
+    <updated>2026-05-09T16:42:00-04:00</updated>
+    <summary>Item 1.01 Entry into software licensing agreement with third-party vendor</summary>
+  </entry>
+</feed>
