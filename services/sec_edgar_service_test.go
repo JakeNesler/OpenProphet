@@ -305,3 +305,113 @@ func TestSECEdgar_ParseAtomDate_FallbackSkipsUpsert(t *testing.T) {
 		t.Errorf("expected no entry for unparseable date, got score=%f", score)
 	}
 }
+
+func newTestEdgarWithCalendar(cal []AlpacaCalendarEntry) *SECEdgarService {
+	earnings := &EarningsCalendarService{
+		calendar: cal,
+		entries:  map[string]earningsEntry{},
+		logger:   logrus.New(),
+	}
+	return &SECEdgarService{
+		entries:        make(map[string]regulatoryEntry),
+		dilutionBlocks: make(map[string]dilutionEntry),
+		logger:         logrus.New(),
+		nowFunc:        time.Now,
+		earnings:       earnings,
+	}
+}
+
+func TestIsDilutionBlocked_UnknownTicker(t *testing.T) {
+	svc := newTestEdgarWithCalendar(nil)
+	blocked, reason := svc.IsDilutionBlocked("ZZZZ")
+	if blocked || reason != "" {
+		t.Errorf("expected (false, \"\"), got (%v, %q)", blocked, reason)
+	}
+}
+
+func TestIsDilutionBlocked_TakedownWithinWindow(t *testing.T) {
+	cal := []AlpacaCalendarEntry{
+		{Date: "2026-05-08"}, {Date: "2026-05-09"}, {Date: "2026-05-10"},
+		{Date: "2026-05-11"}, {Date: "2026-05-12"},
+	}
+	svc := newTestEdgarWithCalendar(cal)
+	now := time.Date(2026, 5, 10, 12, 0, 0, 0, time.UTC)
+	svc.nowFunc = func() time.Time { return now }
+	svc.dilutionBlocks["ABCD"] = dilutionEntry{
+		Ticker:    "ABCD",
+		FormType:  "S-1",
+		FiledAt:   time.Date(2026, 5, 9, 16, 0, 0, 0, time.UTC),
+		Bucket:    "takedown",
+		SourceURL: "https://www.sec.gov/x",
+	}
+	blocked, reason := svc.IsDilutionBlocked("ABCD")
+	if !blocked {
+		t.Fatal("expected ABCD to be blocked")
+	}
+	if !strings.Contains(reason, "S-1") {
+		t.Errorf("reason should mention form type, got %q", reason)
+	}
+}
+
+func TestIsDilutionBlocked_TakedownExpired(t *testing.T) {
+	cal := []AlpacaCalendarEntry{
+		{Date: "2026-05-04"}, {Date: "2026-05-05"}, {Date: "2026-05-06"},
+		{Date: "2026-05-07"}, {Date: "2026-05-08"}, {Date: "2026-05-09"},
+		{Date: "2026-05-10"},
+	}
+	svc := newTestEdgarWithCalendar(cal)
+	now := time.Date(2026, 5, 10, 12, 0, 0, 0, time.UTC)
+	svc.nowFunc = func() time.Time { return now }
+	// Filed 4 trading days ago (mon→fri = 4 trading days), 2-day takedown window.
+	svc.dilutionBlocks["ABCD"] = dilutionEntry{
+		Ticker:   "ABCD",
+		FormType: "S-1",
+		FiledAt:  time.Date(2026, 5, 4, 16, 0, 0, 0, time.UTC),
+		Bucket:   "takedown",
+	}
+	blocked, _ := svc.IsDilutionBlocked("ABCD")
+	if blocked {
+		t.Error("expected ABCD to be unblocked after window expiry")
+	}
+	// Verify lazy eviction removed the entry.
+	if _, ok := svc.dilutionBlocks["ABCD"]; ok {
+		t.Error("expected expired entry to be lazily evicted")
+	}
+}
+
+func TestIsDilutionBlocked_ShelfBucketLongerWindow(t *testing.T) {
+	cal := []AlpacaCalendarEntry{
+		{Date: "2026-05-05"}, {Date: "2026-05-06"}, {Date: "2026-05-07"},
+		{Date: "2026-05-08"}, {Date: "2026-05-09"}, {Date: "2026-05-10"},
+	}
+	svc := newTestEdgarWithCalendar(cal)
+	now := time.Date(2026, 5, 10, 12, 0, 0, 0, time.UTC)
+	svc.nowFunc = func() time.Time { return now }
+	// Filed 3 trading days ago: takedown would expire (>2), shelf still active (≤5).
+	svc.dilutionBlocks["ABCD"] = dilutionEntry{
+		Ticker:   "ABCD",
+		FormType: "S-3",
+		FiledAt:  time.Date(2026, 5, 5, 16, 0, 0, 0, time.UTC),
+		Bucket:   "shelf",
+	}
+	blocked, _ := svc.IsDilutionBlocked("ABCD")
+	if !blocked {
+		t.Error("expected ABCD shelf block to still be active 3 trading days in")
+	}
+}
+
+func TestIsDilutionBlocked_NoCalendarFailsClosed(t *testing.T) {
+	// When the trading calendar is empty, eviction can't compute correctly.
+	// Fail-closed: keep blocking. Capital protection direction.
+	svc := newTestEdgarWithCalendar(nil)
+	svc.dilutionBlocks["ABCD"] = dilutionEntry{
+		Ticker:   "ABCD",
+		FormType: "S-1",
+		FiledAt:  time.Now().Add(-90 * 24 * time.Hour),
+		Bucket:   "takedown",
+	}
+	blocked, _ := svc.IsDilutionBlocked("ABCD")
+	if !blocked {
+		t.Error("expected fail-closed (still blocked) when calendar is empty")
+	}
+}

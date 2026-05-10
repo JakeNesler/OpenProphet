@@ -21,6 +21,22 @@ type regulatoryEntry struct {
 	EventDesc string
 }
 
+// dilutionEntry records a recent dilution-related SEC filing on a universe ticker.
+// One entry per ticker in dilutionBlocks; replaced when a more conservative
+// (takedown beats shelf) filing arrives.
+type dilutionEntry struct {
+	Ticker    string
+	FormType  string    // "S-1", "S-3", "424B5", "8-K-3.02", etc.
+	FiledAt   time.Time // best-effort from feed timestamp
+	Bucket    string    // "takedown" (2-day) or "shelf" (5-day)
+	SourceURL string    // EDGAR filing URL (for log audit trail)
+}
+
+const (
+	dilutionTakedownWindowDays = 2
+	dilutionShelfWindowDays    = 5
+)
+
 // SECEdgarService polls EDGAR and GlobeNewswire for regulatory events.
 type SECEdgarService struct {
 	httpClient    *http.Client
@@ -31,6 +47,9 @@ type SECEdgarService struct {
 	logger        *logrus.Logger
 	nowFunc       func() time.Time
 	earnings      *EarningsCalendarService
+
+	dilutionMu     sync.RWMutex
+	dilutionBlocks map[string]dilutionEntry
 }
 
 // NewSECEdgarService creates the service. The earnings parameter provides
@@ -49,13 +68,14 @@ func NewSECEdgarService(
 	logger := logrus.New()
 	logger.SetFormatter(&logrus.TextFormatter{FullTimestamp: true})
 	return &SECEdgarService{
-		httpClient:    httpClient,
-		universe:      universe,
-		operatorEmail: operatorEmail,
-		entries:       make(map[string]regulatoryEntry),
-		logger:        logger,
-		nowFunc:       time.Now,
-		earnings:      earnings,
+		httpClient:     httpClient,
+		universe:       universe,
+		operatorEmail:  operatorEmail,
+		entries:        make(map[string]regulatoryEntry),
+		logger:         logger,
+		nowFunc:        time.Now,
+		earnings:       earnings,
+		dilutionBlocks: make(map[string]dilutionEntry),
 	}
 }
 
@@ -300,4 +320,55 @@ func tickerSet(tickers []string) map[string]bool {
 		set[t] = true
 	}
 	return set
+}
+
+// IsDilutionBlocked returns (true, reason) if the ticker has an unexpired
+// dilution block, or (false, "") otherwise. Eviction is lazy: an expired
+// entry is removed on read.
+//
+// Fail-closed semantics: if the trading calendar is unavailable (empty), the
+// block is preserved rather than dropped. This is the safe direction for a
+// capital-protection filter — we'd rather over-suppress than miss a real
+// dilution event during a calendar outage.
+func (s *SECEdgarService) IsDilutionBlocked(ticker string) (bool, string) {
+	s.dilutionMu.RLock()
+	entry, ok := s.dilutionBlocks[ticker]
+	s.dilutionMu.RUnlock()
+	if !ok {
+		return false, ""
+	}
+
+	var calendar []AlpacaCalendarEntry
+	if s.earnings != nil {
+		calendar = s.earnings.Calendar()
+	}
+	if len(calendar) == 0 {
+		// Fail-closed: keep blocking when we can't compute eviction.
+		return true, dilutionReason(entry, -1)
+	}
+
+	now := s.nowFunc()
+	nowDate := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+	filedDate := time.Date(entry.FiledAt.Year(), entry.FiledAt.Month(), entry.FiledAt.Day(), 0, 0, 0, 0, entry.FiledAt.Location())
+	distance := tradingDayDistance(filedDate, nowDate, calendar)
+	window := dilutionTakedownWindowDays
+	if entry.Bucket == "shelf" {
+		window = dilutionShelfWindowDays
+	}
+	if distance > window {
+		s.dilutionMu.Lock()
+		delete(s.dilutionBlocks, ticker)
+		s.dilutionMu.Unlock()
+		return false, ""
+	}
+	return true, dilutionReason(entry, distance)
+}
+
+// dilutionReason builds a human-readable string for log lines and
+// log_decision audit trails. distance < 0 means "calendar unavailable".
+func dilutionReason(e dilutionEntry, distance int) string {
+	if distance < 0 {
+		return fmt.Sprintf("%s %s filing (calendar unavailable)", e.FormType, e.Bucket)
+	}
+	return fmt.Sprintf("%s %s filed %d trading days ago", e.FormType, e.Bucket, distance)
 }
