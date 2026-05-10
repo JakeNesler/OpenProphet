@@ -5,6 +5,7 @@ import (
 	"encoding/xml"
 	"fmt"
 	"net/http"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -12,6 +13,11 @@ import (
 	"github.com/sirupsen/logrus"
 	"golang.org/x/net/html/charset"
 )
+
+// atmWordRegex matches "ATM" as a whole word (not as a substring of TREATMENT,
+// STATEMENT, etc.). Used for word-boundary keyword matching in the dilution
+// heuristic; see containsKeyword.
+var atmWordRegex = regexp.MustCompile(`\bATM\b`)
 
 const regulatoryRefreshInterval = 30 * time.Second
 const regulatoryHalfLifeHours = 24.0
@@ -514,9 +520,20 @@ func (s *SECEdgarService) scanHeuristic8Ks(entries []atomEntry, tickers map[stri
 		s.logger.WithFields(logrus.Fields{
 			"ticker":          ticker,
 			"matched_pattern": matched.itemMarker,
-			"source":          "heuristic",
-		}).Warn("dilution block created from 8-K heuristic")
+			"detector":        "heuristic",
+		}).Info("8-K heuristic matched")
 	}
+}
+
+// containsKeyword reports whether text contains the keyword. For short
+// acronym keywords (currently just "ATM") it uses a word-boundary regex
+// to avoid substring false positives like TREATMENT/STATEMENT/BATMAN.
+// All other keywords use plain substring matching.
+func containsKeyword(text, keyword string) bool {
+	if keyword == "ATM" {
+		return atmWordRegex.MatchString(text)
+	}
+	return strings.Contains(text, keyword)
 }
 
 // matchDilution8K returns the first matching pattern, or nil. text must be
@@ -531,7 +548,7 @@ func matchDilution8K(text string) *dilution8KPattern {
 			return p
 		}
 		for _, kw := range p.keywordsAny {
-			if strings.Contains(text, kw) {
+			if containsKeyword(text, kw) {
 				return p
 			}
 		}

@@ -702,3 +702,84 @@ func TestHeuristic8K_VagueFinancingNotBlocked(t *testing.T) {
 		t.Errorf("vague 'Strategic financing update' must not block (heuristic limitation); got %d blocks", len(svc.dilutionBlocks))
 	}
 }
+
+// Acknowledged limitation: the WARRANT keyword in dilution8KPatterns is
+// broad — "Item 8.01 Warrant exercise" or "Warrant expiration" can match
+// even though they are not new dilution events. This test documents
+// CURRENT behavior (block fires) so future tightening of the keyword list
+// is an explicit decision, not a silent semantic change.
+func TestHeuristic8K_Item801WarrantExercise_DocumentsCurrentBehavior(t *testing.T) {
+	const body = `<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <entry>
+    <title>8-K - ABCD CORP (0001234567) (Filer)</title>
+    <updated>2026-05-09T16:42:00-04:00</updated>
+    <summary>Item 8.01 Warrant exercise notification</summary>
+  </entry>
+</feed>`
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(body))
+	}))
+	defer ts.Close()
+
+	svc := newTestEdgarWithCalendar([]AlpacaCalendarEntry{{Date: "2026-05-10"}})
+	svc.httpClient = ts.Client()
+	entries, _ := svc.fetchAtom(ts.URL)
+	svc.scanHeuristic8Ks(entries, map[string]bool{"ABCD": true})
+
+	if _, ok := svc.dilutionBlocks["ABCD"]; !ok {
+		t.Error("WARRANT keyword currently matches; if you intentionally tighten the heuristic, update this test")
+	}
+}
+
+func TestHeuristic8K_AtmWordBoundary_DoesNotMatchTreatment(t *testing.T) {
+	// Regression guard for the ATM substring false-positive: "TREATMENT"
+	// contains "ATM" as a substring. Word-boundary matching must reject this.
+	const body = `<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <entry>
+    <title>8-K - ABCD CORP (0001234567) (Filer)</title>
+    <updated>2026-05-09T16:42:00-04:00</updated>
+    <summary>Commencement of clinical treatment program for novel therapy</summary>
+  </entry>
+</feed>`
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(body))
+	}))
+	defer ts.Close()
+
+	svc := newTestEdgarWithCalendar([]AlpacaCalendarEntry{{Date: "2026-05-10"}})
+	svc.httpClient = ts.Client()
+	entries, _ := svc.fetchAtom(ts.URL)
+	svc.scanHeuristic8Ks(entries, map[string]bool{"ABCD": true})
+
+	if len(svc.dilutionBlocks) != 0 {
+		t.Errorf("'TREATMENT' must not match the ATM keyword via substring; got %d blocks", len(svc.dilutionBlocks))
+	}
+}
+
+func TestHeuristic8K_AtmWordBoundary_MatchesRealAtm(t *testing.T) {
+	// Confirms word-boundary fix did not over-tighten — real ATM facility
+	// announcements still match.
+	const body = `<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <entry>
+    <title>8-K - ABCD CORP (0001234567) (Filer)</title>
+    <updated>2026-05-09T16:42:00-04:00</updated>
+    <summary>Commencement of ATM facility under existing shelf</summary>
+  </entry>
+</feed>`
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(body))
+	}))
+	defer ts.Close()
+
+	svc := newTestEdgarWithCalendar([]AlpacaCalendarEntry{{Date: "2026-05-10"}})
+	svc.httpClient = ts.Client()
+	entries, _ := svc.fetchAtom(ts.URL)
+	svc.scanHeuristic8Ks(entries, map[string]bool{"ABCD": true})
+
+	if _, ok := svc.dilutionBlocks["ABCD"]; !ok {
+		t.Error("real 'ATM facility' announcement should match the ATM keyword")
+	}
+}
