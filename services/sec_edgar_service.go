@@ -21,6 +21,7 @@ var atmWordRegex = regexp.MustCompile(`\bATM\b`)
 
 const regulatoryRefreshInterval = 30 * time.Second
 const regulatoryHalfLifeHours = 24.0
+const dilutionRefreshInterval = 5 * time.Minute
 
 type regulatoryEntry struct {
 	Entry     DecayEntry
@@ -85,8 +86,17 @@ func NewSECEdgarService(
 	}
 }
 
-// Start runs the polling loop until ctx is cancelled.
+// Start runs the polling loops until ctx is cancelled. Two goroutines:
+// (1) the existing 30s positive-signal poll (8-K + GlobeNewswire),
+// which now also piggybacks the 8-K dilution heuristic on the same fetch,
+// (2) a slower 5min dilution-form poll (S-1, S-3, 424, F-1, F-3) that
+// fans out concurrently across forms.
 func (s *SECEdgarService) Start(ctx context.Context) {
+	go s.runPositivePoll(ctx)
+	go s.runDilutionPoll(ctx)
+}
+
+func (s *SECEdgarService) runPositivePoll(ctx context.Context) {
 	s.poll()
 	ticker := time.NewTicker(regulatoryRefreshInterval)
 	defer ticker.Stop()
@@ -98,6 +108,42 @@ func (s *SECEdgarService) Start(ctx context.Context) {
 			s.poll()
 		}
 	}
+}
+
+func (s *SECEdgarService) runDilutionPoll(ctx context.Context) {
+	s.pollDilutionForms()
+	ticker := time.NewTicker(dilutionRefreshInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			s.pollDilutionForms()
+		}
+	}
+}
+
+// pollDilutionForms fans out one fetch per dilutionFormSpec concurrently and
+// applies each result. Failures of one form are isolated — others still apply.
+func (s *SECEdgarService) pollDilutionForms() {
+	tickers := tickerSet(s.universe.GetTickers())
+	if len(tickers) == 0 {
+		return
+	}
+	var wg sync.WaitGroup
+	for _, spec := range dilutionFormSpecs {
+		wg.Add(1)
+		go func(sp dilutionFormSpec) {
+			defer wg.Done()
+			url := fmt.Sprintf(
+				"https://www.sec.gov/cgi-bin/browse-edgar?action=getcurrent&type=%s&dateb=&owner=include&count=40&search_text=&output=atom",
+				sp.queryType,
+			)
+			s.applyDilutionFiling(sp.queryType, sp.bucket, url, tickers)
+		}(spec)
+	}
+	wg.Wait()
 }
 
 // GetRegulatoryScore returns the current decayed regulatory score and event description.
@@ -236,6 +282,9 @@ func (s *SECEdgarService) pollEdgar(tickers map[string]bool) (fallbacks, total i
 		s.logger.WithError(err).Warn("SECEdgarService: EDGAR poll failed")
 		return 0, 0
 	}
+	// Heuristic 8-K dilution scan piggybacks on the same fetched entries.
+	s.scanHeuristic8Ks(entries, tickers)
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, entry := range entries {
