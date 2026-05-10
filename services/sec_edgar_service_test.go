@@ -14,6 +14,25 @@ func newTestEdgar() *SECEdgarService {
 	return &SECEdgarService{
 		entries: make(map[string]regulatoryEntry),
 		logger:  logrus.New(),
+		nowFunc: time.Now,
+	}
+}
+
+func TestSECEdgarService_NowFunc_DefaultIsTimeNow(t *testing.T) {
+	svc := NewSECEdgarService(nil, nil, "test@example.com", nil)
+	got := svc.nowFunc()
+	if time.Since(got) > 5*time.Second {
+		t.Errorf("default nowFunc returned %v, expected ~time.Now()", got)
+	}
+}
+
+func TestSECEdgarService_NowFunc_Override(t *testing.T) {
+	fixed := time.Date(2026, 5, 10, 12, 0, 0, 0, time.UTC)
+	svc := NewSECEdgarService(nil, nil, "test@example.com", nil)
+	svc.nowFunc = func() time.Time { return fixed }
+	got := svc.nowFunc()
+	if !got.Equal(fixed) {
+		t.Errorf("expected fixed time, got %v", got)
 	}
 }
 
@@ -40,6 +59,7 @@ func TestSECEdgarService_GetRegulatoryScore_Decay(t *testing.T) {
 	svc := &SECEdgarService{
 		entries: make(map[string]regulatoryEntry),
 		logger:  logrus.New(),
+		nowFunc: time.Now,
 	}
 	svc.entries["TICK"] = regulatoryEntry{
 		Entry:     DecayEntry{BaseScore: 40.0, EventTime: time.Now(), HalfLifeHrs: regulatoryHalfLifeHours},
@@ -55,7 +75,11 @@ func TestSECEdgarService_GetRegulatoryScore_Decay(t *testing.T) {
 }
 
 func TestSECEdgarService_UpsertEntry_KeepsHigher(t *testing.T) {
-	svc := &SECEdgarService{entries: make(map[string]regulatoryEntry), logger: logrus.New()}
+	svc := &SECEdgarService{
+		entries: make(map[string]regulatoryEntry),
+		logger:  logrus.New(),
+		nowFunc: time.Now,
+	}
 	now := time.Now()
 	svc.upsertEntry("T", 25.0, now, "pr wire")
 	svc.upsertEntry("T", 40.0, now, "8-K")
@@ -74,7 +98,7 @@ func TestSECEdgarService_FetchAtom_NonOK(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	svc := NewSECEdgarService(nil, ts.Client(), "test@example.com")
+	svc := NewSECEdgarService(nil, ts.Client(), "test@example.com", nil)
 	entries, err := svc.fetchAtom(ts.URL)
 	if err == nil {
 		t.Error("expected error for non-200 response, got nil")
@@ -90,7 +114,7 @@ func TestSECEdgarService_FetchRSS_NonOK(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	svc := NewSECEdgarService(nil, ts.Client(), "test@example.com")
+	svc := NewSECEdgarService(nil, ts.Client(), "test@example.com", nil)
 	items, err := svc.fetchRSS(ts.URL)
 	if err == nil {
 		t.Error("expected error for non-200 response, got nil")
@@ -121,7 +145,7 @@ func TestSECEdgarService_FetchRSS_ParsesTwoItems(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	svc := NewSECEdgarService(nil, ts.Client(), "test@example.com")
+	svc := NewSECEdgarService(nil, ts.Client(), "test@example.com", nil)
 	tickers := map[string]bool{"ACME": true}
 	// Override the URL by calling the internal method with our tickers
 	// We'll test via pollGlobeNewswire by temporarily injecting — but since

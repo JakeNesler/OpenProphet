@@ -29,10 +29,20 @@ type SECEdgarService struct {
 	mu            sync.RWMutex
 	entries       map[string]regulatoryEntry // keyed by ticker; keeps highest-score entry
 	logger        *logrus.Logger
+	nowFunc       func() time.Time
+	earnings      *EarningsCalendarService
 }
 
-// NewSECEdgarService creates the service.
-func NewSECEdgarService(universe *PennyUniverseService, httpClient *http.Client, operatorEmail string) *SECEdgarService {
+// NewSECEdgarService creates the service. The earnings parameter provides
+// access to the cached Alpaca trading calendar (via earnings.Calendar()) for
+// trading-day eviction in the dilution filter; pass nil only in tests that do
+// not exercise dilution-filter eviction.
+func NewSECEdgarService(
+	universe *PennyUniverseService,
+	httpClient *http.Client,
+	operatorEmail string,
+	earnings *EarningsCalendarService,
+) *SECEdgarService {
 	if httpClient == nil {
 		httpClient = &http.Client{Timeout: 30 * time.Second}
 	}
@@ -44,6 +54,8 @@ func NewSECEdgarService(universe *PennyUniverseService, httpClient *http.Client,
 		operatorEmail: operatorEmail,
 		entries:       make(map[string]regulatoryEntry),
 		logger:        logger,
+		nowFunc:       time.Now,
+		earnings:      earnings,
 	}
 }
 
