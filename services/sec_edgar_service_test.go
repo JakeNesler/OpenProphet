@@ -818,3 +818,75 @@ func TestHeuristic8K_AtmWordBoundary_MatchesRealAtm(t *testing.T) {
 		t.Error("real 'ATM facility' announcement should match the ATM keyword")
 	}
 }
+
+// I1 regression: dilution block on a ticker the agent already holds must
+// emit an ERROR-level log line for operator review. The block is still
+// created (no auto-exit), but the operator must be notified.
+func TestUpsertDilutionBlock_HeldPositionLogsError(t *testing.T) {
+	svc := newTestEdgarWithCalendar([]AlpacaCalendarEntry{{Date: "2026-05-10"}})
+
+	// Capture log entries via a logrus test hook.
+	hook := &logCaptureHook{}
+	svc.logger.AddHook(hook)
+	svc.logger.SetLevel(logrus.DebugLevel)
+
+	svc.SetHeldTickersFn(func() map[string]bool {
+		return map[string]bool{"HELD": true}
+	})
+
+	svc.upsertDilutionBlock("HELD", "S-1", "takedown", time.Now(), "https://example.com")
+
+	// Expect at least one ERROR-level entry mentioning HELD position.
+	var sawError bool
+	for _, e := range hook.entries {
+		if e.Level == logrus.ErrorLevel && strings.Contains(e.Message, "HELD position") {
+			sawError = true
+			break
+		}
+	}
+	if !sawError {
+		t.Errorf("expected ERROR log mentioning 'HELD position'; got entries: %+v", hook.entries)
+	}
+}
+
+func TestUpsertDilutionBlock_NotHeldDoesNotLogError(t *testing.T) {
+	svc := newTestEdgarWithCalendar([]AlpacaCalendarEntry{{Date: "2026-05-10"}})
+
+	hook := &logCaptureHook{}
+	svc.logger.AddHook(hook)
+	svc.logger.SetLevel(logrus.DebugLevel)
+
+	svc.SetHeldTickersFn(func() map[string]bool {
+		return map[string]bool{"OTHER": true}
+	})
+
+	svc.upsertDilutionBlock("ABCD", "S-1", "takedown", time.Now(), "")
+
+	for _, e := range hook.entries {
+		if e.Level == logrus.ErrorLevel {
+			t.Errorf("did not expect ERROR log when ticker is not held; got %q", e.Message)
+		}
+	}
+}
+
+func TestUpsertDilutionBlock_NilHeldTickersFnDoesNotPanic(t *testing.T) {
+	svc := newTestEdgarWithCalendar([]AlpacaCalendarEntry{{Date: "2026-05-10"}})
+	// heldTickersFn intentionally not set — must be nil-safe.
+	svc.upsertDilutionBlock("ABCD", "S-1", "takedown", time.Now(), "")
+	// Reaching here without panic is the assertion.
+}
+
+// logCaptureHook is a test-only logrus hook that captures all entries.
+type logCaptureHook struct {
+	entries []logrus.Entry
+}
+
+func (h *logCaptureHook) Levels() []logrus.Level {
+	return logrus.AllLevels
+}
+
+func (h *logCaptureHook) Fire(e *logrus.Entry) error {
+	cp := *e
+	h.entries = append(h.entries, cp)
+	return nil
+}

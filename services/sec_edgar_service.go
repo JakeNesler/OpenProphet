@@ -57,6 +57,13 @@ type SECEdgarService struct {
 
 	dilutionMu     sync.RWMutex
 	dilutionBlocks map[string]dilutionEntry
+
+	// heldTickersFn, if non-nil, is consulted on each new dilution block to
+	// detect blocks landing on held positions. Called inside upsertDilutionBlock
+	// while holding dilutionMu — implementations MUST NOT take any lock that
+	// is itself acquired before dilutionMu (no back-edge into the aggregator).
+	// Set once at startup via SetHeldTickersFn before Start() is called.
+	heldTickersFn func() map[string]bool
 }
 
 // NewSECEdgarService creates the service. The earnings parameter provides
@@ -430,6 +437,14 @@ func (s *SECEdgarService) IsDilutionBlocked(ticker string) (bool, string) {
 	return true, dilutionReason(entry, distance)
 }
 
+// SetHeldTickersFn registers a callback that returns currently-held penny
+// tickers. The callback is consulted inside upsertDilutionBlock; if a new
+// block lands on a held ticker, an ERROR-level log line is emitted to the
+// operator review channel. Pass nil to disable. Set once at startup.
+func (s *SECEdgarService) SetHeldTickersFn(fn func() map[string]bool) {
+	s.heldTickersFn = fn
+}
+
 // dilutionReason builds a human-readable string for log lines and
 // log_decision audit trails. distance < 0 means "calendar unavailable".
 func dilutionReason(e dilutionEntry, distance int) string {
@@ -635,4 +650,14 @@ func (s *SECEdgarService) upsertDilutionBlock(ticker, formType, bucket string, f
 		"filed_at": filedAt.Format(time.RFC3339),
 		"source":   sourceURL,
 	}).Warn("dilution block created")
+
+	if s.heldTickersFn != nil {
+		if held := s.heldTickersFn(); held != nil && held[ticker] {
+			s.logger.WithFields(logrus.Fields{
+				"ticker": ticker,
+				"form":   formType,
+				"bucket": bucket,
+			}).Error("dilution block on HELD position — operator review required (no auto-exit)")
+		}
+	}
 }

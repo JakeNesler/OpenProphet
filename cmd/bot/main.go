@@ -171,6 +171,9 @@ func main() {
 	pennyAggregator := services.NewPennySignalAggregator(pennyUniverseService, pennyScreenerService, secEdgarService, socialSignalService)
 	pennyController := controllers.NewPennyController(pennyAggregator)
 
+	// Wire dilution filter to operator-visible held-position logging.
+	secEdgarService.SetHeldTickersFn(positionManager.HeldPennyTickers)
+
 	// Start penny pipeline goroutines
 	go pennyUniverseService.Start(ctx)
 	go pennyScreenerService.Start(ctx)
