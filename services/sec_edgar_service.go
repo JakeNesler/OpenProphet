@@ -437,6 +437,108 @@ func extractFormFromTitle(title, fallback string) string {
 	return fallback
 }
 
+// dilution8KPattern is one rule in the day-1 8-K item-number heuristic.
+// itemMarker (e.g. "ITEM 3.02") is required; if any of keywordsAny is empty,
+// the item marker alone fires the block.
+type dilution8KPattern struct {
+	itemMarker  string
+	keywordsAny []string // empty means "marker alone is enough"
+	formTag     string   // for log + FormType field, e.g. "8-K-3.02"
+}
+
+// dilution8KPatterns is the canonical match table for the 8-K dilution
+// heuristic. Documented in docs/superpowers/specs/2026-05-10-pennyprophet-dilution-filter-design.md.
+var dilution8KPatterns = []dilution8KPattern{
+	{
+		itemMarker: "ITEM 1.01",
+		keywordsAny: []string{
+			"SECURITIES PURCHASE AGREEMENT",
+			"EQUITY PURCHASE",
+			"STANDBY EQUITY",
+			"ATM OFFERING",
+			"AT-THE-MARKET",
+			"REGISTERED DIRECT",
+			"SHELF TAKEDOWN",
+		},
+		formTag: "8-K-1.01",
+	},
+	{
+		itemMarker:  "ITEM 3.02",
+		keywordsAny: nil, // 3.02 is unambiguously dilutive
+		formTag:     "8-K-3.02",
+	},
+	{
+		itemMarker: "ITEM 8.01",
+		keywordsAny: []string{
+			"PUBLIC OFFERING",
+			"PRIVATE PLACEMENT",
+			"PIPE FINANCING",
+			"WARRANT",
+			"CONVERTIBLE NOTE",
+		},
+		formTag: "8-K-8.01",
+	},
+	{
+		itemMarker:  "PRICING OF",
+		keywordsAny: []string{"PUBLIC OFFERING"},
+		formTag:     "8-K-pricing",
+	},
+	{
+		itemMarker:  "COMMENCEMENT OF",
+		keywordsAny: []string{"ATM"},
+		formTag:     "8-K-commencement",
+	},
+}
+
+// scanHeuristic8Ks applies the dilution8KPatterns table to a slice of already-
+// fetched 8-K atom entries. Designed to piggyback on the existing 8-K poll —
+// callers fetch once, then run both the positive-signal scan (existing
+// pollEdgar) and this dilution scan on the same in-memory entries.
+func (s *SECEdgarService) scanHeuristic8Ks(entries []atomEntry, tickers map[string]bool) {
+	for _, e := range entries {
+		ticker := extractTickerFromTitle(e.Title, tickers)
+		if ticker == "" {
+			continue
+		}
+		text := strings.ToUpper(e.Title + " " + e.Summary)
+		matched := matchDilution8K(text)
+		if matched == nil {
+			continue
+		}
+		filedAt, isFallback := parseAtomDate(e.Updated)
+		if isFallback {
+			s.logger.Warnf("dilution heuristic: skipping %s — unparseable timestamp %q", ticker, e.Updated)
+			continue
+		}
+		s.upsertDilutionBlock(ticker, matched.formTag, "takedown", filedAt, "")
+		s.logger.WithFields(logrus.Fields{
+			"ticker":          ticker,
+			"matched_pattern": matched.itemMarker,
+			"source":          "heuristic",
+		}).Warn("dilution block created from 8-K heuristic")
+	}
+}
+
+// matchDilution8K returns the first matching pattern, or nil. text must be
+// uppercased by the caller.
+func matchDilution8K(text string) *dilution8KPattern {
+	for i := range dilution8KPatterns {
+		p := &dilution8KPatterns[i]
+		if !strings.Contains(text, p.itemMarker) {
+			continue
+		}
+		if len(p.keywordsAny) == 0 {
+			return p
+		}
+		for _, kw := range p.keywordsAny {
+			if strings.Contains(text, kw) {
+				return p
+			}
+		}
+	}
+	return nil
+}
+
 // upsertDilutionBlock writes a dilution entry, applying the replacement rule:
 // takedown beats shelf (never downgrade); same bucket replaces (refreshes
 // window); shelf does not replace an existing takedown.

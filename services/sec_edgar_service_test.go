@@ -606,3 +606,99 @@ func TestPollDilutionForms_TakedownReplacesShelf(t *testing.T) {
 		t.Error("takedown filing must replace an active shelf block")
 	}
 }
+
+func TestHeuristic8K_Item302Always(t *testing.T) {
+	body := loadFixture(t, "8k-item-302-fixture.atom")
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(body))
+	}))
+	defer ts.Close()
+
+	svc := newTestEdgarWithCalendar([]AlpacaCalendarEntry{{Date: "2026-05-10"}})
+	svc.httpClient = ts.Client()
+	entries, err := svc.fetchAtom(ts.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc.scanHeuristic8Ks(entries, map[string]bool{"ABCD": true})
+
+	if _, ok := svc.dilutionBlocks["ABCD"]; !ok {
+		t.Error("expected Item 3.02 to trigger heuristic block")
+	}
+	if svc.dilutionBlocks["ABCD"].Bucket != "takedown" {
+		t.Errorf("expected bucket=takedown, got %q", svc.dilutionBlocks["ABCD"].Bucket)
+	}
+	if !strings.HasPrefix(svc.dilutionBlocks["ABCD"].FormType, "8-K-3.02") {
+		t.Errorf("expected FormType prefix 8-K-3.02, got %q", svc.dilutionBlocks["ABCD"].FormType)
+	}
+}
+
+func TestHeuristic8K_Item101WithSPA(t *testing.T) {
+	body := loadFixture(t, "8k-item-101-spa-fixture.atom")
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(body))
+	}))
+	defer ts.Close()
+
+	svc := newTestEdgarWithCalendar([]AlpacaCalendarEntry{{Date: "2026-05-10"}})
+	svc.httpClient = ts.Client()
+	entries, _ := svc.fetchAtom(ts.URL)
+	svc.scanHeuristic8Ks(entries, map[string]bool{"ABCD": true})
+
+	if _, ok := svc.dilutionBlocks["ABCD"]; !ok {
+		t.Error("expected Item 1.01 + SPA to trigger heuristic block")
+	}
+}
+
+func TestHeuristic8K_Item101AssetPurchaseNotBlocked(t *testing.T) {
+	body := loadFixture(t, "8k-item-101-asset-purchase-fixture.atom")
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(body))
+	}))
+	defer ts.Close()
+
+	svc := newTestEdgarWithCalendar([]AlpacaCalendarEntry{{Date: "2026-05-10"}})
+	svc.httpClient = ts.Client()
+	entries, _ := svc.fetchAtom(ts.URL)
+	svc.scanHeuristic8Ks(entries, map[string]bool{"ABCD": true})
+
+	if len(svc.dilutionBlocks) != 0 {
+		t.Errorf("Asset Purchase Agreement under Item 1.01 must not block; got %d blocks", len(svc.dilutionBlocks))
+	}
+}
+
+func TestHeuristic8K_Item101LicensingNotBlocked(t *testing.T) {
+	body := loadFixture(t, "8k-item-101-licensing-fixture.atom")
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(body))
+	}))
+	defer ts.Close()
+
+	svc := newTestEdgarWithCalendar([]AlpacaCalendarEntry{{Date: "2026-05-10"}})
+	svc.httpClient = ts.Client()
+	entries, _ := svc.fetchAtom(ts.URL)
+	svc.scanHeuristic8Ks(entries, map[string]bool{"ABCD": true})
+
+	if len(svc.dilutionBlocks) != 0 {
+		t.Errorf("software licensing under Item 1.01 must not block; got %d blocks", len(svc.dilutionBlocks))
+	}
+}
+
+func TestHeuristic8K_VagueFinancingNotBlocked(t *testing.T) {
+	body := loadFixture(t, "8k-vague-financing-fixture.atom")
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(body))
+	}))
+	defer ts.Close()
+
+	svc := newTestEdgarWithCalendar([]AlpacaCalendarEntry{{Date: "2026-05-10"}})
+	svc.httpClient = ts.Client()
+	entries, _ := svc.fetchAtom(ts.URL)
+	svc.scanHeuristic8Ks(entries, map[string]bool{"ABCD": true})
+
+	// Documents the acknowledged false negative — vague financing titles
+	// without item numbers or trigger keywords are not caught by v1 heuristic.
+	if len(svc.dilutionBlocks) != 0 {
+		t.Errorf("vague 'Strategic financing update' must not block (heuristic limitation); got %d blocks", len(svc.dilutionBlocks))
+	}
+}
