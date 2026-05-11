@@ -2306,6 +2306,13 @@ function addTradeCard(trade) {
   while(feed.children.length > 50) feed.removeChild(feed.lastChild);
 }
 
+function toggleTradeCard(card, ev) {
+  // Ignore clicks that are part of a text selection drag.
+  const sel = window.getSelection && window.getSelection();
+  if (sel && sel.toString && sel.toString().length > 0) return;
+  card.classList.toggle('is-expanded');
+}
+
 // ── Render config panels ───────────────────
 function renderAll() {
   renderSandboxSelector();
