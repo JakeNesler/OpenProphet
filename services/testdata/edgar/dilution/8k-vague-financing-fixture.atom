@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Documents an acknowledged false-negative: a vague 8-K title with no
+  item number and no trigger keywords will not be caught by the day-1
+  heuristic. This fixture proves the heuristic does not over-fire on
+  ambiguous titles. v2 (8-K body fetch) would catch this.
+-->
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <title>Latest filings</title>
+  <entry>
+    <title>8-K - ABCD CORP (0001234567) (Filer)</title>
+    <updated>2026-05-09T16:42:00-04:00</updated>
+    <summary>Strategic financing update</summary>
+  </entry>
+</feed>

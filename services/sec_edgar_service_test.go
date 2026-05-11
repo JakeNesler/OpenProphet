@@ -3,6 +3,8 @@ package services
 import (
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -14,6 +16,25 @@ func newTestEdgar() *SECEdgarService {
 	return &SECEdgarService{
 		entries: make(map[string]regulatoryEntry),
 		logger:  logrus.New(),
+		nowFunc: time.Now,
+	}
+}
+
+func TestSECEdgarService_NowFunc_DefaultIsTimeNow(t *testing.T) {
+	svc := NewSECEdgarService(nil, nil, "test@example.com", nil)
+	got := svc.nowFunc()
+	if time.Since(got) > 5*time.Second {
+		t.Errorf("default nowFunc returned %v, expected ~time.Now()", got)
+	}
+}
+
+func TestSECEdgarService_NowFunc_Override(t *testing.T) {
+	fixed := time.Date(2026, 5, 10, 12, 0, 0, 0, time.UTC)
+	svc := NewSECEdgarService(nil, nil, "test@example.com", nil)
+	svc.nowFunc = func() time.Time { return fixed }
+	got := svc.nowFunc()
+	if !got.Equal(fixed) {
+		t.Errorf("expected fixed time, got %v", got)
 	}
 }
 
@@ -40,6 +61,7 @@ func TestSECEdgarService_GetRegulatoryScore_Decay(t *testing.T) {
 	svc := &SECEdgarService{
 		entries: make(map[string]regulatoryEntry),
 		logger:  logrus.New(),
+		nowFunc: time.Now,
 	}
 	svc.entries["TICK"] = regulatoryEntry{
 		Entry:     DecayEntry{BaseScore: 40.0, EventTime: time.Now(), HalfLifeHrs: regulatoryHalfLifeHours},
@@ -55,7 +77,11 @@ func TestSECEdgarService_GetRegulatoryScore_Decay(t *testing.T) {
 }
 
 func TestSECEdgarService_UpsertEntry_KeepsHigher(t *testing.T) {
-	svc := &SECEdgarService{entries: make(map[string]regulatoryEntry), logger: logrus.New()}
+	svc := &SECEdgarService{
+		entries: make(map[string]regulatoryEntry),
+		logger:  logrus.New(),
+		nowFunc: time.Now,
+	}
 	now := time.Now()
 	svc.upsertEntry("T", 25.0, now, "pr wire")
 	svc.upsertEntry("T", 40.0, now, "8-K")
@@ -74,7 +100,7 @@ func TestSECEdgarService_FetchAtom_NonOK(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	svc := NewSECEdgarService(nil, ts.Client(), "test@example.com")
+	svc := NewSECEdgarService(nil, ts.Client(), "test@example.com", nil)
 	entries, err := svc.fetchAtom(ts.URL)
 	if err == nil {
 		t.Error("expected error for non-200 response, got nil")
@@ -90,7 +116,7 @@ func TestSECEdgarService_FetchRSS_NonOK(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	svc := NewSECEdgarService(nil, ts.Client(), "test@example.com")
+	svc := NewSECEdgarService(nil, ts.Client(), "test@example.com", nil)
 	items, err := svc.fetchRSS(ts.URL)
 	if err == nil {
 		t.Error("expected error for non-200 response, got nil")
@@ -121,7 +147,7 @@ func TestSECEdgarService_FetchRSS_ParsesTwoItems(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	svc := NewSECEdgarService(nil, ts.Client(), "test@example.com")
+	svc := NewSECEdgarService(nil, ts.Client(), "test@example.com", nil)
 	tickers := map[string]bool{"ACME": true}
 	// Override the URL by calling the internal method with our tickers
 	// We'll test via pollGlobeNewswire by temporarily injecting — but since
@@ -280,4 +306,587 @@ func TestSECEdgar_ParseAtomDate_FallbackSkipsUpsert(t *testing.T) {
 	if score != 0 {
 		t.Errorf("expected no entry for unparseable date, got score=%f", score)
 	}
+}
+
+func newTestEdgarWithCalendar(cal []AlpacaCalendarEntry) *SECEdgarService {
+	earnings := &EarningsCalendarService{
+		calendar: cal,
+		entries:  map[string]earningsEntry{},
+		logger:   logrus.New(),
+	}
+	return &SECEdgarService{
+		entries:        make(map[string]regulatoryEntry),
+		dilutionBlocks: make(map[string]dilutionEntry),
+		logger:         logrus.New(),
+		nowFunc:        time.Now,
+		earnings:       earnings,
+	}
+}
+
+func TestIsDilutionBlocked_UnknownTicker(t *testing.T) {
+	svc := newTestEdgarWithCalendar(nil)
+	blocked, reason := svc.IsDilutionBlocked("ZZZZ")
+	if blocked || reason != "" {
+		t.Errorf("expected (false, \"\"), got (%v, %q)", blocked, reason)
+	}
+}
+
+func TestIsDilutionBlocked_TakedownWithinWindow(t *testing.T) {
+	cal := []AlpacaCalendarEntry{
+		{Date: "2026-05-08"}, {Date: "2026-05-09"}, {Date: "2026-05-10"},
+		{Date: "2026-05-11"}, {Date: "2026-05-12"},
+	}
+	svc := newTestEdgarWithCalendar(cal)
+	now := time.Date(2026, 5, 10, 12, 0, 0, 0, time.UTC)
+	svc.nowFunc = func() time.Time { return now }
+	svc.dilutionBlocks["ABCD"] = dilutionEntry{
+		Ticker:    "ABCD",
+		FormType:  "S-1",
+		FiledAt:   time.Date(2026, 5, 9, 16, 0, 0, 0, time.UTC),
+		Bucket:    "takedown",
+		SourceURL: "https://www.sec.gov/x",
+	}
+	blocked, reason := svc.IsDilutionBlocked("ABCD")
+	if !blocked {
+		t.Fatal("expected ABCD to be blocked")
+	}
+	if !strings.Contains(reason, "S-1") {
+		t.Errorf("reason should mention form type, got %q", reason)
+	}
+}
+
+func TestIsDilutionBlocked_TakedownExpired(t *testing.T) {
+	cal := []AlpacaCalendarEntry{
+		{Date: "2026-05-04"}, {Date: "2026-05-05"}, {Date: "2026-05-06"},
+		{Date: "2026-05-07"}, {Date: "2026-05-08"}, {Date: "2026-05-09"},
+		{Date: "2026-05-10"},
+	}
+	svc := newTestEdgarWithCalendar(cal)
+	now := time.Date(2026, 5, 10, 12, 0, 0, 0, time.UTC)
+	svc.nowFunc = func() time.Time { return now }
+	// Filed 4 trading days ago (mon→fri = 4 trading days), 2-day takedown window.
+	svc.dilutionBlocks["ABCD"] = dilutionEntry{
+		Ticker:   "ABCD",
+		FormType: "S-1",
+		FiledAt:  time.Date(2026, 5, 4, 16, 0, 0, 0, time.UTC),
+		Bucket:   "takedown",
+	}
+	blocked, _ := svc.IsDilutionBlocked("ABCD")
+	if blocked {
+		t.Error("expected ABCD to be unblocked after window expiry")
+	}
+	// Verify lazy eviction removed the entry.
+	if _, ok := svc.dilutionBlocks["ABCD"]; ok {
+		t.Error("expected expired entry to be lazily evicted")
+	}
+}
+
+func TestIsDilutionBlocked_ShelfBucketLongerWindow(t *testing.T) {
+	cal := []AlpacaCalendarEntry{
+		{Date: "2026-05-05"}, {Date: "2026-05-06"}, {Date: "2026-05-07"},
+		{Date: "2026-05-08"}, {Date: "2026-05-09"}, {Date: "2026-05-10"},
+	}
+	svc := newTestEdgarWithCalendar(cal)
+	now := time.Date(2026, 5, 10, 12, 0, 0, 0, time.UTC)
+	svc.nowFunc = func() time.Time { return now }
+	// Filed 3 trading days ago: takedown would expire (>2), shelf still active (≤5).
+	svc.dilutionBlocks["ABCD"] = dilutionEntry{
+		Ticker:   "ABCD",
+		FormType: "S-3",
+		FiledAt:  time.Date(2026, 5, 5, 16, 0, 0, 0, time.UTC),
+		Bucket:   "shelf",
+	}
+	blocked, _ := svc.IsDilutionBlocked("ABCD")
+	if !blocked {
+		t.Error("expected ABCD shelf block to still be active 3 trading days in")
+	}
+}
+
+func TestIsDilutionBlocked_NoCalendarFailsClosed(t *testing.T) {
+	// When the trading calendar is empty, eviction can't compute correctly.
+	// Fail-closed: keep blocking. Capital protection direction.
+	svc := newTestEdgarWithCalendar(nil)
+	svc.dilutionBlocks["ABCD"] = dilutionEntry{
+		Ticker:   "ABCD",
+		FormType: "S-1",
+		FiledAt:  time.Now().Add(-90 * 24 * time.Hour),
+		Bucket:   "takedown",
+	}
+	blocked, _ := svc.IsDilutionBlocked("ABCD")
+	if !blocked {
+		t.Error("expected fail-closed (still blocked) when calendar is empty")
+	}
+}
+
+// Regression guard for C2: IsDilutionBlocked must compute the trading-day
+// distance using ET dates, not the system local timezone. On a UTC-running
+// production host, time.Now() at 02:00 UTC corresponds to 22:00 ET on the
+// prior trading day. If the eviction code uses UTC dates, it will compute
+// distance one day ahead of the ET-keyed trading calendar and evict blocks
+// ~5 hours early.
+func TestIsDilutionBlocked_UsesETDateForEviction(t *testing.T) {
+	// Mon 2026-05-11 03:00 UTC == Sun 2026-05-10 23:00 ET.
+	// In ET this is Sunday (no trading day yet) — not Monday yet.
+	// Calendar contains 2026-05-08 (Fri), 2026-05-11 (Mon).
+	// Filing happened 2026-05-08 (Fri ET).
+	// In ET trading days: distance Fri→pre-Mon-open = 0 trading days elapsed.
+	// In UTC if mistakenly used: distance would compute as 1 trading day.
+	cal := []AlpacaCalendarEntry{
+		{Date: "2026-05-04"}, {Date: "2026-05-05"}, {Date: "2026-05-06"},
+		{Date: "2026-05-07"}, {Date: "2026-05-08"},
+		{Date: "2026-05-11"}, {Date: "2026-05-12"}, {Date: "2026-05-13"},
+	}
+	svc := newTestEdgarWithCalendar(cal)
+	// Use a fixed UTC instant that is "Sunday late evening ET":
+	// 2026-05-11T03:00:00Z UTC = 2026-05-10T23:00:00 ET.
+	svc.nowFunc = func() time.Time { return time.Date(2026, 5, 11, 3, 0, 0, 0, time.UTC) }
+	// Filing on Friday 2026-05-08 16:00 ET = 2026-05-08T20:00 UTC.
+	svc.dilutionBlocks["ABCD"] = dilutionEntry{
+		Ticker:   "ABCD",
+		FormType: "S-1",
+		FiledAt:  time.Date(2026, 5, 8, 20, 0, 0, 0, time.UTC),
+		Bucket:   "takedown",
+	}
+	blocked, _ := svc.IsDilutionBlocked("ABCD")
+	if !blocked {
+		t.Error("filing on Fri ET, eviction-check at Sun-night ET → must still be blocked (0 trading days elapsed in ET); was UTC-day arithmetic used by mistake?")
+	}
+}
+
+func loadFixture(t *testing.T, name string) string {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join("testdata", "edgar", "dilution", name))
+	if err != nil {
+		t.Fatalf("read fixture %s: %v", name, err)
+	}
+	return string(b)
+}
+
+func TestPollDilutionForms_S1Block(t *testing.T) {
+	body := loadFixture(t, "s1-fixture.atom")
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/atom+xml")
+		w.Write([]byte(body))
+	}))
+	defer ts.Close()
+
+	svc := newTestEdgarWithCalendar([]AlpacaCalendarEntry{{Date: "2026-05-10"}})
+	svc.httpClient = ts.Client()
+	tickers := map[string]bool{"ABCD": true}
+
+	svc.applyDilutionFiling("S-1", "takedown", ts.URL, tickers)
+
+	svc.dilutionMu.RLock()
+	entry, ok := svc.dilutionBlocks["ABCD"]
+	svc.dilutionMu.RUnlock()
+	if !ok {
+		t.Fatal("expected ABCD to be blocked")
+	}
+	if entry.Bucket != "takedown" {
+		t.Errorf("expected bucket=takedown, got %q", entry.Bucket)
+	}
+	if entry.FormType != "S-1" {
+		t.Errorf("expected FormType=S-1, got %q", entry.FormType)
+	}
+}
+
+func TestPollDilutionForms_S3IsShelf(t *testing.T) {
+	body := loadFixture(t, "s3-shelf-fixture.atom")
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(body))
+	}))
+	defer ts.Close()
+
+	svc := newTestEdgarWithCalendar([]AlpacaCalendarEntry{{Date: "2026-05-10"}})
+	svc.httpClient = ts.Client()
+	svc.applyDilutionFiling("S-3", "shelf", ts.URL, map[string]bool{"ABCD": true})
+
+	svc.dilutionMu.RLock()
+	entry, ok := svc.dilutionBlocks["ABCD"]
+	svc.dilutionMu.RUnlock()
+	if !ok {
+		t.Fatal("expected ABCD to be blocked")
+	}
+	if entry.Bucket != "shelf" {
+		t.Errorf("expected bucket=shelf, got %q", entry.Bucket)
+	}
+}
+
+func TestPollDilutionForms_S3AmendmentStillShelf(t *testing.T) {
+	body := loadFixture(t, "s3-amendment-fixture.atom")
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(body))
+	}))
+	defer ts.Close()
+
+	svc := newTestEdgarWithCalendar([]AlpacaCalendarEntry{{Date: "2026-05-10"}})
+	svc.httpClient = ts.Client()
+	svc.applyDilutionFiling("S-3", "shelf", ts.URL, map[string]bool{"ABCD": true})
+
+	entry := svc.dilutionBlocks["ABCD"]
+	if entry.Bucket != "shelf" {
+		t.Errorf("S-3/A must remain in shelf bucket (not promoted to takedown), got %q", entry.Bucket)
+	}
+}
+
+func TestPollDilutionForms_424Takedown(t *testing.T) {
+	body := loadFixture(t, "424b5-fixture.atom")
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(body))
+	}))
+	defer ts.Close()
+
+	svc := newTestEdgarWithCalendar([]AlpacaCalendarEntry{{Date: "2026-05-10"}})
+	svc.httpClient = ts.Client()
+	svc.applyDilutionFiling("424", "takedown", ts.URL, map[string]bool{"ABCD": true})
+
+	entry := svc.dilutionBlocks["ABCD"]
+	if entry.Bucket != "takedown" {
+		t.Errorf("expected bucket=takedown for 424B5, got %q", entry.Bucket)
+	}
+}
+
+func TestPollDilutionForms_F1Takedown(t *testing.T) {
+	body := loadFixture(t, "f1-fixture.atom")
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(body))
+	}))
+	defer ts.Close()
+
+	svc := newTestEdgarWithCalendar([]AlpacaCalendarEntry{{Date: "2026-05-10"}})
+	svc.httpClient = ts.Client()
+	svc.applyDilutionFiling("F-1", "takedown", ts.URL, map[string]bool{"ABCD": true})
+
+	svc.dilutionMu.RLock()
+	entry, ok := svc.dilutionBlocks["ABCD"]
+	svc.dilutionMu.RUnlock()
+	if !ok {
+		t.Fatal("expected ABCD to be blocked by F-1 filing")
+	}
+	if entry.Bucket != "takedown" {
+		t.Errorf("expected bucket=takedown for F-1, got %q", entry.Bucket)
+	}
+	if entry.FormType != "F-1" {
+		t.Errorf("expected FormType=F-1, got %q", entry.FormType)
+	}
+}
+
+func TestPollDilutionForms_F3IsShelf(t *testing.T) {
+	body := loadFixture(t, "f3-fixture.atom")
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(body))
+	}))
+	defer ts.Close()
+
+	svc := newTestEdgarWithCalendar([]AlpacaCalendarEntry{{Date: "2026-05-10"}})
+	svc.httpClient = ts.Client()
+	svc.applyDilutionFiling("F-3", "shelf", ts.URL, map[string]bool{"ABCD": true})
+
+	svc.dilutionMu.RLock()
+	entry, ok := svc.dilutionBlocks["ABCD"]
+	svc.dilutionMu.RUnlock()
+	if !ok {
+		t.Fatal("expected ABCD to be blocked by F-3 filing")
+	}
+	if entry.Bucket != "shelf" {
+		t.Errorf("expected bucket=shelf for F-3 (foreign shelf), got %q", entry.Bucket)
+	}
+	if entry.FormType != "F-3" {
+		t.Errorf("expected FormType=F-3, got %q", entry.FormType)
+	}
+}
+
+func TestPollDilutionForms_NonUniverseIgnored(t *testing.T) {
+	body := loadFixture(t, "non-universe-ticker-fixture.atom")
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(body))
+	}))
+	defer ts.Close()
+
+	svc := newTestEdgarWithCalendar([]AlpacaCalendarEntry{{Date: "2026-05-10"}})
+	svc.httpClient = ts.Client()
+	svc.applyDilutionFiling("S-1", "takedown", ts.URL, map[string]bool{"ABCD": true})
+
+	if len(svc.dilutionBlocks) != 0 {
+		t.Errorf("non-universe ticker should not produce a block, got %d blocks", len(svc.dilutionBlocks))
+	}
+}
+
+func TestPollDilutionForms_ShelfDoesNotReplaceTakedown(t *testing.T) {
+	svc := newTestEdgarWithCalendar([]AlpacaCalendarEntry{{Date: "2026-05-10"}})
+	// Pre-seed a takedown.
+	svc.dilutionBlocks["ABCD"] = dilutionEntry{
+		Ticker:   "ABCD",
+		FormType: "S-1",
+		FiledAt:  time.Now(),
+		Bucket:   "takedown",
+	}
+	// Now apply a shelf filing — must not downgrade.
+	svc.upsertDilutionBlock("ABCD", "S-3", "shelf", time.Now(), "https://example.com")
+	if svc.dilutionBlocks["ABCD"].Bucket != "takedown" {
+		t.Error("shelf filing must not downgrade an active takedown block")
+	}
+}
+
+func TestPollDilutionForms_TakedownReplacesShelf(t *testing.T) {
+	svc := newTestEdgarWithCalendar([]AlpacaCalendarEntry{{Date: "2026-05-10"}})
+	svc.dilutionBlocks["ABCD"] = dilutionEntry{
+		Ticker:   "ABCD",
+		FormType: "S-3",
+		FiledAt:  time.Now(),
+		Bucket:   "shelf",
+	}
+	svc.upsertDilutionBlock("ABCD", "S-1", "takedown", time.Now(), "https://example.com")
+	if svc.dilutionBlocks["ABCD"].Bucket != "takedown" {
+		t.Error("takedown filing must replace an active shelf block")
+	}
+}
+
+func TestHeuristic8K_Item302Always(t *testing.T) {
+	body := loadFixture(t, "8k-item-302-fixture.atom")
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(body))
+	}))
+	defer ts.Close()
+
+	svc := newTestEdgarWithCalendar([]AlpacaCalendarEntry{{Date: "2026-05-10"}})
+	svc.httpClient = ts.Client()
+	entries, err := svc.fetchAtom(ts.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc.scanHeuristic8Ks(entries, map[string]bool{"ABCD": true})
+
+	if _, ok := svc.dilutionBlocks["ABCD"]; !ok {
+		t.Error("expected Item 3.02 to trigger heuristic block")
+	}
+	if svc.dilutionBlocks["ABCD"].Bucket != "takedown" {
+		t.Errorf("expected bucket=takedown, got %q", svc.dilutionBlocks["ABCD"].Bucket)
+	}
+	if !strings.HasPrefix(svc.dilutionBlocks["ABCD"].FormType, "8-K-3.02") {
+		t.Errorf("expected FormType prefix 8-K-3.02, got %q", svc.dilutionBlocks["ABCD"].FormType)
+	}
+}
+
+func TestHeuristic8K_Item101WithSPA(t *testing.T) {
+	body := loadFixture(t, "8k-item-101-spa-fixture.atom")
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(body))
+	}))
+	defer ts.Close()
+
+	svc := newTestEdgarWithCalendar([]AlpacaCalendarEntry{{Date: "2026-05-10"}})
+	svc.httpClient = ts.Client()
+	entries, _ := svc.fetchAtom(ts.URL)
+	svc.scanHeuristic8Ks(entries, map[string]bool{"ABCD": true})
+
+	if _, ok := svc.dilutionBlocks["ABCD"]; !ok {
+		t.Error("expected Item 1.01 + SPA to trigger heuristic block")
+	}
+}
+
+func TestHeuristic8K_Item101AssetPurchaseNotBlocked(t *testing.T) {
+	body := loadFixture(t, "8k-item-101-asset-purchase-fixture.atom")
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(body))
+	}))
+	defer ts.Close()
+
+	svc := newTestEdgarWithCalendar([]AlpacaCalendarEntry{{Date: "2026-05-10"}})
+	svc.httpClient = ts.Client()
+	entries, _ := svc.fetchAtom(ts.URL)
+	svc.scanHeuristic8Ks(entries, map[string]bool{"ABCD": true})
+
+	if len(svc.dilutionBlocks) != 0 {
+		t.Errorf("Asset Purchase Agreement under Item 1.01 must not block; got %d blocks", len(svc.dilutionBlocks))
+	}
+}
+
+func TestHeuristic8K_Item101LicensingNotBlocked(t *testing.T) {
+	body := loadFixture(t, "8k-item-101-licensing-fixture.atom")
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(body))
+	}))
+	defer ts.Close()
+
+	svc := newTestEdgarWithCalendar([]AlpacaCalendarEntry{{Date: "2026-05-10"}})
+	svc.httpClient = ts.Client()
+	entries, _ := svc.fetchAtom(ts.URL)
+	svc.scanHeuristic8Ks(entries, map[string]bool{"ABCD": true})
+
+	if len(svc.dilutionBlocks) != 0 {
+		t.Errorf("software licensing under Item 1.01 must not block; got %d blocks", len(svc.dilutionBlocks))
+	}
+}
+
+func TestHeuristic8K_VagueFinancingNotBlocked(t *testing.T) {
+	body := loadFixture(t, "8k-vague-financing-fixture.atom")
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(body))
+	}))
+	defer ts.Close()
+
+	svc := newTestEdgarWithCalendar([]AlpacaCalendarEntry{{Date: "2026-05-10"}})
+	svc.httpClient = ts.Client()
+	entries, _ := svc.fetchAtom(ts.URL)
+	svc.scanHeuristic8Ks(entries, map[string]bool{"ABCD": true})
+
+	// Documents the acknowledged false negative — vague financing titles
+	// without item numbers or trigger keywords are not caught by v1 heuristic.
+	if len(svc.dilutionBlocks) != 0 {
+		t.Errorf("vague 'Strategic financing update' must not block (heuristic limitation); got %d blocks", len(svc.dilutionBlocks))
+	}
+}
+
+// Acknowledged limitation: the WARRANT keyword in dilution8KPatterns is
+// broad — "Item 8.01 Warrant exercise" or "Warrant expiration" can match
+// even though they are not new dilution events. This test documents
+// CURRENT behavior (block fires) so future tightening of the keyword list
+// is an explicit decision, not a silent semantic change.
+func TestHeuristic8K_Item801WarrantExercise_DocumentsCurrentBehavior(t *testing.T) {
+	const body = `<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <entry>
+    <title>8-K - ABCD CORP (0001234567) (Filer)</title>
+    <updated>2026-05-09T16:42:00-04:00</updated>
+    <summary>Item 8.01 Warrant exercise notification</summary>
+  </entry>
+</feed>`
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(body))
+	}))
+	defer ts.Close()
+
+	svc := newTestEdgarWithCalendar([]AlpacaCalendarEntry{{Date: "2026-05-10"}})
+	svc.httpClient = ts.Client()
+	entries, _ := svc.fetchAtom(ts.URL)
+	svc.scanHeuristic8Ks(entries, map[string]bool{"ABCD": true})
+
+	if _, ok := svc.dilutionBlocks["ABCD"]; !ok {
+		t.Error("WARRANT keyword currently matches; if you intentionally tighten the heuristic, update this test")
+	}
+}
+
+func TestHeuristic8K_AtmWordBoundary_DoesNotMatchTreatment(t *testing.T) {
+	// Regression guard for the ATM substring false-positive: "TREATMENT"
+	// contains "ATM" as a substring. Word-boundary matching must reject this.
+	const body = `<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <entry>
+    <title>8-K - ABCD CORP (0001234567) (Filer)</title>
+    <updated>2026-05-09T16:42:00-04:00</updated>
+    <summary>Commencement of clinical treatment program for novel therapy</summary>
+  </entry>
+</feed>`
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(body))
+	}))
+	defer ts.Close()
+
+	svc := newTestEdgarWithCalendar([]AlpacaCalendarEntry{{Date: "2026-05-10"}})
+	svc.httpClient = ts.Client()
+	entries, _ := svc.fetchAtom(ts.URL)
+	svc.scanHeuristic8Ks(entries, map[string]bool{"ABCD": true})
+
+	if len(svc.dilutionBlocks) != 0 {
+		t.Errorf("'TREATMENT' must not match the ATM keyword via substring; got %d blocks", len(svc.dilutionBlocks))
+	}
+}
+
+func TestHeuristic8K_AtmWordBoundary_MatchesRealAtm(t *testing.T) {
+	// Confirms word-boundary fix did not over-tighten — real ATM facility
+	// announcements still match.
+	const body = `<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <entry>
+    <title>8-K - ABCD CORP (0001234567) (Filer)</title>
+    <updated>2026-05-09T16:42:00-04:00</updated>
+    <summary>Commencement of ATM facility under existing shelf</summary>
+  </entry>
+</feed>`
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(body))
+	}))
+	defer ts.Close()
+
+	svc := newTestEdgarWithCalendar([]AlpacaCalendarEntry{{Date: "2026-05-10"}})
+	svc.httpClient = ts.Client()
+	entries, _ := svc.fetchAtom(ts.URL)
+	svc.scanHeuristic8Ks(entries, map[string]bool{"ABCD": true})
+
+	if _, ok := svc.dilutionBlocks["ABCD"]; !ok {
+		t.Error("real 'ATM facility' announcement should match the ATM keyword")
+	}
+}
+
+// I1 regression: dilution block on a ticker the agent already holds must
+// emit an ERROR-level log line for operator review. The block is still
+// created (no auto-exit), but the operator must be notified.
+func TestUpsertDilutionBlock_HeldPositionLogsError(t *testing.T) {
+	svc := newTestEdgarWithCalendar([]AlpacaCalendarEntry{{Date: "2026-05-10"}})
+
+	// Capture log entries via a logrus test hook.
+	hook := &logCaptureHook{}
+	svc.logger.AddHook(hook)
+	svc.logger.SetLevel(logrus.DebugLevel)
+
+	svc.SetHeldTickersFn(func() map[string]bool {
+		return map[string]bool{"HELD": true}
+	})
+
+	svc.upsertDilutionBlock("HELD", "S-1", "takedown", time.Now(), "https://example.com")
+
+	// Expect at least one ERROR-level entry mentioning HELD position.
+	var sawError bool
+	for _, e := range hook.entries {
+		if e.Level == logrus.ErrorLevel && strings.Contains(e.Message, "HELD position") {
+			sawError = true
+			break
+		}
+	}
+	if !sawError {
+		t.Errorf("expected ERROR log mentioning 'HELD position'; got entries: %+v", hook.entries)
+	}
+}
+
+func TestUpsertDilutionBlock_NotHeldDoesNotLogError(t *testing.T) {
+	svc := newTestEdgarWithCalendar([]AlpacaCalendarEntry{{Date: "2026-05-10"}})
+
+	hook := &logCaptureHook{}
+	svc.logger.AddHook(hook)
+	svc.logger.SetLevel(logrus.DebugLevel)
+
+	svc.SetHeldTickersFn(func() map[string]bool {
+		return map[string]bool{"OTHER": true}
+	})
+
+	svc.upsertDilutionBlock("ABCD", "S-1", "takedown", time.Now(), "")
+
+	for _, e := range hook.entries {
+		if e.Level == logrus.ErrorLevel {
+			t.Errorf("did not expect ERROR log when ticker is not held; got %q", e.Message)
+		}
+	}
+}
+
+func TestUpsertDilutionBlock_NilHeldTickersFnDoesNotPanic(t *testing.T) {
+	svc := newTestEdgarWithCalendar([]AlpacaCalendarEntry{{Date: "2026-05-10"}})
+	// heldTickersFn intentionally not set — must be nil-safe.
+	svc.upsertDilutionBlock("ABCD", "S-1", "takedown", time.Now(), "")
+	// Reaching here without panic is the assertion.
+}
+
+// logCaptureHook is a test-only logrus hook that captures all entries.
+type logCaptureHook struct {
+	entries []logrus.Entry
+}
+
+func (h *logCaptureHook) Levels() []logrus.Level {
+	return logrus.AllLevels
+}
+
+func (h *logCaptureHook) Fire(e *logrus.Entry) error {
+	cp := *e
+	h.entries = append(h.entries, cp)
+	return nil
 }

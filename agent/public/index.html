@@ -884,7 +884,7 @@
     /* ── Trade Feed ──────────────────────── */
     .trade-card {
       background: var(--paper); border: 1px solid var(--rule); padding: 12px;
-      margin-bottom: 8px;
+      margin-bottom: 8px; cursor: pointer; transition: background 0.12s;
     }
     .trade-card .trade-header { display: flex; justify-content: space-between; align-items: center; }
     .trade-card .trade-symbol { font-weight: 700; color: var(--accent); font-size: 14px; }
@@ -894,6 +894,25 @@
     .trade-card .trade-side.close { color: var(--warning); }
     .trade-card .trade-details { font-size: 12px; color: var(--ink-muted); margin-top: 4px; }
     .trade-card .trade-time { font-size: 11px; color: var(--ink-faint); font-family: 'IBM Plex Mono', monospace; }
+    .trades-filter-row { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; font-size: 12px; color: var(--ink-muted); }
+    .trades-filter-row select { font-size: 12px; }
+    .trades-filter-count { font-size: 11px; color: var(--ink-faint); margin-left: auto; }
+
+    .trade-card:hover { background: var(--paper-dark); }
+    .trade-card .trade-chevron { display: inline-block; margin-left: 8px; transition: transform 0.18s; color: var(--ink-faint); font-size: 12px; }
+    .trade-card.is-expanded .trade-chevron { transform: rotate(180deg); }
+    .trade-card .trade-agent-badge {
+      display: inline-block; font-size: 10px; font-weight: 600; text-transform: uppercase;
+      padding: 2px 6px; margin-left: 8px; border: 1px solid var(--rule); border-radius: 4px;
+      color: var(--ink-muted); background: var(--surface-2, transparent);
+    }
+    .trade-card .trade-expanded {
+      display: none; margin-top: 10px; padding-top: 10px; border-top: 1px dashed var(--rule);
+      font-size: 12px; color: var(--ink-muted); font-family: 'IBM Plex Mono', monospace;
+    }
+    .trade-card .trade-expanded .trade-field { display: flex; gap: 8px; padding: 2px 0; }
+    .trade-card .trade-expanded .trade-field-label { color: var(--ink-faint); min-width: 90px; }
+    .trade-card.is-expanded .trade-expanded { display: block; }
 
     /* ── Modal ───────────────────────────── */
     .modal-overlay {
@@ -1049,6 +1068,13 @@
       <div class="settings-content">
         <h2>Live Trades</h2>
         <p class="subtitle">Real-time order activity from the agent</p>
+        <div class="trades-filter-row">
+          <label for="trades-agent-filter">Filter by agent</label>
+          <select id="trades-agent-filter" onchange="applyTradesFilter()">
+            <option value="__all__">All Agents</option>
+          </select>
+          <span class="trades-filter-count" id="trades-filter-count"></span>
+        </div>
         <div id="trades-feed"><div class="no-data">No trades yet. Start the agent to see live activity.</div></div>
       </div>
     </div>
@@ -1442,6 +1468,7 @@ let autoScroll = true;
 let nextBeatTime = null, heartbeatSeconds = 0, progressInterval = null;
 const _sbxActiveProfile = {}; // sandboxId → last applied profile id
 const _sbxHbExpanded = new Set(); // sandboxIds with heartbeat intervals panel open
+let _tradesAgentFilter = '__all__';
 const terminal = document.getElementById('terminal');
 
 terminal.addEventListener('scroll', () => {
@@ -2225,13 +2252,112 @@ function clearPortfolioView(sid) {
 function addTradeCard(trade) {
   const feed = document.getElementById('trades-feed');
   if(feed.querySelector('.no-data')) feed.innerHTML = '';
+
+  // Resolve sandbox -> agent
+  const sandboxId = trade.sandboxId || '';
+  const sandbox = sandboxId ? (config.sandboxes || {})[sandboxId] : null;
+  const activeAgentId = sandbox?.agent?.activeAgentId || '';
+  const agent = activeAgentId ? (config.agents || []).find(a => a.id === activeAgentId) : null;
+  const agentId = agent ? agent.id : '__none__';
+  const agentName = agent ? agent.name : (sandbox ? 'Unassigned' : '—');
+
   const card = document.createElement('div');
   card.className = 'trade-card';
+  card.dataset.agentId = agentId;
+  card.dataset.sandboxId = sandboxId;
+  card.onclick = (ev) => toggleTradeCard(card, ev);
+
   const t = trade.timestamp ? new Date(trade.timestamp).toLocaleTimeString('en-US',{hour12:false}) : '--';
   const qtyLabel = trade.quantity != null ? (String(trade.quantity).startsWith('$') ? ' | ' + trade.quantity : ' | Qty: ' + trade.quantity) : '';
-  card.innerHTML = '<div class="trade-header"><span class="trade-symbol">' + esc(trade.symbol||'??') + '</span><span class="trade-side ' + esc(trade.side||'') + '">' + esc((trade.side||'--').toUpperCase()) + '</span></div><div class="trade-details">' + esc(trade.tool||'') + qtyLabel + (trade.price?' | $'+trade.price:'') + '</div><div class="trade-time">' + t + '</div>';
+
+  const headerHtml =
+    '<div class="trade-header">' +
+      '<span style="display:flex;align-items:center">' +
+        '<span class="trade-symbol">' + esc(trade.symbol||'??') + '</span>' +
+        '<span class="trade-agent-badge">' + esc(agentName) + '</span>' +
+      '</span>' +
+      '<span style="display:flex;align-items:center">' +
+        '<span class="trade-side ' + esc(trade.side||'') + '">' + esc((trade.side||'--').toUpperCase()) + '</span>' +
+        '<span class="trade-chevron">&#9662;</span>' +
+      '</span>' +
+    '</div>';
+
+  const detailsHtml = '<div class="trade-details">' + esc(trade.tool||'') + esc(qtyLabel) + (trade.price?' | $'+esc(String(trade.price)):'') + '</div>';
+  const timeHtml = '<div class="trade-time">' + esc(t) + '</div>';
+
+  const fields = [
+    ['Sandbox',   sandboxId || '—'],
+    ['Agent',     agentName],
+    ['Type',      trade.type || '—'],
+    ['Tool',      trade.tool || '—'],
+    ['Side',      trade.side || '—'],
+    ['Quantity',  trade.quantity != null ? String(trade.quantity) : '—'],
+    ['Price',     trade.price != null ? '$' + trade.price : '—'],
+    ['Timestamp', trade.timestamp || '—'],
+  ];
+  const expandedHtml = '<div class="trade-expanded">' +
+    fields.map(([label, value]) =>
+      '<div class="trade-field"><span class="trade-field-label">' + esc(label) + ':</span><span>' + esc(String(value)) + '</span></div>'
+    ).join('') +
+  '</div>';
+
+  card.innerHTML = headerHtml + detailsHtml + timeHtml + expandedHtml;
+
   feed.insertBefore(card, feed.firstChild);
   while(feed.children.length > 50) feed.removeChild(feed.lastChild);
+
+  ensureAgentInFilter(agentId, agentName);
+  applyTradesFilterToCard(card);
+}
+
+function toggleTradeCard(card, ev) {
+  // Ignore clicks that are part of a text selection drag.
+  const sel = window.getSelection && window.getSelection();
+  if (sel && sel.toString && sel.toString().length > 0) return;
+  card.classList.toggle('is-expanded');
+}
+
+function ensureAgentInFilter(agentId, agentName) {
+  const sel = document.getElementById('trades-agent-filter');
+  if (!sel) return;
+  if (Array.from(sel.options).some(o => o.value === agentId)) return;
+  const opt = document.createElement('option');
+  opt.value = agentId;
+  opt.textContent = agentName;
+  sel.appendChild(opt);
+}
+
+function updateTradesFilterCount(shown, total) {
+  const el = document.getElementById('trades-filter-count');
+  if (!el) return;
+  el.textContent = total ? (shown + ' shown / ' + total + ' total') : '';
+}
+
+function refreshTradesFilterCount() {
+  const cards = document.querySelectorAll('#trades-feed .trade-card');
+  let shown = 0;
+  cards.forEach(c => { if (c.style.display !== 'none') shown++; });
+  updateTradesFilterCount(shown, cards.length);
+}
+
+function applyTradesFilter() {
+  const sel = document.getElementById('trades-agent-filter');
+  _tradesAgentFilter = sel ? sel.value : '__all__';
+  const cards = document.querySelectorAll('#trades-feed .trade-card');
+  let shown = 0;
+  cards.forEach(c => {
+    const match = _tradesAgentFilter === '__all__' || c.dataset.agentId === _tradesAgentFilter;
+    c.style.display = match ? '' : 'none';
+    if (match) shown++;
+  });
+  updateTradesFilterCount(shown, cards.length);
+}
+
+function applyTradesFilterToCard(card) {
+  if (_tradesAgentFilter !== '__all__' && card.dataset.agentId !== _tradesAgentFilter) {
+    card.style.display = 'none';
+  }
+  refreshTradesFilterCount();
 }
 
 // ── Render config panels ───────────────────

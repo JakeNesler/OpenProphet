@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Tests false-positive guard for the Item 1.01 keyword scan.
+  This fixture must NOT contain equity-related keywords from the dilution
+  pattern list (see services/sec_edgar_service.go heuristic patterns).
+  Asset Purchase Agreement is non-dilutive M&A — IsDilutionBlocked must NOT fire.
+-->
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <title>Latest filings</title>
+  <entry>
+    <title>8-K - ABCD CORP (0001234567) (Filer)</title>
+    <updated>2026-05-09T16:42:00-04:00</updated>
+    <summary>Item 1.01 Entry into Asset Purchase Agreement for manufacturing facility</summary>
+  </entry>
+</feed>

@@ -166,10 +166,13 @@ func main() {
 
 	pennyUniverseService := services.NewPennyUniverseService(cfg.FMPAPIKey, cfg.AlpacaAPIKey, cfg.AlpacaSecretKey, cfg.AlpacaBaseURL, earningsService, nil)
 	pennyScreenerService := services.NewPennyScreenerService(cfg.AlpacaAPIKey, cfg.AlpacaSecretKey, pennyUniverseService)
-	secEdgarService := services.NewSECEdgarService(pennyUniverseService, nil, cfg.OperatorEmail)
+	secEdgarService := services.NewSECEdgarService(pennyUniverseService, nil, cfg.OperatorEmail, earningsService)
 	socialSignalService := services.NewSocialSignalService(pennyUniverseService, nil)
 	pennyAggregator := services.NewPennySignalAggregator(pennyUniverseService, pennyScreenerService, secEdgarService, socialSignalService)
 	pennyController := controllers.NewPennyController(pennyAggregator)
+
+	// Wire dilution filter to operator-visible held-position logging.
+	secEdgarService.SetHeldTickersFn(positionManager.HeldPennyTickers)
 
 	// Start penny pipeline goroutines
 	go pennyUniverseService.Start(ctx)

@@ -163,6 +163,20 @@ func (s *EarningsCalendarService) WaitForFirstRefresh(timeout time.Duration) boo
 	}
 }
 
+// Calendar returns a defensive copy of the cached Alpaca trading calendar.
+// Other services (e.g. SECEdgarService) use this to avoid duplicate FMP/Alpaca
+// fetches. Returns an empty slice if the calendar has not been populated yet.
+func (s *EarningsCalendarService) Calendar() []AlpacaCalendarEntry {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if len(s.calendar) == 0 {
+		return nil
+	}
+	out := make([]AlpacaCalendarEntry, len(s.calendar))
+	copy(out, s.calendar)
+	return out
+}
+
 // tradingDayDistance returns the number of trading days from nowDate (exclusive)
 // to effective (inclusive). Both arguments are compared by date in their stored
 // location. Returns -1 if effective is strictly before nowDate.

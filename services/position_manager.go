@@ -648,6 +648,29 @@ func (pm *PositionManager) ListManagedPositions(status string) []*ManagedPositio
 	return positions
 }
 
+// HeldPennyTickers returns a set of currently-open penny-strategy positions
+// keyed by ticker. Used by SECEdgarService to detect dilution events landing
+// on positions the agent holds. Returns an empty (non-nil) map if no penny
+// positions are open.
+//
+// "Active" matches the existing isActivePosition predicate (ACTIVE, PARTIAL,
+// PENDING). Penny ownership is determined via the AgentTag(AgentPenny) tag,
+// matching the convention used by TradeGuard.
+func (pm *PositionManager) HeldPennyTickers() map[string]bool {
+	pm.mu.RLock()
+	defer pm.mu.RUnlock()
+	held := make(map[string]bool)
+	for _, p := range pm.positions {
+		if !isActivePosition(p) {
+			continue
+		}
+		if positionBelongsTo(p, AgentPenny) {
+			held[p.Symbol] = true
+		}
+	}
+	return held
+}
+
 // CloseManagedPosition manually closes a managed position
 func (pm *PositionManager) CloseManagedPosition(ctx context.Context, positionID string) error {
 	pm.mu.RLock()

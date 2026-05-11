@@ -3,6 +3,7 @@ package services
 import (
 	"context"
 	"math"
+	"os"
 	"sort"
 	"sync"
 	"time"
@@ -22,9 +23,11 @@ type BracketBlacklistEntry struct {
 }
 
 // Lock ordering: PennySignalAggregator.mu must always be acquired before
-// BracketBlacklist.mu. GetCandidates holds a.mu.RLock while calling
-// blacklist.IsBlacklisted (which acquires b.mu.RLock). No code path may
-// acquire BracketBlacklist.mu before PennySignalAggregator.mu.
+// BracketBlacklist.mu and before SECEdgarService.dilutionMu. GetCandidates
+// holds a.mu.RLock while calling blacklist.IsBlacklisted (b.mu.RLock) and
+// edgar.IsDilutionBlocked (which may take dilutionMu.Lock during eviction).
+// No code path may acquire BracketBlacklist.mu or SECEdgarService.dilutionMu
+// before PennySignalAggregator.mu.
 type BracketBlacklist struct {
 	mu      sync.RWMutex
 	entries map[string]BracketBlacklistEntry
@@ -43,14 +46,15 @@ func (b *BracketBlacklist) IsBlacklisted(ticker string) bool {
 
 // PennySignalAggregator combines three sub-scores into composite CandidateScore entries.
 type PennySignalAggregator struct {
-	universe   *PennyUniverseService
-	screener   *PennyScreenerService
-	edgar      *SECEdgarService
-	social     *SocialSignalService
-	mu         sync.RWMutex
-	candidates map[string]CandidateScore
-	blacklist  *BracketBlacklist
-	logger     *logrus.Logger
+	universe     *PennyUniverseService
+	screener     *PennyScreenerService
+	edgar        *SECEdgarService
+	social       *SocialSignalService
+	mu           sync.RWMutex
+	candidates   map[string]CandidateScore
+	blacklist    *BracketBlacklist
+	logger       *logrus.Logger
+	dilutionMode string // "shadow" (log only) or "enforce" (suppress); default "shadow"
 }
 
 // NewPennySignalAggregator creates the aggregator.
@@ -62,14 +66,20 @@ func NewPennySignalAggregator(
 ) *PennySignalAggregator {
 	logger := logrus.New()
 	logger.SetFormatter(&logrus.TextFormatter{FullTimestamp: true})
+	mode := os.Getenv("PENNY_DILUTION_FILTER_MODE")
+	if mode != "enforce" {
+		mode = "shadow"
+	}
+	logger.WithField("mode", mode).Info("PennySignalAggregator: dilution filter mode")
 	return &PennySignalAggregator{
-		universe:   universe,
-		screener:   screener,
-		edgar:      edgar,
-		social:     social,
-		candidates: make(map[string]CandidateScore),
-		blacklist:  newBracketBlacklist(),
-		logger:     logger,
+		universe:     universe,
+		screener:     screener,
+		edgar:        edgar,
+		social:       social,
+		candidates:   make(map[string]CandidateScore),
+		blacklist:    newBracketBlacklist(),
+		logger:       logger,
+		dilutionMode: mode,
 	}
 }
 
@@ -124,7 +134,7 @@ func (a *PennySignalAggregator) Start(ctx context.Context) {
 }
 
 // GetCandidates returns all scored candidates above minScore that are composite-eligible
-// and not blacklisted, sorted by composite score descending.
+// and not blacklisted (bracket rejection or dilution).
 func (a *PennySignalAggregator) GetCandidates(minScore float64) []CandidateScore {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
@@ -135,6 +145,19 @@ func (a *PennySignalAggregator) GetCandidates(minScore float64) []CandidateScore
 		}
 		if a.blacklist.IsBlacklisted(c.Ticker) {
 			continue
+		}
+		if a.edgar != nil {
+			if blocked, reason := a.edgar.IsDilutionBlocked(c.Ticker); blocked {
+				a.logger.WithFields(logrus.Fields{
+					"ticker":    c.Ticker,
+					"composite": c.CompositeScore,
+					"reason":    reason,
+					"mode":      a.dilutionMode,
+				}).Info("dilution block detected on candidate")
+				if a.dilutionMode == "enforce" {
+					continue
+				}
+			}
 		}
 		out = append(out, c)
 	}
