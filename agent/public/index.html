@@ -894,6 +894,26 @@
     .trade-card .trade-side.close { color: var(--warning); }
     .trade-card .trade-details { font-size: 12px; color: var(--ink-muted); margin-top: 4px; }
     .trade-card .trade-time { font-size: 11px; color: var(--ink-faint); font-family: 'IBM Plex Mono', monospace; }
+    .trades-filter-row { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; font-size: 12px; color: var(--ink-muted); }
+    .trades-filter-row select { font-size: 12px; }
+    .trades-filter-count { font-size: 11px; color: var(--ink-faint); margin-left: auto; }
+
+    .trade-card { cursor: pointer; transition: background 0.12s; }
+    .trade-card:hover { background: var(--paper-2, var(--paper)); }
+    .trade-card .trade-chevron { display: inline-block; margin-left: 8px; transition: transform 0.18s; color: var(--ink-faint); font-size: 12px; }
+    .trade-card.is-expanded .trade-chevron { transform: rotate(180deg); }
+    .trade-card .trade-agent-badge {
+      display: inline-block; font-size: 10px; font-weight: 600; text-transform: uppercase;
+      padding: 2px 6px; margin-left: 8px; border: 1px solid var(--rule); border-radius: 4px;
+      color: var(--ink-muted); background: var(--surface-2, transparent);
+    }
+    .trade-card .trade-expanded {
+      display: none; margin-top: 10px; padding-top: 10px; border-top: 1px dashed var(--rule);
+      font-size: 12px; color: var(--ink-muted); font-family: 'IBM Plex Mono', monospace;
+    }
+    .trade-card .trade-expanded .trade-field { display: flex; gap: 8px; padding: 2px 0; }
+    .trade-card .trade-expanded .trade-field-label { color: var(--ink-faint); min-width: 90px; }
+    .trade-card.is-expanded .trade-expanded { display: block; }
 
     /* ── Modal ───────────────────────────── */
     .modal-overlay {
