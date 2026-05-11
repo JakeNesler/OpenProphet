@@ -2281,7 +2281,7 @@ function addTradeCard(trade) {
       '</span>' +
     '</div>';
 
-  const detailsHtml = '<div class="trade-details">' + esc(trade.tool||'') + qtyLabel + (trade.price?' | $'+esc(String(trade.price)):'') + '</div>';
+  const detailsHtml = '<div class="trade-details">' + esc(trade.tool||'') + esc(qtyLabel) + (trade.price?' | $'+esc(String(trade.price)):'') + '</div>';
   const timeHtml = '<div class="trade-time">' + esc(t) + '</div>';
 
   const fields = [
