@@ -2305,6 +2305,9 @@ function addTradeCard(trade) {
 
   feed.insertBefore(card, feed.firstChild);
   while(feed.children.length > 50) feed.removeChild(feed.lastChild);
+
+  ensureAgentInFilter(agentId, agentName);
+  applyTradesFilterToCard(card);
 }
 
 function toggleTradeCard(card, ev) {
