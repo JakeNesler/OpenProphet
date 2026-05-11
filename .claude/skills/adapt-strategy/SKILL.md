@@ -12,22 +12,32 @@ Read `data/agent-config.json`. Find the strategy with name `Aggressive Options v
 
 Also note: the `id` of this strategy (you will need it if applying changes).
 
-## Step 2 — Load recent decisions (last 30 days)
+## Step 2 — Resolve the Prophet sandbox directory
 
-Glob `data/sandboxes/8f201546/decisive_actions/*.json`. Read the 60 most recent files. For each, extract:
+Sandbox IDs rotate when the user resets accounts, so do NOT hardcode an ID. From the same `data/agent-config.json` you just read, resolve the Prophet sandbox in this order:
+
+1. Iterate `sandboxes` (object map). Pick the entry whose `name` is `"Paper (from .env)"`, or otherwise contains `"Paper"` / `"Prophet"` (case-insensitive). Take that entry's `accountId` field — this is the on-disk directory name.
+2. If no name match, fall back to the top-level `activeSandboxId`, stripping the `sbx_` prefix (e.g. `sbx_6e4f26af` → `6e4f26af`).
+3. Verify the resolved directory exists at `data/sandboxes/<dir>/activity_logs/` and contains `activity_*.json` files. If it is empty (freshly rotated sandbox), Glob `data/sandboxes/*/activity_logs/activity_*.json`, group files by their parent sandbox directory, and pick the directory whose newest `activity_*.json` is most recent overall. That is the live Prophet sandbox.
+
+Record the resolved directory name as `<PROPHET_SANDBOX>` and use it for Steps 3 and 4. State which sandbox you resolved and why (one line) before continuing.
+
+## Step 3 — Load recent decisions (last 30 days)
+
+Glob `data/sandboxes/<PROPHET_SANDBOX>/decisive_actions/*.json`. Read the 60 most recent files. For each, extract:
 - `timestamp`
 - `action` (BUY / SELL / HOLD / etc.)
 - `symbol`
 - `reasoning` (full text)
 
-## Step 3 — Load recent P&L context
+## Step 4 — Load recent P&L context
 
-Glob `data/sandboxes/8f201546/activity_logs/activity_*.json`. Read the 8 most recent. From each `summary`:
+Glob `data/sandboxes/<PROPHET_SANDBOX>/activity_logs/activity_*.json`. Read the 8 most recent. From each `summary`:
 - winning_trades, losing_trades, total_pnl, largest_win, largest_loss
 
 Compute aggregate profit factor across all loaded days.
 
-## Step 4 — Gap analysis
+## Step 5 — Gap analysis
 
 For each section of the strategy rules, ask: does the agent's actual behavior match the rule?
 
@@ -59,7 +69,7 @@ Work through these categories:
 For each gap you find, write:
 > **Gap [N]**: [category] — [what the rule says] vs. [what the agent actually did, with timestamp and quote]
 
-## Step 5 — Propose specific rule edits
+## Step 6 — Propose specific rule edits
 
 For each significant gap (ignore one-offs; focus on patterns appearing 2+ times), propose a rule change using this format:
 
@@ -78,11 +88,11 @@ For each significant gap (ignore one-offs; focus on patterns appearing 2+ times)
 
 If a gap suggests adding a *new* rule rather than changing an existing one, say so explicitly and write the full new rule text.
 
-## Step 6 — Present and confirm
+## Step 7 — Present and confirm
 
 Show the user all proposed edits clearly. Ask which ones to apply. Do not modify any file until the user confirms specific edits.
 
-## Step 7 — Apply approved edits
+## Step 8 — Apply approved edits
 
 For each approved edit:
 1. Re-read `data/agent-config.json` to get the freshest version.

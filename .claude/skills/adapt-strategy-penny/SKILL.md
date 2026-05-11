@@ -12,9 +12,18 @@ Read `data/agent-config.json`. Find the strategy with id `penny-momentum` (name 
 
 Also note: the `id` of this strategy is `penny-momentum` (you will need it if applying changes).
 
-## Step 2 — Load recent decisions (last 30 days)
+## Step 2 — Resolve the Penny sandbox directory
 
-Glob `data/sandboxes/a788a4e3/decisive_actions/*.json`. Read the 80 most recent files. For each, extract:
+Sandbox IDs rotate when the user resets accounts, so do NOT hardcode an ID. From the same `data/agent-config.json` you just read, resolve the Penny sandbox in this order:
+
+1. Iterate `sandboxes` (object map). Pick the entry whose `name` matches `/penny/i` (e.g. `"PennyTrades"`). Take that entry's `accountId` field — this is the on-disk directory name.
+2. Verify the resolved directory exists at `data/sandboxes/<dir>/activity_logs/` and contains `activity_*.json` files. If it is empty (freshly rotated sandbox), Glob `data/sandboxes/*/activity_logs/activity_*.json`, then for each candidate directory peek at one recent decisive_action's `symbol` field — Penny tickers are exchange-listed $2–$10 stocks (e.g. plain 1–5 letter equity symbols), distinct from Prophet's options OCC symbols (containing strike digits like `260717C00665000`). Pick the directory whose recent decisive_actions are dominated by plain equity symbols and whose newest `activity_*.json` is most recent.
+
+Record the resolved directory name as `<PENNY_SANDBOX>` and use it for Steps 3 and 4. State which sandbox you resolved and why (one line) before continuing.
+
+## Step 3 — Load recent decisions (last 30 days)
+
+Glob `data/sandboxes/<PENNY_SANDBOX>/decisive_actions/*.json`. Read the 80 most recent files. For each, extract:
 - `timestamp`
 - `action` (BUY / SELL / HOLD / SKIP / CIRCUIT_BREAKER / etc.)
 - `symbol`
@@ -23,16 +32,16 @@ Glob `data/sandboxes/a788a4e3/decisive_actions/*.json`. Read the 80 most recent 
 
 Penny generates more decisions per day than Prophet, so 80 files typically covers ~2–4 weeks of activity.
 
-## Step 3 — Load recent P&L context
+## Step 4 — Load recent P&L context
 
-Glob `data/sandboxes/a788a4e3/activity_logs/activity_*.json`. Read the 7 most recent. From each `summary`:
+Glob `data/sandboxes/<PENNY_SANDBOX>/activity_logs/activity_*.json`. Read the 7 most recent. From each `summary`:
 - winning_trades, losing_trades, total_pnl, largest_win, largest_loss
 - capital_deployed (segment-cap utilization)
 - positions_opened, positions_closed
 
 Compute aggregate profit factor across all loaded days.
 
-## Step 4 — Gap analysis
+## Step 5 — Gap analysis
 
 For each section of the strategy rules, ask: does the agent's actual behavior match the rule?
 
@@ -86,7 +95,7 @@ PennyProphet's rules explicitly forbid "helpful improvisation". Look for:
 For each gap you find, write:
 > **Gap [N]**: [category] — [what the rule says] vs. [what the agent actually did, with timestamp and quote]
 
-## Step 5 — Propose specific rule edits
+## Step 6 — Propose specific rule edits
 
 For each significant gap (ignore one-offs; focus on patterns appearing 2+ times), propose a rule change using this format:
 
@@ -105,11 +114,11 @@ For each significant gap (ignore one-offs; focus on patterns appearing 2+ times)
 
 If a gap suggests adding a *new* rule rather than changing an existing one, say so explicitly and write the full new rule text.
 
-## Step 6 — Present and confirm
+## Step 7 — Present and confirm
 
 Show the user all proposed edits clearly. Ask which ones to apply. Do not modify any file until the user confirms specific edits.
 
-## Step 7 — Apply approved edits
+## Step 8 — Apply approved edits
 
 For each approved edit:
 1. Re-read `data/agent-config.json` to get the freshest version.

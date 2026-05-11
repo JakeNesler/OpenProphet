@@ -603,11 +603,30 @@ If significance score >= 7: write the file, then output: SCAN_ALERT: <your alert
     } catch { return null; }
   }
 
-  // Penny-scoped detector: only reads data/sandboxes/a788a4e3/activity_logs/.
+  // Resolves the on-disk directory name for the Penny sandbox by reading agent-config.json
+  // and picking the sandbox whose name matches /penny/i. Returns null if not found.
+  async _resolvePennySandboxDir() {
+    try {
+      const configPath = path.join(PROJECT_ROOT, 'data', 'agent-config.json');
+      const config = JSON.parse(await fs.readFile(configPath, 'utf-8'));
+      const sandboxes = config.sandboxes || {};
+      for (const sb of Object.values(sandboxes)) {
+        if (sb && typeof sb.name === 'string' && /penny/i.test(sb.name) && sb.accountId) {
+          return sb.accountId;
+        }
+      }
+      return null;
+    } catch { return null; }
+  }
+
+  // Penny-scoped detector: only reads the Penny sandbox's activity_logs/.
+  // Sandbox directory is resolved from agent-config.json (sandbox name matches /penny/i).
   // Threshold is -3% per spec (Penny is more loss-sensitive than Prophet's -4%).
   async _detectPennyLossConditions() {
     try {
-      const logsDir = path.join(SANDBOXES_DIR, 'a788a4e3', 'activity_logs');
+      const pennyDir = await this._resolvePennySandboxDir();
+      if (!pennyDir) return null;
+      const logsDir = path.join(SANDBOXES_DIR, pennyDir, 'activity_logs');
       let files;
       try { files = (await fs.readdir(logsDir)).filter(f => f.startsWith('activity_') && f.endsWith('.json')).sort(); }
       catch { return null; }
