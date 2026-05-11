@@ -1468,6 +1468,7 @@ let autoScroll = true;
 let nextBeatTime = null, heartbeatSeconds = 0, progressInterval = null;
 const _sbxActiveProfile = {}; // sandboxId → last applied profile id
 const _sbxHbExpanded = new Set(); // sandboxIds with heartbeat intervals panel open
+let _tradesAgentFilter = '__all__';
 const terminal = document.getElementById('terminal');
 
 terminal.addEventListener('scroll', () => {
@@ -2311,6 +2312,49 @@ function toggleTradeCard(card, ev) {
   const sel = window.getSelection && window.getSelection();
   if (sel && sel.toString && sel.toString().length > 0) return;
   card.classList.toggle('is-expanded');
+}
+
+function ensureAgentInFilter(agentId, agentName) {
+  const sel = document.getElementById('trades-agent-filter');
+  if (!sel) return;
+  if (sel.querySelector('option[value="' + CSS.escape(agentId) + '"]')) return;
+  const opt = document.createElement('option');
+  opt.value = agentId;
+  opt.textContent = agentName;
+  sel.appendChild(opt);
+}
+
+function updateTradesFilterCount(shown, total) {
+  const el = document.getElementById('trades-filter-count');
+  if (!el) return;
+  el.textContent = total ? (shown + ' shown / ' + total + ' total') : '';
+}
+
+function refreshTradesFilterCount() {
+  const cards = document.querySelectorAll('#trades-feed .trade-card');
+  let shown = 0;
+  cards.forEach(c => { if (c.style.display !== 'none') shown++; });
+  updateTradesFilterCount(shown, cards.length);
+}
+
+function applyTradesFilter() {
+  const sel = document.getElementById('trades-agent-filter');
+  _tradesAgentFilter = sel ? sel.value : '__all__';
+  const cards = document.querySelectorAll('#trades-feed .trade-card');
+  let shown = 0;
+  cards.forEach(c => {
+    const match = _tradesAgentFilter === '__all__' || c.dataset.agentId === _tradesAgentFilter;
+    c.style.display = match ? '' : 'none';
+    if (match) shown++;
+  });
+  updateTradesFilterCount(shown, cards.length);
+}
+
+function applyTradesFilterToCard(card) {
+  if (_tradesAgentFilter !== '__all__' && card.dataset.agentId !== _tradesAgentFilter) {
+    card.style.display = 'none';
+  }
+  refreshTradesFilterCount();
 }
 
 // ── Render config panels ───────────────────
