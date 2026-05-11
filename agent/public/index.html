@@ -884,7 +884,7 @@
     /* ── Trade Feed ──────────────────────── */
     .trade-card {
       background: var(--paper); border: 1px solid var(--rule); padding: 12px;
-      margin-bottom: 8px;
+      margin-bottom: 8px; cursor: pointer; transition: background 0.12s;
     }
     .trade-card .trade-header { display: flex; justify-content: space-between; align-items: center; }
     .trade-card .trade-symbol { font-weight: 700; color: var(--accent); font-size: 14px; }
@@ -898,8 +898,7 @@
     .trades-filter-row select { font-size: 12px; }
     .trades-filter-count { font-size: 11px; color: var(--ink-faint); margin-left: auto; }
 
-    .trade-card { cursor: pointer; transition: background 0.12s; }
-    .trade-card:hover { background: var(--paper-2, var(--paper)); }
+    .trade-card:hover { background: var(--paper-dark); }
     .trade-card .trade-chevron { display: inline-block; margin-left: 8px; transition: transform 0.18s; color: var(--ink-faint); font-size: 12px; }
     .trade-card.is-expanded .trade-chevron { transform: rotate(180deg); }
     .trade-card .trade-agent-badge {
