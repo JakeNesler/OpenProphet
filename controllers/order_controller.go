@@ -347,11 +347,11 @@ func (oc *OrderController) HandleGetPositions(c *gin.Context) {
 		}
 	}
 
-	c.JSON(200, gin.H{
-		"strategy":  strategyFilter,
-		"count":     len(filtered),
-		"positions": filtered,
-	})
+	// Same shape as the unfiltered branch (line 333) — a plain array. Wrapping
+	// it in {strategy, count, positions} would break callers that consume
+	// /positions uniformly across filter modes (e.g. agent/preflight.js's
+	// Array.isArray check fails the preflight open on a wrapped object).
+	c.JSON(200, filtered)
 }
 
 // HandleGetAccount handles HTTP get account requests

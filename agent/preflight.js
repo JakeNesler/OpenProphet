@@ -12,25 +12,30 @@
 // See docs/preflight-skip-spec.md for the full design.
 
 // PennyProphet predicate. Skips the LLM beat when there are no candidates
-// above the composite-score threshold AND no open positions to manage AND
-// no open broker orders pending fill.
+// above the composite-score threshold AND no penny-tagged positions to manage
+// AND no open broker orders pending fill.
 //
-// Today each agent runs in its own paper account (per data/agent-config.json),
-// so "no positions in this sandbox" reliably means "no PennyProphet positions"
-// without needing strategy-tag filtering. When the shared-account work lands
-// (see docs/shared-account-backend-spec.md), this predicate should filter
-// positions by strategy="penny" tag instead of relying on account isolation.
+// Positions are filtered by strategy=penny-momentum so that other agents
+// sharing the same paper account (Prophet, Trend, Harvest) do not keep
+// PennyProphet awake on their positions. Attribution is by symbol-of-most-
+// recent-buy in storage.GetSymbolStrategyAttribution; positions placed via
+// PennyProphet's place_buy_order flow forward AgentStrategy onto the order
+// row so they attribute correctly.
 //
 // The open-orders check closes a gap: a buy submitted via place_buy_order
 // before the broker fills it does not yet appear in /positions, but the agent
 // may still need to react (cancel on price drift, follow up on partial fills).
 // Counting open orders ensures we don't skip the beat while one is in flight.
+// Note: /api/v1/orders does NOT yet support strategy filtering, so a pending
+// order from another agent on the shared account will still wake PennyProphet.
+// This is a small leak — pending orders are rare and short-lived on paper —
+// but if it becomes a problem, add ?strategy filtering to HandleGetOrders too.
 async function pennyPreflight(runtime, agentConfig) {
   const { goAxios } = runtime;
 
   const [candidatesResp, positionsResp, ordersResp] = await Promise.all([
     goAxios.get('/api/v1/penny/candidates?min_score=60'),
-    goAxios.get('/api/v1/positions'),
+    goAxios.get('/api/v1/positions?strategy=penny-momentum'),
     goAxios.get('/api/v1/orders?status=open'),
   ]);
 

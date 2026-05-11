@@ -22,6 +22,7 @@ import (
 const socialRefreshInterval = 30 * time.Second
 const stockTwitsRefreshInterval = 2 * time.Minute
 const socialHalfLifeHours = 4.0
+const redditFailureBackoff = 15 * time.Minute
 
 const (
 	redditTokenURL  = "https://www.reddit.com/api/v1/access_token"
@@ -91,6 +92,9 @@ type SocialSignalService struct {
 	redditTokenMu     sync.Mutex
 	redditAccessToken string
 	redditTokenExpiry time.Time
+
+	// Owned exclusively by the runReddit goroutine — no mutex needed.
+	redditBackoffUntil time.Time
 }
 
 // NewSocialSignalService creates the service. Reddit OAuth is enabled when all four
@@ -200,6 +204,9 @@ func (s *SocialSignalService) pollReddit() {
 	if !s.redditEnabled {
 		return
 	}
+	if now := time.Now(); now.Before(s.redditBackoffUntil) {
+		return
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
@@ -211,8 +218,12 @@ func (s *SocialSignalService) pollReddit() {
 	for _, sub := range subreddits {
 		listing, err := s.fetchRedditSubreddit(ctx, sub)
 		if err != nil {
-			s.logger.WithError(err).Warnf("SocialSignalService: Reddit r/%s failed", sub)
-			continue
+			// Suppress further polls for the backoff window — one failure almost
+			// always means the next sub will fail the same way (shared rate limit
+			// or shared auth), and silent retries every 30 s flood the log.
+			s.redditBackoffUntil = time.Now().Add(redditFailureBackoff)
+			s.logger.WithError(err).Warnf("SocialSignalService: Reddit r/%s failed — backing off %s", sub, redditFailureBackoff)
+			return
 		}
 		for _, child := range listing.Data.Children {
 			combined := strings.ToUpper(child.Data.Title + " " + child.Data.Selftext)

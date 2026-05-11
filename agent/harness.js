@@ -788,6 +788,14 @@ ${userBlock}`;
         this._beating = false;
         return;
       }
+      // Surface the no-skip reason too. Without this line the harness is silent
+      // when preflight fails open, hiding which branch (timeout, bad shape,
+      // missing strategyId, runtime null, etc.) actually fired — every beat
+      // burns LLM tokens with no breadcrumb explaining why.
+      this.state.emit('agent_log', {
+        message: `Beat #${beatNum} preflight: not skipped (${preflight.reason})`,
+        level: 'debug',
+      });
     }
 
     // Guardrails are baked into the system prompt by reloadConfig() — sent

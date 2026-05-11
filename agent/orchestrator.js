@@ -221,6 +221,25 @@ export class AgentOrchestrator extends EventEmitter {
         level: code === 0 || signal === 'SIGTERM' ? 'info' : 'error',
         message: `Trading backend exited (code: ${code}, signal: ${signal})`,
       });
+      // Auto-restart on unexpected crash (mirrors the prior singleton safety net).
+      // SIGTERM means we asked it to stop (manual stop, shutdown, or restart) — don't bounce it.
+      if (code !== 0 && code !== null && signal !== 'SIGTERM') {
+        this.emit('agent_log', {
+          sandboxId,
+          level: 'error',
+          message: 'Trading backend crashed — auto-restarting in 5s...',
+        });
+        setTimeout(() => {
+          if (!this.runtimes.has(sandboxId)) return; // runtime was torn down
+          this.startGoBackend(sandboxId).catch(err => {
+            this.emit('agent_log', {
+              sandboxId,
+              level: 'error',
+              message: `Auto-restart failed: ${err.message}`,
+            });
+          });
+        }, 5000);
+      }
     });
 
     for (let i = 0; i < 20; i++) {
