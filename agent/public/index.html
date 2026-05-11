@@ -2317,7 +2317,7 @@ function toggleTradeCard(card, ev) {
 function ensureAgentInFilter(agentId, agentName) {
   const sel = document.getElementById('trades-agent-filter');
   if (!sel) return;
-  if (sel.querySelector('option[value="' + CSS.escape(agentId) + '"]')) return;
+  if (Array.from(sel.options).some(o => o.value === agentId)) return;
   const opt = document.createElement('option');
   opt.value = agentId;
   opt.textContent = agentName;
