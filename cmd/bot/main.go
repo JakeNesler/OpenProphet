@@ -197,6 +197,11 @@ func main() {
 	harvestIVRSvc := services.NewHarvestIVRService(storageService)
 	harvestSvc := services.NewHarvestService(storageService)
 
+	// Wire the IV provider into StockAnalysisService so analyze_stocks
+	// responses include per-symbol IV rank / percentile / days_of_history.
+	// Safe to set after construction; the field is read inside AnalyzeStock.
+	stockAnalysisService.SetIVProvider(harvestIVRSvc)
+
 	getPortfolioValue := func() (float64, error) {
 		acct, err := orderController.GetAccount()
 		if err != nil {
@@ -235,8 +240,12 @@ func main() {
 	segmentPnLController := controllers.NewSegmentPnLController(segmentPnLSvc)
 	logger.Debug("Segment P&L service initialized")
 
+	// Generic IV-rank controller (shared by Harvest and Prophet via /api/v1/iv/:symbol)
+	ivController := controllers.NewIVController(harvestIVRSvc)
+	logger.Debug("IV controller initialized")
+
 	// Setup HTTP server
-	router := setupRouter(orderController, newsController, intelligenceController, positionController, activityController, economicFeedsController, pennyController, guardController, harvestController, trendController, segmentPnLController)
+	router := setupRouter(orderController, newsController, intelligenceController, positionController, activityController, economicFeedsController, pennyController, guardController, harvestController, trendController, segmentPnLController, ivController)
 
 	// Start data cleanup routine
 	go startDataCleanup(ctx, storageService, cfg.DataRetentionDays, logger)
@@ -266,7 +275,7 @@ func main() {
 	}
 }
 
-func setupRouter(orderController *controllers.OrderController, newsController *controllers.NewsController, intelligenceController *controllers.IntelligenceController, positionController *controllers.PositionManagementController, activityController *controllers.ActivityController, economicFeedsController *controllers.EconomicFeedsController, pennyController *controllers.PennyController, guardController *controllers.GuardController, harvestController *controllers.HarvestController, trendController *controllers.TrendController, segmentPnLController *controllers.SegmentPnLController) *gin.Engine {
+func setupRouter(orderController *controllers.OrderController, newsController *controllers.NewsController, intelligenceController *controllers.IntelligenceController, positionController *controllers.PositionManagementController, activityController *controllers.ActivityController, economicFeedsController *controllers.EconomicFeedsController, pennyController *controllers.PennyController, guardController *controllers.GuardController, harvestController *controllers.HarvestController, trendController *controllers.TrendController, segmentPnLController *controllers.SegmentPnLController, ivController *controllers.IVController) *gin.Engine {
 	router := gin.Default()
 	router.SetTrustedProxies([]string{"127.0.0.1"})
 
@@ -348,6 +357,9 @@ func setupRouter(orderController *controllers.OrderController, newsController *c
 		// US-economic-release blackout window (shared across all four agents)
 		api.GET("/econ/blackout", economicFeedsController.HandleGetEconBlackout)
 
+		// Generic IV rank/percentile lookup (latest stored snapshot per symbol)
+		api.GET("/iv/:symbol", ivController.HandleGetIV)
+
 		api.GET("/activity/current", activityController.HandleGetCurrentActivity)
 		api.GET("/activity/:date", activityController.HandleGetActivityByDate)
 		api.GET("/activity", activityController.HandleListActivityLogs)
@@ -413,14 +425,22 @@ func startDataCleanup(ctx context.Context, storage interfaces.StorageService, re
 	}
 }
 
-// startHarvestIVCollection records ATM IV for all Harvest underlyings once per trading day.
+// startHarvestIVCollection records ATM IV for Harvest + Prophet underlyings
+// every 6h. Despite the name, the universe now spans both strategies: SPY/QQQ
+// are shared, IWM/GLD/TLT are Harvest-specific, and NVDA/AMD/TSLA/MSTR are
+// Prophet-specific. The function name is unchanged to keep this diff small;
+// the IV data is consumed by both HarvestIVRService.GetIVRData (for Harvest's
+// IVR ≥ 30 entry filter) and StockAnalysisService (for Prophet's IV-rank gate).
 func startHarvestIVCollection(ctx context.Context, ivrSvc *services.HarvestIVRService, tradingService *services.AlpacaTradingService, logger *logrus.Logger) {
-	harvestUniverse := []string{"SPY", "QQQ", "IWM", "GLD", "TLT"}
+	ivUniverse := []string{
+		"SPY", "QQQ", "IWM", "GLD", "TLT", // Harvest condor underlyings
+		"NVDA", "AMD", "TSLA", "MSTR", // Prophet-specific watchlist
+	}
 	ticker := time.NewTicker(6 * time.Hour)
 	defer ticker.Stop()
 
 	collectAll := func() {
-		for _, symbol := range harvestUniverse {
+		for _, symbol := range ivUniverse {
 			if tradingService == nil {
 				continue
 			}

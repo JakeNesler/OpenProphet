@@ -707,6 +707,17 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         inputSchema: { type: 'object', properties: {} },
       },
       {
+        name: 'get_iv_rank',
+        description: 'Returns IV rank (52-week min-max position) and IV percentile (share of trailing days at or below current IV) for a single underlying. Response fields: underlying, current_iv, low52_wk, high52_wk, ivr (0-100; -1 = no history), iv_percentile (0-100; -1 = no history), days_of_history. INTERPRETATION: ivr < 30 = premium cheap → prefer long options. ivr > 70 = premium expensive → prefer credit spreads. If days_of_history < 20, treat both metrics as low-confidence and do not let them dominate the entry decision. Use iv_percentile as a tiebreaker when ivr is mid-range (30-70). Data is from the latest stored snapshot (refreshed every 6h).',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            symbol: { type: 'string', description: 'Underlying ticker, uppercase (e.g., "SPY", "NVDA").' },
+          },
+          required: ['symbol'],
+        },
+      },
+      {
         name: 'analyze_stocks',
         description: 'Analyze multiple stocks with comprehensive technical indicators, news, and AI-powered recommendations. Returns RSI, trend, volatility, support/resistance, catalysts, and trade recommendations for each stock.',
         inputSchema: {
@@ -1996,6 +2007,15 @@ ${allNews.map((article, i) =>
 
       case 'get_econ_blackout_status': {
         const data = await callTradingBot('/econ/blackout');
+        return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
+      }
+
+      case 'get_iv_rank': {
+        if (!args || !args.symbol) {
+          return { content: [{ type: 'text', text: JSON.stringify({ error: 'symbol is required' }, null, 2) }] };
+        }
+        const symbol = String(args.symbol).toUpperCase();
+        const data = await callTradingBot(`/iv/${encodeURIComponent(symbol)}`);
         return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
       }
 

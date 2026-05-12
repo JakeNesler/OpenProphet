@@ -126,6 +126,20 @@
 
 ---
 
+## IV Rank Gate (Options Entries)
+
+**Rule:** Every options entry must read IV rank before sizing
+- Tool: `mcp__prophet__get_iv_rank` with the underlying symbol (or read the `iv` block from `analyze_stocks` if the symbol is already in the analyze call). Data refreshes every 6h.
+- Action by reading:
+  - `ivr < 30` → premium is **cheap**. Prefer **buying** premium: long calls / long puts. Avoid selling premium or debit spreads with thin width.
+  - `ivr > 70` → premium is **expensive**. Prefer **selling** premium: credit spreads (vertical, condor). Avoid naked long premium — theta and vega will both hurt.
+  - `30 ≤ ivr ≤ 70` → neutral. Use `iv_percentile` as a tiebreaker (above 50 = leans expensive, below 50 = leans cheap).
+- Confidence gate: if `days_of_history < 20`, treat IVR and percentile as **low-confidence**. Do not size up on the IV thesis alone — require independent technical + catalyst confluence. (Newly added Prophet symbols warm up over ~5 calendar days.)
+- No-data path: if `ivr == -1` AND `iv_percentile == -1`, the symbol has zero stored history. Same as low-confidence above — IV reading is not actionable.
+- Rationale: The single largest persistent edge in directional options trading is buying when volatility is cheap and selling when it is rich. Mechanical adherence to this gate is the difference between a flat options book and a profitable one over a year.
+
+---
+
 ## Trade Execution
 
 **Rule:** Opening volatility trading allowed (9:30-9:45 AM)

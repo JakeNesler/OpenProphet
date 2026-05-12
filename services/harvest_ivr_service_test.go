@@ -112,6 +112,128 @@ func TestGetIVRData_NoHistory(t *testing.T) {
 	}
 }
 
+// ── IV Percentile tests ─────────────────────────────────────────
+
+func TestCalcIVPercentile_EmptyHistory(t *testing.T) {
+	p := calcIVPercentile(0.20, nil)
+	if p != -1 {
+		t.Errorf("expected -1 on empty history, got %.2f", p)
+	}
+}
+
+func TestCalcIVPercentile_AllSame(t *testing.T) {
+	p := calcIVPercentile(0.18, []float64{0.18, 0.18, 0.18})
+	if p != 50.0 {
+		t.Errorf("expected 50 when all values identical, got %.2f", p)
+	}
+}
+
+func TestCalcIVPercentile_AtMin(t *testing.T) {
+	// All historical values >= current; current equals min → 1 of N ≤ current → 1/5*100=20.
+	// But more natural: percentile of 0.10 against [0.10, 0.20, 0.30, 0.40, 0.50] = 20%.
+	p := calcIVPercentile(0.10, []float64{0.10, 0.20, 0.30, 0.40, 0.50})
+	if p != 20.0 {
+		t.Errorf("expected 20.0 when current equals min of 5 values, got %.2f", p)
+	}
+}
+
+func TestCalcIVPercentile_BelowMin(t *testing.T) {
+	// current below entire history → 0%.
+	p := calcIVPercentile(0.05, []float64{0.10, 0.20, 0.30, 0.40, 0.50})
+	if p != 0.0 {
+		t.Errorf("expected 0.0 when current below all history, got %.2f", p)
+	}
+}
+
+func TestCalcIVPercentile_AtMax(t *testing.T) {
+	p := calcIVPercentile(0.50, []float64{0.10, 0.20, 0.30, 0.40, 0.50})
+	if p != 100.0 {
+		t.Errorf("expected 100.0 when current equals max, got %.2f", p)
+	}
+}
+
+func TestCalcIVPercentile_Median(t *testing.T) {
+	// current=0.30 vs [0.10, 0.20, 0.30, 0.40, 0.50]: 3 of 5 ≤ 0.30 → 60%.
+	p := calcIVPercentile(0.30, []float64{0.10, 0.20, 0.30, 0.40, 0.50})
+	if p != 60.0 {
+		t.Errorf("expected 60.0 (3/5 ≤ 0.30), got %.2f", p)
+	}
+}
+
+func TestGetIVRData_PopulatesIVPercentile(t *testing.T) {
+	store := &stubIVStore{}
+	start := time.Now().AddDate(0, 0, -10)
+	store.stored = makeSnaps("SPY", []float64{0.10, 0.12, 0.15, 0.18, 0.20, 0.22, 0.25, 0.28, 0.30, 0.32}, start)
+
+	svc := NewHarvestIVRService(store)
+	data, err := svc.GetIVRData("SPY", 0.18)
+	if err != nil {
+		t.Fatalf("GetIVRData failed: %v", err)
+	}
+	// IVR by min/max: (0.18-0.10)/(0.32-0.10)*100 ≈ 36.36
+	if data.IVR < 36.0 || data.IVR > 37.0 {
+		t.Errorf("expected IVR≈36.36, got %.4f", data.IVR)
+	}
+	// Percentile: 4 of 10 ≤ 0.18 → 40%
+	if data.IVPercentile != 40.0 {
+		t.Errorf("expected IVPercentile=40.0, got %.2f", data.IVPercentile)
+	}
+}
+
+func TestGetIVRData_IVPercentileMinusOneOnEmptyHistory(t *testing.T) {
+	store := &stubIVStore{}
+	svc := NewHarvestIVRService(store)
+	data, err := svc.GetIVRData("XYZ", 0.20)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if data.IVPercentile != -1 {
+		t.Errorf("expected IVPercentile=-1 on no history, got %.2f", data.IVPercentile)
+	}
+}
+
+// ── GetIVRDataLatest — uses most recent stored snapshot as current ────
+
+func TestGetIVRDataLatest_UsesMostRecentSnapshot(t *testing.T) {
+	store := &stubIVStore{}
+	start := time.Now().AddDate(0, 0, -5)
+	// Five days: 0.10, 0.15, 0.20, 0.25, 0.30. Latest (i=4) is 0.30.
+	store.stored = makeSnaps("SPY", []float64{0.10, 0.15, 0.20, 0.25, 0.30}, start)
+
+	svc := NewHarvestIVRService(store)
+	data, err := svc.GetIVRDataLatest("SPY")
+	if err != nil {
+		t.Fatalf("GetIVRDataLatest failed: %v", err)
+	}
+	if data.CurrentIV != 0.30 {
+		t.Errorf("expected CurrentIV=0.30 (latest snapshot), got %f", data.CurrentIV)
+	}
+	if data.IVR != 100.0 {
+		t.Errorf("expected IVR=100.0 (current at top of range), got %f", data.IVR)
+	}
+	if data.IVPercentile != 100.0 {
+		t.Errorf("expected IVPercentile=100.0 (current at top), got %f", data.IVPercentile)
+	}
+	if data.DaysOfHistory != 5 {
+		t.Errorf("expected 5 days, got %d", data.DaysOfHistory)
+	}
+}
+
+func TestGetIVRDataLatest_NoHistoryReturnsSentinels(t *testing.T) {
+	store := &stubIVStore{}
+	svc := NewHarvestIVRService(store)
+	data, err := svc.GetIVRDataLatest("XYZ")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if data.DaysOfHistory != 0 {
+		t.Errorf("expected 0 days, got %d", data.DaysOfHistory)
+	}
+	if data.IVR != -1 || data.IVPercentile != -1 {
+		t.Errorf("expected IVR=-1 IVPercentile=-1, got IVR=%f IVPercentile=%f", data.IVR, data.IVPercentile)
+	}
+}
+
 func TestRecordDailyIV_FirstCall_WritesSnapshot(t *testing.T) {
 	store := &stubIVStore{}
 	svc := NewHarvestIVRService(store)
