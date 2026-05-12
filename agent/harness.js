@@ -8,6 +8,11 @@ import { EventEmitter } from 'events';
 import fs from 'fs/promises';
 import path from 'path';
 import { resolvePreflight } from './preflight.js';
+import { renderIntradayBlock, shouldInjectIntraday } from './intraday-prompt.js';
+
+// Prophet's auto-pushed intraday watchlist. Symbols outside this set are
+// still reachable via the get_intraday_signals MCP tool on demand.
+const PROPHET_INTRADAY_WATCHLIST = ['SPY', 'QQQ', 'NVDA', 'AMD', 'TSLA', 'MSTR'];
 
 // Default max tool rounds; overridden by permissions config at runtime
 
@@ -804,7 +809,33 @@ ${userBlock}`;
     const emergencyPrefix = this._emergencyReason
       ? `\n\n[EMERGENCY ALERT] The mid-session market scanner detected a breaking development that requires your immediate attention:\n${this._emergencyReason}\n\nReview this alert and assess whether it requires immediate position action before your routine duties.`
       : '';
-    const prompt = `[HEARTBEAT #${beatNum}] Phase: ${PHASE_DEFAULTS[phase].label}. Time: ${new Date().toLocaleString('en-US', { timeZone: 'America/New_York' })} ET. Current heartbeat interval: ${this.state.heartbeatSeconds}s.${emergencyPrefix}\n\nPerform your duties for this phase.`;
+
+    // Optional intraday context blob — Prophet only, market-hours phases only.
+    // Soft-fails: if the fetch errors or doesn't complete in 800ms, the beat
+    // proceeds without the blob and a single-line log entry is emitted. The
+    // LLM can still pull the data on-demand via get_intraday_signals.
+    let intradayPrefix = '';
+    if (shouldInjectIntraday(this._agentConfig?.strategyId, phase)) {
+      const runtime = this.getRuntime ? this.getRuntime(this.sandboxId) : null;
+      if (runtime?.goAxios) {
+        try {
+          const symbols = PROPHET_INTRADAY_WATCHLIST.join(',');
+          const resp = await runtime.goAxios.get(
+            `/api/v1/intraday/signals?symbols=${encodeURIComponent(symbols)}`,
+            { timeout: 800 }
+          );
+          const block = renderIntradayBlock(resp?.data);
+          if (block) intradayPrefix = `\n\n${block}`;
+        } catch (err) {
+          this.state.emit('agent_log', {
+            message: `Beat #${beatNum}: intraday blob fetch failed (${err.message}); proceeding without it`,
+            level: 'warn',
+          });
+        }
+      }
+    }
+
+    const prompt = `[HEARTBEAT #${beatNum}] Phase: ${PHASE_DEFAULTS[phase].label}. Time: ${new Date().toLocaleString('en-US', { timeZone: 'America/New_York' })} ET. Current heartbeat interval: ${this.state.heartbeatSeconds}s.${emergencyPrefix}${intradayPrefix}\n\nPerform your duties for this phase.`;
 
     try {
       const result = await this._runClaude(prompt, model);

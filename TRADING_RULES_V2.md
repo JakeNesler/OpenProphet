@@ -126,6 +126,19 @@
 
 ---
 
+## Intraday Context Block
+
+During market hours (9:30 AM – 4:00 PM ET) you will see an **"Intraday Context"** table prepended to each heartbeat covering SPY, QQQ, NVDA, AMD, TSLA, MSTR. It is read-only context — not a checklist — but use it as follows:
+
+- **Distance from VWAP (`vwap%`):** Positive = price above session VWAP (buyers in control); negative = below VWAP (sellers in control). Magnitude > 1% on a high-RVOL day usually means real one-sided flow.
+- **RVOL:** Time-of-day-adjusted relative volume. `rvol > 1.5` = heavy volume vs the 20-day pace; `rvol < 0.7` = thin tape, scale entries down or wait. Do not enter scalps when RVOL < 1.0 — there isn't enough flow to confirm direction.
+- **Range over ATR (`rng/A`):** Today's session range divided by ATR-20. `> 1.0` = day's range already exceeds typical full-day range, expect mean-reversion. `< 0.4` mid-session = compressed, watch for a break.
+- **Sector ETF % (`sec%`):** Mapped sector benchmark — NVDA/AMD → SMH, TSLA → XLY, MSTR → XLK. SPY/QQQ have no sector. If the underlying is moving against its sector by > 1%, treat the move as idiosyncratic (news-driven) rather than tape-driven.
+- **Off-watchlist symbols:** Call `mcp__prophet__get_intraday_signals` with an explicit `symbols` array. Same fields, on demand.
+- **Missing data:** If a row shows `--` or the block is absent, do not retry — the harness already tried with an 800ms timeout. Make decisions from the data you do have and call the MCP tool if a specific symbol's reading is essential.
+
+---
+
 ## IV Rank Gate (Options Entries)
 
 **Rule:** Every options entry must read IV rank before sizing

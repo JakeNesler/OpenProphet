@@ -244,8 +244,14 @@ func main() {
 	ivController := controllers.NewIVController(harvestIVRSvc)
 	logger.Debug("IV controller initialized")
 
+	// Intraday signal service + controller (auto-pushed into Prophet beats,
+	// also available on-demand via the get_intraday_signals MCP tool)
+	intradaySignalSvc := services.NewIntradaySignalService(dataService)
+	intradayController := controllers.NewIntradayController(intradaySignalSvc)
+	logger.Debug("Intraday signal service initialized")
+
 	// Setup HTTP server
-	router := setupRouter(orderController, newsController, intelligenceController, positionController, activityController, economicFeedsController, pennyController, guardController, harvestController, trendController, segmentPnLController, ivController)
+	router := setupRouter(orderController, newsController, intelligenceController, positionController, activityController, economicFeedsController, pennyController, guardController, harvestController, trendController, segmentPnLController, ivController, intradayController)
 
 	// Start data cleanup routine
 	go startDataCleanup(ctx, storageService, cfg.DataRetentionDays, logger)
@@ -275,7 +281,7 @@ func main() {
 	}
 }
 
-func setupRouter(orderController *controllers.OrderController, newsController *controllers.NewsController, intelligenceController *controllers.IntelligenceController, positionController *controllers.PositionManagementController, activityController *controllers.ActivityController, economicFeedsController *controllers.EconomicFeedsController, pennyController *controllers.PennyController, guardController *controllers.GuardController, harvestController *controllers.HarvestController, trendController *controllers.TrendController, segmentPnLController *controllers.SegmentPnLController, ivController *controllers.IVController) *gin.Engine {
+func setupRouter(orderController *controllers.OrderController, newsController *controllers.NewsController, intelligenceController *controllers.IntelligenceController, positionController *controllers.PositionManagementController, activityController *controllers.ActivityController, economicFeedsController *controllers.EconomicFeedsController, pennyController *controllers.PennyController, guardController *controllers.GuardController, harvestController *controllers.HarvestController, trendController *controllers.TrendController, segmentPnLController *controllers.SegmentPnLController, ivController *controllers.IVController, intradayController *controllers.IntradayController) *gin.Engine {
 	router := gin.Default()
 	router.SetTrustedProxies([]string{"127.0.0.1"})
 
@@ -359,6 +365,9 @@ func setupRouter(orderController *controllers.OrderController, newsController *c
 
 		// Generic IV rank/percentile lookup (latest stored snapshot per symbol)
 		api.GET("/iv/:symbol", ivController.HandleGetIV)
+
+		// Intraday signals (compact per-symbol blob; cached 60s)
+		api.GET("/intraday/signals", intradayController.HandleGetSignals)
 
 		api.GET("/activity/current", activityController.HandleGetCurrentActivity)
 		api.GET("/activity/:date", activityController.HandleGetActivityByDate)

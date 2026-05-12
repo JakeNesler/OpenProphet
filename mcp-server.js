@@ -718,6 +718,22 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         },
       },
       {
+        name: 'get_intraday_signals',
+        description: 'Returns a per-symbol intraday context blob: session VWAP and distance from it, RVOL (time-of-day-adjusted relative volume), session high/low / ATR-20 range, % change vs prior close, and the sector ETF % change when mapped. Use to read intraday tape for off-watchlist symbols or to recompute fresh values on-demand. NOTE: for Prophet beats during market hours, SPY/QQQ/NVDA/AMD/TSLA/MSTR are already pushed into your prompt automatically — call this tool only when you need different symbols, fresher data, or you are reasoning outside a market-hours beat. Cached 60s server-side.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            symbols: {
+              type: 'array',
+              items: { type: 'string' },
+              description: 'Tickers to fetch (uppercase). Example: ["AAPL", "META", "COIN"].',
+              minItems: 1,
+            },
+          },
+          required: ['symbols'],
+        },
+      },
+      {
         name: 'analyze_stocks',
         description: 'Analyze multiple stocks with comprehensive technical indicators, news, and AI-powered recommendations. Returns RSI, trend, volatility, support/resistance, catalysts, and trade recommendations for each stock.',
         inputSchema: {
@@ -2016,6 +2032,15 @@ ${allNews.map((article, i) =>
         }
         const symbol = String(args.symbol).toUpperCase();
         const data = await callTradingBot(`/iv/${encodeURIComponent(symbol)}`);
+        return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
+      }
+
+      case 'get_intraday_signals': {
+        if (!args || !Array.isArray(args.symbols) || args.symbols.length === 0) {
+          return { content: [{ type: 'text', text: JSON.stringify({ error: 'symbols (non-empty array) is required' }, null, 2) }] };
+        }
+        const symbols = args.symbols.map(s => String(s).toUpperCase()).filter(Boolean).join(',');
+        const data = await callTradingBot(`/intraday/signals?symbols=${encodeURIComponent(symbols)}`);
         return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
       }
 
