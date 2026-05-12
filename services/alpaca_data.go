@@ -79,6 +79,55 @@ func (s *AlpacaDataService) GetHistoricalBars(ctx context.Context, symbol string
 	return bars, nil
 }
 
+// GetMultiBars retrieves historical bar data for multiple symbols in a single request.
+// Returns a map keyed by symbol. Missing or errored symbols are simply absent from the map.
+func (s *AlpacaDataService) GetMultiBars(ctx context.Context, symbols []string, start, end time.Time, timeframe string) (map[string][]*interfaces.Bar, error) {
+	s.logger.WithFields(logrus.Fields{
+		"symbols_count": len(symbols),
+		"start":         start,
+		"end":           end,
+		"timeframe":     timeframe,
+	}).Info("Fetching multi-symbol historical bars")
+
+	tf := s.parseTimeframe(timeframe)
+
+	req := marketdata.GetBarsRequest{
+		TimeFrame:  tf,
+		Start:      start,
+		End:        end,
+		Feed:       marketdata.IEX,
+		PageLimit:  10000,
+		Adjustment: marketdata.All,
+	}
+
+	resp, err := s.client.GetMultiBars(symbols, req)
+	if err != nil {
+		s.logger.WithError(err).Error("Failed to fetch multi-symbol historical bars")
+		return nil, fmt.Errorf("failed to get multi bars: %w", err)
+	}
+
+	out := make(map[string][]*interfaces.Bar, len(resp))
+	for symbol, bars := range resp {
+		converted := make([]*interfaces.Bar, 0, len(bars))
+		for _, bar := range bars {
+			converted = append(converted, &interfaces.Bar{
+				Symbol:    symbol,
+				Timestamp: bar.Timestamp,
+				Open:      bar.Open,
+				High:      bar.High,
+				Low:       bar.Low,
+				Close:     bar.Close,
+				Volume:    int64(bar.Volume),
+				VWAP:      bar.VWAP,
+			})
+		}
+		out[symbol] = converted
+	}
+
+	s.logger.WithField("symbols_returned", len(out)).Info("Fetched multi-symbol historical bars")
+	return out, nil
+}
+
 // GetLatestBar retrieves the most recent bar for a symbol
 func (s *AlpacaDataService) GetLatestBar(ctx context.Context, symbol string) (*interfaces.Bar, error) {
 	req := marketdata.GetLatestBarRequest{
