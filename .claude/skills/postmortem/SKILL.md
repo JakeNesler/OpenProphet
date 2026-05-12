@@ -8,13 +8,24 @@ You are performing a surgical post-mortem on a specific trade or session. The go
 
 **Input:** `$ARGUMENTS` — may be a ticker symbol, a date (YYYY-MM-DD), or empty.
 
+## Step 0 — Resolve sandboxes by agent (do this first, before Step 1)
+
+This skill operates over **every** sandbox running the `default` agent (name "Prophet") — not by sandbox name, never by hardcoded ID.
+
+1. Read `data/agent-config.json`.
+2. In `agents[]`, find `id === 'default'` (fallback: name containing `"Prophet"`, excluding `"PennyProphet"` and `"TrendProphet"`).
+3. Iterate `sandboxes`, keep every entry where `agent.activeAgentId === 'default'`. Collect their `accountId` values as `<PROPHET_DIRS>`. If empty, stop and tell the user no sandbox currently uses the agent.
+4. State the resolved list before continuing.
+
+Every glob below must be run once **per** `<DIR>` in `<PROPHET_DIRS>` and the results merged. Tag each loaded record with its sandbox.
+
 ## Step 1 — Identify the subject
 
-- If `$ARGUMENTS` contains a ticker symbol (all-caps, 1–5 letters like QQQ, TSLA, SPY): find all decisive actions where `symbol` matches, sorted by timestamp.
-- If `$ARGUMENTS` is a date (YYYY-MM-DD): find all decisive actions from that date, and the activity log for that date.
-- If `$ARGUMENTS` is empty: glob `data/sandboxes/8f201546/decisive_actions/*.json`, read the 30 most recent, find the most recent SELL action where `reasoning` contains a loss signal (words like "stop", "loss", "cut", "-15%", "down", "deteriorat"). Use that trade as the subject.
+- If `$ARGUMENTS` contains a ticker symbol (all-caps, 1–5 letters like QQQ, TSLA, SPY): across every `<DIR>` in `<PROPHET_DIRS>`, glob `data/sandboxes/<DIR>/decisive_actions/*.json` and find all decisive actions where `symbol` matches. Merge and sort by timestamp.
+- If `$ARGUMENTS` is a date (YYYY-MM-DD): across every `<DIR>`, find all decisive actions from that date plus the activity log for that date.
+- If `$ARGUMENTS` is empty: across every `<DIR>`, glob `data/sandboxes/<DIR>/decisive_actions/*.json`, merge, sort by mtime descending, read the **30 most recent overall**, and find the most recent SELL action where `reasoning` contains a loss signal (words like "stop", "loss", "cut", "-15%", "down", "deteriorat"). Use that trade as the subject — note which sandbox it came from in the report.
 
-Load all relevant files. For a symbol search, also load the activity logs from the same date range to get portfolio context.
+Load all relevant files. For a symbol search, also load the activity logs from the same date range (across all `<PROPHET_DIRS>`) to get portfolio context.
 
 ## Step 2 — Reconstruct the trade timeline
 
@@ -30,7 +41,7 @@ Note: entry price, strike, DTE at entry. Exit price, DTE at exit. Estimated P&L 
 
 ## Step 3 — Strategy compliance check
 
-Go through the timeline and check each decision against the active strategy rules (read `data/agent-config.json`, find `Aggressive Options v2` customRules):
+Go through the timeline and check each decision against the active strategy rules. Resolve the strategy by following the agent linkage: in `data/agent-config.json`, look up agent `default` and take its `strategyId`, then read that strategy's `customRules` from `strategies[]`. State which strategy you resolved (name + id) before quoting rules.
 
 For the **entry**:
 - Was position size within 15%?
@@ -81,6 +92,6 @@ Use this format:
 
 ## Step 6 — Pattern check
 
-Glob `data/sandboxes/8f201546/decisive_actions/*.json`. Read the 60 most recent. Search for any other decisions on the same symbol or with similar reasoning language (same error words: "giving it more time", "hope", "approaching stop", etc.). 
+For each `<DIR>` in `<PROPHET_DIRS>`: glob `data/sandboxes/<DIR>/decisive_actions/*.json`. Merge across sandboxes, read the **60 most recent overall**. Search for any other decisions on the same symbol or with similar reasoning language (same error words: "giving it more time", "hope", "approaching stop", etc.).
 
-Report: is this an isolated incident or a recurring pattern? If it has happened before, list the prior dates.
+Report: is this an isolated incident or a recurring pattern? If it has happened before, list the prior dates **and which sandbox each occurred in** — a pattern that spans sandboxes is a strategy issue; one confined to a single sandbox may point at a per-sandbox config drift instead.

@@ -121,7 +121,7 @@ function defaultAgents() {
       name: 'Prophet',
       description: 'Aggressive discretionary options trader with scalping overlay',
       systemPromptTemplate: 'default',
-      strategyId: 'default',
+      strategyId: 'v2-options',
       model: 'anthropic/claude-sonnet-4-6',
       heartbeatOverrides: {},
       customSystemPrompt: '',
@@ -267,14 +267,6 @@ Use get_trend_signal({ symbol }) to read the daily-bar Donchian-100 high, Donchi
 
 function defaultStrategies() {
   return [
-    {
-      id: 'default',
-      name: 'Aggressive Options',
-      description: 'Multi-timeframe options with scalping overlay',
-      rulesFile: 'TRADING_RULES.md',
-      customRules: null,
-      createdAt: new Date().toISOString(),
-    },
     {
       id: 'harvest',
       name: 'Harvest — Iron Condor Premium Seller',
@@ -937,7 +929,7 @@ export async function updateStrategy(id, updates) {
 }
 
 export async function removeStrategy(id) {
-  if (id === 'default') throw new Error('Cannot remove default strategy');
+  if (id === 'v2-options') throw new Error('Cannot remove the canonical Prophet strategy (v2-options)');
   _config.strategies = _config.strategies.filter(s => s.id !== id);
   await saveConfig();
 }
