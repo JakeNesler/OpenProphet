@@ -3386,11 +3386,10 @@ async function assignStrategyToAgent(strategyId, agentId) {
 }
 
 function getSandboxPort(sandboxId) {
-  let hash = 0;
-  for (const char of String(sandboxId || 'default')) {
-    hash = (hash * 31 + char.charCodeAt(0)) % 1000;
-  }
-  return 4534 + (hash % 10) + 1;
+  const sortedIds = Object.keys(config.sandboxes || {}).sort();
+  const idx = sortedIds.indexOf(sandboxId);
+  if (idx < 0) return 4535;
+  return 4535 + idx;
 }
 
 function renderAccounts() {

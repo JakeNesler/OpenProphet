@@ -25,14 +25,6 @@ const HARNESS_EVENTS = [
   'tool_call', 'tool_result', 'heartbeat_change', 'schedule', 'trade',
 ];
 
-function portOffsetForSandbox(sandboxId) {
-  let hash = 0;
-  for (const char of String(sandboxId || 'default')) {
-    hash = (hash * 31 + char.charCodeAt(0)) % 1000;
-  }
-  return hash;
-}
-
 export class AgentOrchestrator extends EventEmitter {
   constructor(options = {}) {
     super();
@@ -45,13 +37,12 @@ export class AgentOrchestrator extends EventEmitter {
   }
 
   getSandboxPort(sandboxId) {
-    // Use hash of sandboxId to create deterministic port offset (1-10)
-    let hash = 0;
-    for (const char of String(sandboxId || 'default')) {
-      hash = (hash * 31 + char.charCodeAt(0)) % 1000;
-    }
-    const offset = (hash % 10) + 1; // Ports 4535-4544
-    return this.tradingBotBasePort + offset;
+    // Sequential assignment by sorted sandbox id — guarantees no port collisions
+    // across the configured sandbox set. Stable as long as the set doesn't change.
+    const sortedIds = getSandboxes().map(s => s.id).sort();
+    const idx = sortedIds.indexOf(sandboxId);
+    if (idx < 0) return this.tradingBotBasePort + 1;
+    return this.tradingBotBasePort + 1 + idx;
   }
 
   getSandboxDbPath(sandboxId) {

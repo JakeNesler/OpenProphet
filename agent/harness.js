@@ -787,6 +787,11 @@ ${userBlock}`;
         this.state.emit('beat_end', { beat: beatNum, phase, skipped: true });
         this._beating = false;
         return;
+      } else if (preflight.reason) {
+        this.state.emit('agent_log', {
+          message: `Beat #${beatNum} preflight: did not skip — ${preflight.reason}`,
+          level: 'info',
+        });
       }
     }
 
