@@ -125,6 +125,24 @@ func nextRefreshTime(now time.Time) time.Time {
 	return candidate
 }
 
+// Start runs the daily refresh loop until ctx is cancelled.
+// Fires an immediate refresh on entry so the cache is populated as
+// quickly as possible after agent startup, then schedules at 07:00 ET
+// daily.
+func (s *PennyMaxFilterService) Start(ctx context.Context) {
+	s.refresh(ctx)
+	for {
+		next := nextRefreshTime(s.nowFunc())
+		sleepDuration := next.Sub(s.nowFunc())
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(sleepDuration):
+			s.refresh(ctx)
+		}
+	}
+}
+
 // computeMaxFromBars returns the MAX entry computed from ascending-time
 // daily bars. ok=false when fewer than 2 bars are available (zero returns).
 // Uses the most recent 22 bars to produce up to 21 close-to-close returns.
