@@ -168,7 +168,8 @@ func main() {
 	pennyScreenerService := services.NewPennyScreenerService(cfg.AlpacaAPIKey, cfg.AlpacaSecretKey, pennyUniverseService)
 	secEdgarService := services.NewSECEdgarService(pennyUniverseService, nil, cfg.OperatorEmail, earningsService)
 	socialSignalService := services.NewSocialSignalService(pennyUniverseService, nil)
-	pennyAggregator := services.NewPennySignalAggregator(pennyUniverseService, pennyScreenerService, secEdgarService, socialSignalService)
+	pennyMaxFilter := services.NewPennyMaxFilterService(pennyUniverseService, dataService)
+	pennyAggregator := services.NewPennySignalAggregator(pennyUniverseService, pennyScreenerService, secEdgarService, socialSignalService, pennyMaxFilter)
 	pennyController := controllers.NewPennyController(pennyAggregator)
 
 	// Wire dilution filter to operator-visible held-position logging.
@@ -179,6 +180,7 @@ func main() {
 	go pennyScreenerService.Start(ctx)
 	go secEdgarService.Start(ctx)
 	go socialSignalService.Start(ctx)
+	go pennyMaxFilter.Start(ctx)
 	go pennyAggregator.Start(ctx)
 
 	logger.Debug("Penny stock signal pipeline started")
