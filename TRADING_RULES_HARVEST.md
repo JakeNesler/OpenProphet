@@ -82,6 +82,8 @@ Skip this underlying if:
 Call `get_harvest_ivr` for this underlying.
 - If `ivr` < 30 → skip, log "IVR {value} below 30 for {underlying}"
 - If `quote_age_seconds` > 60 → skip, log "stale quote for {underlying}"
+- If `realized_vol_20d` > 0 AND `iv_minus_rv` ≤ 0 → skip, log "no premium edge for {underlying}: IV {current_iv} ≤ RV {realized_vol_20d}". Selling condors when implied vol is at or below realized vol means writing premium at fair value or worse — no edge for the strategy.
+- If `realized_vol_20d` == 0 → ignore the IV–RV spread for this underlying (insufficient data). The IVR ≥ 30 check still applies.
 
 Call `get_harvest_expirations` for this underlying.
 - If no expiration returned → skip, log "no monthly expiration in [35,55] DTE for {underlying}"

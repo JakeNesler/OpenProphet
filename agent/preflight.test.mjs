@@ -166,3 +166,98 @@ test('harvest: existing 24h FOMC blackout still skips (econ check not required)'
   assert.equal(r.skip, true);
   assert.match(r.reason, /FOMC blackout/);
 });
+
+// ── harvest IV/RV spread gate ──────────────────────────────────────
+//
+// All these tests succeed past the chain probe — i.e., everything before the
+// new gate passes — so the new gate decides the outcome.
+
+const harvestExpiration = (date = '2026-06-19') => ({ data: { expiration_date: date } });
+const chainNonEmpty = () => ({ data: { total: 100 } });
+const ivSpread = (rv, ivMinusRV) => ({
+  data: {
+    underlying: 'SPY',
+    current_iv: rv + ivMinusRV,
+    realized_vol_20d: rv,
+    iv_minus_rv: ivMinusRV,
+  },
+});
+
+test('harvest: IV > RV → run (premium edge present)', async () => {
+  const rt = makeRuntime([
+    ['/api/v1/harvest/state', () => harvestState(0)],
+    ['/api/v1/harvest/fomc', () => fomcStatus(false)],
+    ['/api/v1/econ/blackout', () => blackoutOff()],
+    ['/api/v1/harvest/expirations/SPY', () => harvestExpiration()],
+    [/^\/api\/v1\/options\/chain\/SPY/, () => chainNonEmpty()],
+    ['/api/v1/iv/SPY', () => ivSpread(0.15, 0.04)], // IV 19, RV 15 → spread +4
+  ]);
+  const r = await resolvePreflight('harvest', rt, {});
+  assert.equal(r.skip, false, `expected run, got skip: ${r.reason}`);
+});
+
+test('harvest: IV ≤ RV with positive RV → skip (no premium edge)', async () => {
+  const rt = makeRuntime([
+    ['/api/v1/harvest/state', () => harvestState(0)],
+    ['/api/v1/harvest/fomc', () => fomcStatus(false)],
+    ['/api/v1/econ/blackout', () => blackoutOff()],
+    ['/api/v1/harvest/expirations/SPY', () => harvestExpiration()],
+    [/^\/api\/v1\/options\/chain\/SPY/, () => chainNonEmpty()],
+    ['/api/v1/iv/SPY', () => ivSpread(0.20, -0.02)], // IV 18, RV 20 → spread -2
+  ]);
+  const r = await resolvePreflight('harvest', rt, {});
+  assert.equal(r.skip, true);
+  assert.match(r.reason, /IV.*RV|premium edge/i);
+});
+
+test('harvest: IV = RV exactly → skip (spread ≤ 0)', async () => {
+  const rt = makeRuntime([
+    ['/api/v1/harvest/state', () => harvestState(0)],
+    ['/api/v1/harvest/fomc', () => fomcStatus(false)],
+    ['/api/v1/econ/blackout', () => blackoutOff()],
+    ['/api/v1/harvest/expirations/SPY', () => harvestExpiration()],
+    [/^\/api\/v1\/options\/chain\/SPY/, () => chainNonEmpty()],
+    ['/api/v1/iv/SPY', () => ivSpread(0.20, 0)],
+  ]);
+  const r = await resolvePreflight('harvest', rt, {});
+  assert.equal(r.skip, true);
+});
+
+test('harvest: RV = 0 (no signal) → fall through, do not skip', async () => {
+  // RealizedVol unavailable: gate must not fire (would otherwise pass since
+  // iv_minus_rv = current_iv - 0 > 0, but we explicitly require RV > 0).
+  const rt = makeRuntime([
+    ['/api/v1/harvest/state', () => harvestState(0)],
+    ['/api/v1/harvest/fomc', () => fomcStatus(false)],
+    ['/api/v1/econ/blackout', () => blackoutOff()],
+    ['/api/v1/harvest/expirations/SPY', () => harvestExpiration()],
+    [/^\/api\/v1\/options\/chain\/SPY/, () => chainNonEmpty()],
+    ['/api/v1/iv/SPY', () => ({ data: { current_iv: 0.20, realized_vol_20d: 0, iv_minus_rv: 0 } })],
+  ]);
+  const r = await resolvePreflight('harvest', rt, {});
+  assert.equal(r.skip, false);
+});
+
+test('harvest: IV endpoint errors → fall through (soft-fail)', async () => {
+  const rt = makeRuntime([
+    ['/api/v1/harvest/state', () => harvestState(0)],
+    ['/api/v1/harvest/fomc', () => fomcStatus(false)],
+    ['/api/v1/econ/blackout', () => blackoutOff()],
+    ['/api/v1/harvest/expirations/SPY', () => harvestExpiration()],
+    [/^\/api\/v1\/options\/chain\/SPY/, () => chainNonEmpty()],
+    ['/api/v1/iv/SPY', () => { throw new Error('iv endpoint down'); }],
+  ]);
+  const r = await resolvePreflight('harvest', rt, {});
+  assert.equal(r.skip, false, 'soft-fail expected on IV endpoint error');
+});
+
+test('harvest: open condor + IV ≤ RV → run (exits must happen)', async () => {
+  const rt = makeRuntime([
+    ['/api/v1/harvest/state', () => harvestState(2)],
+    ['/api/v1/harvest/fomc', () => fomcStatus(false)],
+    // IV endpoint should not even be hit because open condors > 0 returns
+    // before the gate runs. Leave it unmocked to assert it isn't called.
+  ]);
+  const r = await resolvePreflight('harvest', rt, {});
+  assert.equal(r.skip, false);
+});

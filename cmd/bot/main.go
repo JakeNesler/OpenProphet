@@ -217,9 +217,15 @@ func main() {
 		return tradingService.PlaceMultiLegOrder(ctx, order)
 	})
 
+	// Realized-vol service used to compute the IV–RV spread that gates
+	// Harvest condor entries. Wired into both HarvestController (legacy
+	// harvest/ivr route) and IVController (generic iv/:symbol route).
+	realizedVolSvc := services.NewRealizedVolService(dataService)
+
 	harvestController := controllers.NewHarvestController(
 		harvestSvc,
 		harvestIVRSvc,
+		realizedVolSvc,
 		storageService,
 		placeMLegFn,
 		getPortfolioValue,
@@ -240,8 +246,9 @@ func main() {
 	segmentPnLController := controllers.NewSegmentPnLController(segmentPnLSvc)
 	logger.Debug("Segment P&L service initialized")
 
-	// Generic IV-rank controller (shared by Harvest and Prophet via /api/v1/iv/:symbol)
-	ivController := controllers.NewIVController(harvestIVRSvc)
+	// Generic IV-rank controller (shared by Harvest and Prophet via /api/v1/iv/:symbol).
+	// rvSvc enriches the response with realized_vol_20d + iv_minus_rv.
+	ivController := controllers.NewIVController(harvestIVRSvc, realizedVolSvc)
 	logger.Debug("IV controller initialized")
 
 	// Intraday signal service + controller (auto-pushed into Prophet beats,

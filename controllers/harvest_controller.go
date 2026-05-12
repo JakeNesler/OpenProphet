@@ -27,6 +27,7 @@ type harvestStorage interface {
 type HarvestController struct {
 	harvestSvc   *services.HarvestService
 	ivrSvc       *services.HarvestIVRService
+	rvSvc        *services.RealizedVolService // optional; enriches IVR responses with RV/spread
 	storage      harvestStorage
 	placeMLeg    services.PlaceMultiLegOrderFn
 	getPortfolio func() (float64, error)
@@ -35,9 +36,12 @@ type HarvestController struct {
 // NewHarvestController creates the controller.
 // placeMLeg is injected so tests can stub it without a broker.
 // getPortfolio returns the current total account equity.
+// rvSvc may be nil; when present, /api/v1/harvest/ivr/:symbol responses
+// include RealizedVol20d and IVMinusRV used by the premium-edge gate.
 func NewHarvestController(
 	harvestSvc *services.HarvestService,
 	ivrSvc *services.HarvestIVRService,
+	rvSvc *services.RealizedVolService,
 	storage harvestStorage,
 	placeMLeg services.PlaceMultiLegOrderFn,
 	getPortfolio func() (float64, error),
@@ -45,6 +49,7 @@ func NewHarvestController(
 	return &HarvestController{
 		harvestSvc:   harvestSvc,
 		ivrSvc:       ivrSvc,
+		rvSvc:        rvSvc,
 		storage:      storage,
 		placeMLeg:    placeMLeg,
 		getPortfolio: getPortfolio,
@@ -96,6 +101,14 @@ func (hc *HarvestController) HandleGetIVR(c *gin.Context) {
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
+	}
+	// Optional RV enrichment (same pattern as IVController). Fetch failures
+	// leave RealizedVol20d=0 and downstream consumers treat that as "no signal".
+	if hc.rvSvc != nil && data.CurrentIV > 0 {
+		if rv, rvErr := hc.rvSvc.GetAnnualizedRealizedVol(c.Request.Context(), symbol, 20); rvErr == nil && rv > 0 {
+			data.RealizedVol20d = rv
+			data.IVMinusRV = data.CurrentIV - rv
+		}
 	}
 	c.JSON(http.StatusOK, data)
 }

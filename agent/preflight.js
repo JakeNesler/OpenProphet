@@ -344,6 +344,30 @@ async function harvestPreflight(runtime, agentConfig) {
     return { skip: false, reason: `harvest chain probe error: ${err.message}` };
   }
 
+  // SPY IV–RV premium-edge gate. When SPY's stored ATM IV ≤ trailing 20-day
+  // realized vol, the whole vol-selling regime is weak and entries across the
+  // universe would have no edge. Skip the beat. Per-underlying check still
+  // runs in the LLM's Step-3 routine (TRADING_RULES_HARVEST.md).
+  //
+  // Cold-start safety: gate fires only when realized_vol_20d > 0. If the RV
+  // service isn't wired or has insufficient bars, fall through rather than
+  // misread a fabricated positive spread.
+  //
+  // Soft-fail on endpoint error: missing IV data should not block beats.
+  try {
+    const ivResp = await goAxios.get('/api/v1/iv/SPY');
+    const rv = Number(ivResp.data?.realized_vol_20d);
+    const spread = Number(ivResp.data?.iv_minus_rv);
+    if (rv > 0 && Number.isFinite(spread) && spread <= 0) {
+      return {
+        skip: true,
+        reason: `no open condors and SPY IV ≤ RV (spread ${spread.toFixed(4)}, RV ${rv.toFixed(4)}) — no premium-selling edge`,
+      };
+    }
+  } catch (_err) {
+    // Soft-fail; do not block on IV endpoint outage.
+  }
+
   return { skip: false, reason: 'no open condors but chain data available' };
 }
 

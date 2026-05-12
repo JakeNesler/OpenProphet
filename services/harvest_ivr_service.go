@@ -14,15 +14,19 @@ type harvestIVStore interface {
 	GetHarvestIVSnapshots(underlying string, start, end time.Time) ([]*models.DBHarvestIVSnapshot, error)
 }
 
-// IVRData contains the result of an IVR calculation.
+// IVRData contains the result of an IVR calculation, optionally enriched
+// with realized vol context (composed at the controller layer when a
+// RealizedVolService is wired in).
 type IVRData struct {
-	Underlying    string
-	CurrentIV     float64
-	Low52Wk       float64
-	High52Wk      float64
-	IVR           float64 // -1 means insufficient history
-	IVPercentile  float64 // -1 means insufficient history; 0..100 otherwise
-	DaysOfHistory int
+	Underlying     string  `json:"underlying"`
+	CurrentIV      float64 `json:"current_iv"`
+	Low52Wk        float64 `json:"low52_wk"`
+	High52Wk       float64 `json:"high52_wk"`
+	IVR            float64 `json:"ivr"`              // -1 means insufficient history
+	IVPercentile   float64 `json:"iv_percentile"`    // -1 means insufficient history; 0..100 otherwise
+	DaysOfHistory  int     `json:"days_of_history"`
+	RealizedVol20d float64 `json:"realized_vol_20d"` // 0 when not computed or insufficient data
+	IVMinusRV      float64 `json:"iv_minus_rv"`      // CurrentIV - RealizedVol20d; 0 when RV not computed
 }
 
 // HarvestIVRService collects and calculates IV rank for Harvest underlyings.
