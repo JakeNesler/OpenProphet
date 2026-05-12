@@ -29,11 +29,18 @@ Read `TRADING_RULES_HARVEST.md`. Extract the live values of the following parame
 
 Pull the actual numbers as they appear in the file today (the values above are the snapshot at skill-creation time — re-read on every run).
 
-## Step 2 — Load 90 days of harvest activity
+## Step 2 — Resolve sandboxes by agent and load 90 days of harvest activity
 
-1. Glob `data/sandboxes/106af410/activity_logs/activity_*.json`. Read every file with a date within the last 90 calendar days.
-2. Glob `data/sandboxes/106af410/decisive_actions/*.json`. Read every file with a `timestamp` within the last 90 calendar days.
-3. Read `data/sandboxes/106af410/prophet_trader.db` if you can — the `harvest_condors` table is the authoritative source for realized condor P&L. Per-row fields you care about (verify exact column names by inspecting the table schema first):
+This skill aggregates condor history from **every** sandbox running the `harvest` agent — not by sandbox name, never by hardcoded ID.
+
+1. Read `data/agent-config.json`. In `agents[]`, find `id === 'harvest'` (fallback: name matching `/harvest/i`).
+2. Iterate `sandboxes`, keep every entry where `agent.activeAgentId === 'harvest'`. Collect their `accountId` values as `<HARVEST_DIRS>`. State the resolved list before continuing. If empty, stop and tell the user no sandbox currently uses the agent.
+
+Then, for each `<DIR>` in `<HARVEST_DIRS>`:
+
+a. Glob `data/sandboxes/<DIR>/activity_logs/activity_*.json`. Read every file with a date within the last 90 calendar days.
+b. Glob `data/sandboxes/<DIR>/decisive_actions/*.json`. Read every file with a `timestamp` within the last 90 calendar days.
+c. Read `data/sandboxes/<DIR>/prophet_trader.db` if you can — the `harvest_condors` table is the authoritative source for realized condor P&L. Per-row fields you care about (verify exact column names by inspecting the table schema first):
    - underlying, opened_at, closed_at, status (CLOSED is the cohort you analyze)
    - credit_received, cost_to_close, realized_pnl
    - dte_at_entry, dte_at_exit
@@ -42,7 +49,9 @@ Pull the actual numbers as they appear in the file today (the values above are t
    - wing_width, contracts
    - exit_reason (which priority fired: time / loss / profit)
 
-If the DB is unreadable for any reason, fall back to reconstructing the same data from `decisive_actions` `reasoning` + `market_data` fields (entries log credit/strikes/DTE/IVR; exits log cost-to-close and exit reason). DB is preferred — fall back only when necessary, and note in the report that the analysis was reconstructed from logs.
+Tag every loaded condor row with the sandbox it came from. The closed-condor cohort and parameter analyses in Steps 3-5 are computed on the **merged** cohort across all `<HARVEST_DIRS>`. Per-sandbox breakdowns are reported only when a finding diverges by sandbox (e.g. one sandbox has all the IWM losers).
+
+If the DB is unreadable for a sandbox, fall back to reconstructing that sandbox's condor history from `decisive_actions` `reasoning` + `market_data` fields (entries log credit/strikes/DTE/IVR; exits log cost-to-close and exit reason). DB is preferred — fall back only when necessary, and note in the report which sandbox(es) required a fallback.
 
 ## Step 3 — Sample-size guard (MANDATORY, NON-NEGOTIABLE)
 

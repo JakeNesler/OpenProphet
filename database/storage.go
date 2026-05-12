@@ -296,7 +296,11 @@ func (s *LocalStorage) CleanupOldData(before time.Time) error {
 
 // Additional helper methods
 
-// SavePosition saves a position snapshot
+// SavePosition upserts the current-state row for a symbol. The DBPosition
+// schema has a uniqueIndex on Symbol — one row per symbol = current snapshot.
+// db.Save() requires a primary key to update; without one it INSERTs and trips
+// the unique index every monitor tick. Use OnConflict(symbol) → UpdateAll so
+// subsequent calls overwrite Qty/MarketValue/UnrealizedPL/etc. in place.
 func (s *LocalStorage) SavePosition(position *interfaces.Position) error {
 	dbPosition := &models.DBPosition{
 		Symbol:         position.Symbol,
@@ -311,7 +315,10 @@ func (s *LocalStorage) SavePosition(position *interfaces.Position) error {
 		SnapshotTime:   time.Now(),
 	}
 
-	result := s.db.Save(dbPosition)
+	result := s.db.Clauses(clause.OnConflict{
+		Columns:   []clause.Column{{Name: "symbol"}},
+		UpdateAll: true,
+	}).Create(dbPosition)
 	if result.Error != nil {
 		return fmt.Errorf("failed to save position: %w", result.Error)
 	}

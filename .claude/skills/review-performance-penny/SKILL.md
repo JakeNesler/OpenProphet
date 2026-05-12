@@ -8,9 +8,17 @@ You are doing a structured performance review for the PennyProphet autonomous tr
 
 ## Step 1 — Load data
 
-1. Glob `data/sandboxes/a788a4e3/activity_logs/activity_*.json` and read the **7 most recent** files (sort by filename descending).
-2. Glob `data/sandboxes/a788a4e3/decisive_actions/*.json` and read the **80 most recent** files (sort by filename descending).
-3. Read `data/agent-config.json` — find the strategy with id `penny-momentum`, extract its name and current `customRules`.
+This skill aggregates history from every sandbox running the **`penny-prophet`** agent (name "PennyProphet"). Sandboxes are resolved by agent, never by sandbox name or hardcoded ID.
+
+1. Read `data/agent-config.json`.
+2. In `agents[]`, find `id === 'penny-prophet'` (fallback: name matching `/penny/i`). Note its `strategyId` (expected: `penny-momentum`).
+3. In `strategies[]`, find the entry with that id — extract strategy `name`, `id`, and `customRules`. This is the rulebook the audit will compare behavior against.
+4. Iterate `sandboxes` and keep every entry where `agent.activeAgentId === 'penny-prophet'`. Collect their `accountId` values as `<PENNY_DIRS>`. State the sandbox list (name → accountId) before continuing. If empty, stop and tell the user no sandbox currently uses the agent.
+5. For each `<DIR>` in `<PENNY_DIRS>`:
+   - Glob `data/sandboxes/<DIR>/activity_logs/activity_*.json`, read the **7 most recent per sandbox**.
+   - Glob `data/sandboxes/<DIR>/decisive_actions/*.json`, merge across sandboxes, read the **80 most recent overall** by file mtime.
+
+   Tag every loaded record with the sandbox it came from — large per-sandbox divergences are themselves a finding worth surfacing in Step 5.
 
 PennyProphet generates more trades per day than Prophet (60-second heartbeat during market_open vs Prophet's 600-second), so the windows are wider here than in `review-performance`.
 

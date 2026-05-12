@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"regexp"
 	"sync"
 	"time"
 
@@ -241,11 +242,21 @@ var allowedExchanges = map[string]bool{
 
 var nyLoc, _ = time.LoadLocation("America/New_York")
 
+// plainTickerRegex matches only uppercase-letter tickers. Share-class symbols
+// like CRD-A or BRK.B use punctuation that Alpaca's market-data API rejects
+// with HTTP 400 — fetching them every scan produces a constant stream of
+// useless warnings and burns an API slot per symbol with no chance of returning
+// data. Filter them out at universe-load time.
+var plainTickerRegex = regexp.MustCompile(`^[A-Z]+$`)
+
 func (s *PennyUniverseService) filter(items []fmpScreenerItem) ([]UniverseSymbol, int) {
 	out := make([]UniverseSymbol, 0)
 	excludedForEarnings := 0
 	for _, item := range items {
 		if !allowedExchanges[item.ExchangeShortName] {
+			continue
+		}
+		if !plainTickerRegex.MatchString(item.Symbol) {
 			continue
 		}
 		if item.Price < 2.0 || item.Price > 10.0 {

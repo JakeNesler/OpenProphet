@@ -25,14 +25,6 @@ const HARNESS_EVENTS = [
   'tool_call', 'tool_result', 'heartbeat_change', 'schedule', 'trade',
 ];
 
-function portOffsetForSandbox(sandboxId) {
-  let hash = 0;
-  for (const char of String(sandboxId || 'default')) {
-    hash = (hash * 31 + char.charCodeAt(0)) % 1000;
-  }
-  return hash;
-}
-
 export class AgentOrchestrator extends EventEmitter {
   constructor(options = {}) {
     super();
@@ -42,16 +34,21 @@ export class AgentOrchestrator extends EventEmitter {
     this.chatStore = options.chatStore || null;
     this.runtimes = new Map();
     this._binaryReady = false;
+    // Maps sandboxId → assigned port. Allocated sequentially from basePort+1
+    // upward. The prior hash-mod-10 scheme collided ~10% of the time per pair
+    // (two real sandbox IDs in this project hashed to the same offset), so
+    // every sandbox sharing a host now gets its own dedicated port.
+    this._portAssignments = new Map();
   }
 
   getSandboxPort(sandboxId) {
-    // Use hash of sandboxId to create deterministic port offset (1-10)
-    let hash = 0;
-    for (const char of String(sandboxId || 'default')) {
-      hash = (hash * 31 + char.charCodeAt(0)) % 1000;
-    }
-    const offset = (hash % 10) + 1; // Ports 4535-4544
-    return this.tradingBotBasePort + offset;
+    const existing = this._portAssignments.get(sandboxId);
+    if (existing !== undefined) return existing;
+    const used = new Set(this._portAssignments.values());
+    let candidate = this.tradingBotBasePort + 1;
+    while (used.has(candidate)) candidate++;
+    this._portAssignments.set(sandboxId, candidate);
+    return candidate;
   }
 
   getSandboxDbPath(sandboxId) {
@@ -221,6 +218,25 @@ export class AgentOrchestrator extends EventEmitter {
         level: code === 0 || signal === 'SIGTERM' ? 'info' : 'error',
         message: `Trading backend exited (code: ${code}, signal: ${signal})`,
       });
+      // Auto-restart on unexpected crash (mirrors the prior singleton safety net).
+      // SIGTERM means we asked it to stop (manual stop, shutdown, or restart) — don't bounce it.
+      if (code !== 0 && code !== null && signal !== 'SIGTERM') {
+        this.emit('agent_log', {
+          sandboxId,
+          level: 'error',
+          message: 'Trading backend crashed — auto-restarting in 5s...',
+        });
+        setTimeout(() => {
+          if (!this.runtimes.has(sandboxId)) return; // runtime was torn down
+          this.startGoBackend(sandboxId).catch(err => {
+            this.emit('agent_log', {
+              sandboxId,
+              level: 'error',
+              message: `Auto-restart failed: ${err.message}`,
+            });
+          });
+        }, 5000);
+      }
     });
 
     for (let i = 0; i < 20; i++) {

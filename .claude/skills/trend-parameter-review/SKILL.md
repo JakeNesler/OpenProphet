@@ -32,17 +32,26 @@ Read `TRADING_RULES_TREND.md`. Extract live values for the parameters below (the
 | Cold-start proximity filter | Cold Start Behavior | ≤ 1 ATR (one-time, structural — do not propose) |
 | Universe | Universe table | TLT, GLD, USO, DBC, UUP, EEM |
 
-## Step 2 — Load 6 months of trend activity
+## Step 2 — Resolve sandboxes by agent and load 6 months of trend activity
 
-1. Glob `data/sandboxes/37393fb0/activity_logs/activity_*.json`. Read every file dated within the last 180 calendar days.
-2. Glob `data/sandboxes/37393fb0/decisive_actions/*.json`. Read every file with a `timestamp` within the last 180 calendar days.
-3. Read `data/sandboxes/37393fb0/prophet_trader.db` if you can. The trend ledger is persisted to disk per `TRADING_RULES_TREND.md` "Persisted Ledger" section. Verify exact table name and column names by inspecting the schema first; expected columns:
+This skill aggregates trade history from **every** sandbox running the `trend-prophet` agent — not by sandbox name, never by hardcoded ID.
+
+1. Read `data/agent-config.json`. In `agents[]`, find `id === 'trend-prophet'` (fallback: name matching `/trend/i`).
+2. Iterate `sandboxes`, keep every entry where `agent.activeAgentId === 'trend-prophet'`. Collect their `accountId` values as `<TREND_DIRS>`. State the resolved list before continuing. If empty, stop and tell the user no sandbox currently uses the agent.
+
+Then, for each `<DIR>` in `<TREND_DIRS>`:
+
+a. Glob `data/sandboxes/<DIR>/activity_logs/activity_*.json`. Read every file dated within the last 180 calendar days.
+b. Glob `data/sandboxes/<DIR>/decisive_actions/*.json`. Read every file with a `timestamp` within the last 180 calendar days.
+c. Read `data/sandboxes/<DIR>/prophet_trader.db` if you can. The trend ledger is persisted to disk per `TRADING_RULES_TREND.md` "Persisted Ledger" section. Verify exact table name and column names by inspecting the schema first; expected columns:
    - ticker, entry_date, entry_price, shares, atr_at_entry, initial_stop, donchian_100_high_at_entry
    - exit_date, exit_price, exit_reason ∈ {trailing_stop, initial_hard_stop, manual, circuit_breaker}
    - realized_pnl, status ∈ {open, closed, pending_fill}
    - cold_start_completed flag
 
-If the DB is unreadable, fall back to reconstructing the trade log from the decisive_actions stream (entries log entry_price/atr/Donchian-100/Donchian-50; exits log exit_reason and realized_pnl). DB is preferred — note in the report when a fallback was used.
+Tag every loaded record (trade row, decisive action, activity entry) with the sandbox it came from. The completed-trade cohort, per-ticker stats, and parameter analyses in Steps 3-5 are computed on the **merged** cohort across all `<TREND_DIRS>`. Per-sandbox breakdowns are reported only when a finding diverges by sandbox (e.g. trail-50 effectiveness materially different between sandboxes for the same ticker).
+
+If the DB is unreadable for a sandbox, fall back to reconstructing that sandbox's trade log from its decisive_actions stream (entries log entry_price/atr/Donchian-100/Donchian-50; exits log exit_reason and realized_pnl). DB is preferred — note in the report which sandbox(es) required a fallback.
 
 ## Step 3 — Sample-size guard (MANDATORY, NON-NEGOTIABLE)
 
