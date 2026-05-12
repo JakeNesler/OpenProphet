@@ -116,6 +116,16 @@
 
 ---
 
+## Pre-Trade Blackout Checks
+
+**Rule:** Check US economic-release blackout before any new entry
+- Tool: `mcp__prophet__get_econ_blackout_status` (call ONCE per beat, before considering any new entry)
+- Window: 30 min before / 15 min after CPI, NFP, FOMC, PCE, PPI, core retail sales
+- If `is_blackout=true` OR the `error` field is non-empty → NO new entries this beat. Manage existing positions only.
+- Rationale: Entries in release windows are among the most common avoidable losses; the LLM cannot price volatility shocks better than the market does in the surrounding 45 minutes.
+
+---
+
 ## Trade Execution
 
 **Rule:** Opening volatility trading allowed (9:30-9:45 AM)

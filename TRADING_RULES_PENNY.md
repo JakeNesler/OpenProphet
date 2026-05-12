@@ -275,6 +275,7 @@ Log the circuit breaker trigger via `log_decision` with type `CIRCUIT_BREAKER`.
 
 Before every penny stock entry:
 
+- [ ] `get_econ_blackout_status` returned `is_blackout=false` AND no `error` field? (Call once per beat before the first entry. If blackout or error → skip ALL new entries this beat; manage existing positions only.)
 - [ ] `get_penny_candidates` returned this ticker at score ≥ 60?
 - [ ] `get_penny_signal_detail` confirms dominant signal type?
 - [ ] Position size within tier limits (2–7%, hard cap 8%)?

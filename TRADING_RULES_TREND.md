@@ -342,6 +342,7 @@ Log one line via `log_activity`:
 
 Before every trend entry:
 
+- [ ] `get_econ_blackout_status` returned `is_blackout=false` AND no `error` field? (Call once per beat before the first entry. If blackout or error → skip ALL new entries this beat; manage existing positions only.)
 - [ ] `last_close` > Donchian-100 high?
 - [ ] `last_close` > 200-day SMA?
 - [ ] ATR(20) / `last_close` ≥ 0.5%?

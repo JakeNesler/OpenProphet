@@ -702,6 +702,11 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         },
       },
       {
+        name: 'get_econ_blackout_status',
+        description: 'Returns the current US-economic-release blackout status. Window is 30 minutes before / 15 minutes after CPI, NFP, FOMC, PCE, PPI, and core retail sales releases. Response fields: is_blackout (bool), reason (string), blackout_until (ISO time), next_event, window_before_min, window_after_min, error (string when fetch failed). RULES: call once per beat before considering any new entry. If is_blackout=true OR error is non-empty, do NOT open new positions this beat — manage existing positions only.',
+        inputSchema: { type: 'object', properties: {} },
+      },
+      {
         name: 'analyze_stocks',
         description: 'Analyze multiple stocks with comprehensive technical indicators, news, and AI-powered recommendations. Returns RSI, trend, volatility, support/resistance, catalysts, and trade recommendations for each stock.',
         inputSchema: {
@@ -1986,6 +1991,11 @@ ${allNews.map((article, i) =>
       }
       case 'get_global_trade_flows': {
         const data = await callTradingBot('/feeds/comtrade');
+        return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
+      }
+
+      case 'get_econ_blackout_status': {
+        const data = await callTradingBot('/econ/blackout');
         return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
       }
 

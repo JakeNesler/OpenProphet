@@ -81,9 +81,17 @@ func main() {
 	newsService := services.NewNewsService()
 	newsController := controllers.NewNewsController(newsService)
 
-	// Create economic feeds service and controller
+	// Create economic feeds service and controller.
+	// EconCalendarService is optional: when FMP_API_KEY is unset, the
+	// /api/v1/econ/blackout endpoint returns 503 and preflight fails open.
 	economicFeedsService := services.NewEconomicFeedsService()
-	economicFeedsController := controllers.NewEconomicFeedsController(economicFeedsService)
+	var econCalendarService *services.EconCalendarService
+	if cfg.FMPAPIKey != "" {
+		econCalendarService = services.NewEconCalendarService(cfg.FMPAPIKey)
+	} else {
+		logger.Warn("FMP_API_KEY unset — econ blackout endpoint will return 503 and preflight will fail open")
+	}
+	economicFeedsController := controllers.NewEconomicFeedsController(economicFeedsService, econCalendarService)
 
 	// Create AI news cleaner (provider selected via AI_PROVIDER env var or auto-detected)
 	var aiService services.NewsCleanerService
@@ -337,6 +345,9 @@ func setupRouter(orderController *controllers.OrderController, newsController *c
 		api.GET("/feeds/usaspending", economicFeedsController.HandleGetUSASpending)
 		api.GET("/feeds/comtrade", economicFeedsController.HandleGetComtrade)
 
+		// US-economic-release blackout window (shared across all four agents)
+		api.GET("/econ/blackout", economicFeedsController.HandleGetEconBlackout)
+
 		api.GET("/activity/current", activityController.HandleGetCurrentActivity)
 		api.GET("/activity/:date", activityController.HandleGetActivityByDate)
 		api.GET("/activity", activityController.HandleListActivityLogs)
@@ -460,7 +471,13 @@ func calcATMIV(chain []*interfaces.OptionContract) float64 {
 	return sum / float64(count)
 }
 
-// Background task to monitor and save positions
+// Background task to monitor and save account snapshots.
+//
+// Position snapshots were previously written here but the DBPosition schema's
+// uniqueIndex on Symbol made every save after the first per symbol error with
+// `UNIQUE constraint failed: positions.symbol`. Nothing in the codebase reads
+// the positions table, so the save was removed rather than fixed. Position
+// history is available via DBOrder + Alpaca's live positions endpoint.
 func startPositionMonitor(ctx context.Context, orderController *controllers.OrderController, storage *database.LocalStorage, logger *logrus.Logger) {
 	ticker := time.NewTicker(5 * time.Minute) // Check every 5 minutes
 	defer ticker.Stop()
@@ -470,28 +487,11 @@ func startPositionMonitor(ctx context.Context, orderController *controllers.Orde
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			// Get current positions
-			positions, err := orderController.GetPositions()
-			if err != nil {
-				logger.WithError(err).Error("Failed to get positions")
-				continue
-			}
-
-			// Save position snapshots
-			for _, position := range positions {
-				if err := storage.SavePosition(position); err != nil {
-					logger.WithError(err).Error("Failed to save position snapshot")
-				}
-			}
-
-			// Get and save account snapshot
 			if account, err := orderController.GetAccount(); err == nil {
 				if err := storage.SaveAccountSnapshot(account); err != nil {
 					logger.WithError(err).Error("Failed to save account snapshot")
 				}
 			}
-
-			logger.WithField("positions", len(positions)).Debug("Position monitor update complete")
 		}
 	}
 }

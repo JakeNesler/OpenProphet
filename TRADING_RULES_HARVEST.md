@@ -47,6 +47,8 @@ Call `get_harvest_state`. If any of the following are true, skip Steps 2–3 ent
 
 Call `get_harvest_fomc`. If `is_blackout` is true, skip Steps 2–3 entirely.
 
+Call `get_econ_blackout_status` (once per beat). If `is_blackout` is true OR the `error` field is non-empty, skip Step 3 (new entries) entirely — exit-management in Step 2 still runs. This is the shared US-release blackout (CPI, NFP, PCE, PPI, core retail) and stacks on top of the 24h pre-FOMC ban above.
+
 ### Step 2: Exit checks (for each open condor in `get_harvest_state` response)
 
 For each condor in `open_condors_detail`:
