@@ -1,41 +1,39 @@
 ---
 name: adapt-strategy
-description: Analyze recent trading performance, identify what rules are drifting or broken, and propose + apply targeted edits to the Aggressive Options v2 strategy. This is the primary learning loop — run it weekly or after any bad stretch.
+description: Analyze recent trading performance across every sandbox running the Prophet agent (`default`), identify what rules are drifting or broken, and propose + apply targeted edits to whatever strategy that agent currently points at. This is the primary learning loop — run it weekly or after any bad stretch.
 allowed-tools: Read Glob
 ---
 
 You are closing the learning loop for the Prophet trading agent. Your job is to read what the agent actually did, compare it to what the strategy says it should do, find the gaps, and propose concrete rule changes — then apply the ones the user approves.
 
-## Step 1 — Load current strategy
+## Step 1 — Resolve target agent, strategy, and sandboxes
 
-Read `data/agent-config.json`. Find the strategy with name `Aggressive Options v2` and extract its full `customRules` text. This is the ground truth you will be editing.
+This skill targets the **`default`** agent (name "Prophet"). Sandboxes are resolved by agent — never by sandbox name. Activity from every sandbox running this agent is aggregated so the strategy is tuned against the full history.
 
-Also note: the `id` of this strategy (you will need it if applying changes).
+1. Read `data/agent-config.json`.
+2. In `agents[]`, find the entry with `id === 'default'` (fallback: `name` containing `"Prophet"` case-insensitive, excluding `"PennyProphet"` and `"TrendProphet"`). Take its `strategyId` — this is the strategy this skill will edit.
+3. In `strategies[]`, find the entry with that `id`. Extract `id`, `name`, and the full `customRules` text. State the strategy name + id in one line before continuing — this is the ground truth you will be editing.
+4. Iterate `sandboxes` (object map). Keep every entry whose `agent.activeAgentId === 'default'`. For each kept entry, record `(name, accountId)`. Call this list `<PROPHET_DIRS>`.
+5. If `<PROPHET_DIRS>` is empty, stop and tell the user: "No sandbox currently uses agent `default`. Assign it to a sandbox first." Do not proceed.
 
-## Step 2 — Resolve the Prophet sandbox directory
+State the resolved sandbox list (sandbox name → accountId directory) before continuing. Steps 3 and 4 below glob across **every** directory in `<PROPHET_DIRS>` and merge results.
 
-Sandbox IDs rotate when the user resets accounts, so do NOT hardcode an ID. From the same `data/agent-config.json` you just read, resolve the Prophet sandbox in this order:
+## Step 3 — Load recent decisions (last 30 days, all Prophet sandboxes)
 
-1. Iterate `sandboxes` (object map). Pick the entry whose `name` is `"Paper (from .env)"`, or otherwise contains `"Paper"` / `"Prophet"` (case-insensitive). Take that entry's `accountId` field — this is the on-disk directory name.
-2. If no name match, fall back to the top-level `activeSandboxId`, stripping the `sbx_` prefix (e.g. `sbx_6e4f26af` → `6e4f26af`).
-3. Verify the resolved directory exists at `data/sandboxes/<dir>/activity_logs/` and contains `activity_*.json` files. If it is empty (freshly rotated sandbox), Glob `data/sandboxes/*/activity_logs/activity_*.json`, group files by their parent sandbox directory, and pick the directory whose newest `activity_*.json` is most recent overall. That is the live Prophet sandbox.
-
-Record the resolved directory name as `<PROPHET_SANDBOX>` and use it for Steps 3 and 4. State which sandbox you resolved and why (one line) before continuing.
-
-## Step 3 — Load recent decisions (last 30 days)
-
-Glob `data/sandboxes/<PROPHET_SANDBOX>/decisive_actions/*.json`. Read the 60 most recent files. For each, extract:
+For each `<DIR>` in `<PROPHET_DIRS>`: glob `data/sandboxes/<DIR>/decisive_actions/*.json`. Merge all matched files into one list, sort by file mtime descending, read the **60 most recent overall** (not 60 per sandbox). For each, extract:
 - `timestamp`
+- `sandboxId` (record which directory it came from — useful for gap analysis if a pattern is sandbox-specific)
 - `action` (BUY / SELL / HOLD / etc.)
 - `symbol`
 - `reasoning` (full text)
 
-## Step 4 — Load recent P&L context
+## Step 4 — Load recent P&L context (all Prophet sandboxes)
 
-Glob `data/sandboxes/<PROPHET_SANDBOX>/activity_logs/activity_*.json`. Read the 8 most recent. From each `summary`:
+For each `<DIR>` in `<PROPHET_DIRS>`: glob `data/sandboxes/<DIR>/activity_logs/activity_*.json`. Read the **8 most recent per sandbox**. From each `summary`:
 - winning_trades, losing_trades, total_pnl, largest_win, largest_loss
+- Tag the row with its sandbox name
 
-Compute aggregate profit factor across all loaded days.
+Compute aggregate profit factor across all loaded days from all sandboxes combined. Also note per-sandbox profit factor — large divergences (one sandbox profitable, another deeply red) are themselves a finding worth surfacing in Step 5.
 
 ## Step 5 — Gap analysis
 
@@ -96,9 +94,9 @@ Show the user all proposed edits clearly. Ask which ones to apply. Do not modify
 
 For each approved edit:
 1. Re-read `data/agent-config.json` to get the freshest version.
-2. In the `strategies` array, find the entry with name `Aggressive Options v2`.
+2. In the `strategies` array, find the entry by **the `id` you resolved in Step 1** (do NOT look up by name — names can drift, the id is the link from the agent to the strategy).
 3. Edit `customRules` — replace the old rule text with the new rule text exactly as proposed. Preserve all surrounding content.
 4. Update `updatedAt` on the strategy entry to now (ISO string).
 5. Write the file back.
 
-After all edits are applied, show the final diff of what changed in the strategy's `customRules`. Remind the user the changes take effect on the agent's next heartbeat.
+After all edits are applied, show the final diff of what changed in the strategy's `customRules`. Remind the user the changes take effect on the next heartbeat of **every** sandbox using agent `default` — all of them share this strategy.

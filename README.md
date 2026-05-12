@@ -821,8 +821,8 @@ All runtime config is stored in `data/agent-config.json`. The dashboard provides
   },
 
   "accounts": [{ "id": "...", "name": "Paper", "publicKey": "...", "secretKey": "...", "paper": true }],
-  "agents": [{ "id": "default", "name": "Prophet", "strategyId": "default", "model": "..." }],
-  "strategies": [{ "id": "default", "name": "Aggressive Options", "rulesFile": "TRADING_RULES.md" }],
+  "agents": [{ "id": "default", "name": "Prophet", "strategyId": "v2-options", "model": "..." }],
+  "strategies": [{ "id": "v2-options", "name": "Aggressive Options v2", "rulesFile": "TRADING_RULES_V2.md" }],
 
   "plugins": {
     "slack": {

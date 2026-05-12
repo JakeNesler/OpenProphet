@@ -58,55 +58,71 @@ export async function econBlackoutSkipIfNoPositions(runtime, livePositionCount) 
 }
 
 // PennyProphet predicate. Skips the LLM beat when there are no candidates
-// above the composite-score threshold AND no managed positions in a live state.
+// above the composite-score threshold AND no penny-tagged positions to manage
+// AND no open broker orders pending fill.
 //
-// Uses managed_positions (strategy-tagged, per-sandbox DB) rather than raw
-// Alpaca /positions, so it works correctly when multiple agents share an
-// Alpaca account: PennyMain only counts PennyProphet's own positions, not
-// Prophet's holdings on the same brokerage account.
+// Positions are filtered by strategy=penny-momentum so that other agents
+// sharing the same paper account (Prophet, Trend, Harvest) do not keep
+// PennyProphet awake on their positions. Attribution is by symbol-of-most-
+// recent-buy in storage.GetSymbolStrategyAttribution; positions placed via
+// PennyProphet's place_buy_order flow forward AgentStrategy onto the order
+// row so they attribute correctly.
 //
-// Live states (PENDING | ACTIVE | PARTIAL) cover the full lifecycle that
-// requires the agent to be awake: PENDING is set immediately when a buy is
-// submitted (before broker fill), so the previously separate open-orders
-// check is fully subsumed here. Terminal states (CLOSED | STOPPED_OUT |
-// FAILED) do not require beats.
+// The open-orders check closes a gap: a buy submitted via place_buy_order
+// before the broker fills it does not yet appear in /positions, but the agent
+// may still need to react (cancel on price drift, follow up on partial fills).
+// Counting open orders ensures we don't skip the beat while one is in flight.
+// Note: /api/v1/orders does NOT yet support strategy filtering, so a pending
+// order from another agent on the shared account will still wake PennyProphet.
+// This is a small leak — pending orders are rare and short-lived on paper —
+// but if it becomes a problem, add ?strategy filtering to HandleGetOrders too.
 async function pennyPreflight(runtime, agentConfig) {
   const { goAxios } = runtime;
 
-  const [candidatesResp, managedResp] = await Promise.all([
+  const [candidatesResp, positionsResp, ordersResp] = await Promise.all([
     goAxios.get('/api/v1/penny/candidates?min_score=60'),
-    goAxios.get('/api/v1/positions/managed'),
+    goAxios.get('/api/v1/positions?strategy=penny-momentum'),
+    goAxios.get('/api/v1/orders?status=open'),
   ]);
 
+  // Validate response shapes before deciding. A malformed response (e.g., a
+  // 200 with a null body or an unexpected payload) is ambiguous — fail open
+  // and let the LLM evaluate, rather than treating "fields missing" as "0".
   if (typeof candidatesResp.data?.count !== 'number') {
     return { skip: false, reason: 'penny candidates response shape unexpected' };
   }
-  if (!Array.isArray(managedResp.data?.positions)) {
-    return { skip: false, reason: 'managed positions response shape unexpected' };
+  if (!Array.isArray(positionsResp.data)) {
+    return { skip: false, reason: 'positions response shape unexpected' };
+  }
+  if (!Array.isArray(ordersResp.data)) {
+    return { skip: false, reason: 'orders response shape unexpected' };
   }
 
   const candidateCount = candidatesResp.data.count;
-  const liveManaged = managedResp.data.positions.filter(p =>
-    p.status === 'ACTIVE' || p.status === 'PENDING' || p.status === 'PARTIAL'
-  );
+  const positions = positionsResp.data;
+  const openOrders = ordersResp.data;
 
-  if (candidateCount === 0 && liveManaged.length === 0) {
+  if (candidateCount === 0 && positions.length === 0 && openOrders.length === 0) {
     return {
       skip: true,
-      reason: 'no candidates above min_score=60, no managed PennyProphet positions',
+      reason: 'no candidates above min_score=60, no open positions, no open orders',
     };
   }
 
-  // Econ-blackout gate: if there are no live positions and we're inside a
-  // US-release blackout window, the LLM can't open new entries anyway —
-  // skip the beat to save tokens.
-  const econSkip = await econBlackoutSkipIfNoPositions(runtime, liveManaged.length);
+  // Econ-blackout gate: if there's nothing to manage (no positions, no orders
+  // in flight) AND we're inside a US-release blackout window, skip the beat.
+  // The LLM can't open new entries anyway during blackout.
+  const liveCount = positions.length + openOrders.length;
+  const econSkip = await econBlackoutSkipIfNoPositions(runtime, liveCount);
   if (econSkip) return econSkip;
 
   if (candidateCount > 0) {
     return { skip: false, reason: `${candidateCount} candidate(s) above threshold` };
   }
-  return { skip: false, reason: `${liveManaged.length} managed position(s) to evaluate` };
+  if (positions.length > 0) {
+    return { skip: false, reason: `${positions.length} open position(s) to manage` };
+  }
+  return { skip: false, reason: `${openOrders.length} open order(s) pending fill` };
 }
 
 // isClosedPhase returns { closed, reason } for a given Date. Mirrors the

@@ -47,6 +47,23 @@ func TestPennyUniverseService_HTTPRefresh(t *testing.T) {
 	}
 }
 
+func TestUniverseFilter_ShareClassTickersExcluded(t *testing.T) {
+	svc := NewPennyUniverseService("key", "", "", "", nil, nil)
+	// All pass every other filter; only the ticker format differs.
+	base := fmpScreenerItem{MarketCap: 100_000_000, Price: 5.0, Volume: 100_000, ExchangeShortName: "NASDAQ"}
+	items := []fmpScreenerItem{
+		func() fmpScreenerItem { x := base; x.Symbol = "PLAIN"; return x }(),
+		func() fmpScreenerItem { x := base; x.Symbol = "CRD-A"; return x }(),
+		func() fmpScreenerItem { x := base; x.Symbol = "BRK.B"; return x }(),
+		func() fmpScreenerItem { x := base; x.Symbol = "ABC1"; return x }(),
+		func() fmpScreenerItem { x := base; x.Symbol = ""; return x }(),
+	}
+	result, _ := svc.filter(items)
+	if len(result) != 1 || result[0].Ticker != "PLAIN" {
+		t.Fatalf("expected only PLAIN to pass, got %+v", result)
+	}
+}
+
 func TestUniverseFilter_ADV_BoundaryExcluded(t *testing.T) {
 	svc := NewPennyUniverseService("key", "", "", "", nil, nil)
 	items := []fmpScreenerItem{

@@ -29,7 +29,11 @@ function makeRuntime(routes) {
 }
 
 const candidates = (count) => ({ data: { count } });
-const managed = (positions) => ({ data: { positions, count: positions.length } });
+// Post-merge: penny preflight now reads /api/v1/positions?strategy=penny-momentum
+// (plain array) and /api/v1/orders?status=open (plain array). pennyPositions
+// returns an array of position objects directly; pennyOrders returns orders.
+const pennyPositions = (positions) => ({ data: positions });
+const pennyOrders = (orders) => ({ data: orders });
 const byStrategy = (count) => ({ data: { count } });
 const blackoutOn = (reason = 'CPI release at 2026-05-13 12:30 UTC') => ({
   data: { is_blackout: true, reason },
@@ -97,10 +101,11 @@ test('econBlackoutSkipIfNoPositions: returns null on endpoint error (fail-open i
 
 // ── pennyPreflight integration ─────────────────────────────────────
 
-test('penny: blackout + no managed positions + candidates exist → skip (was run before)', async () => {
+test('penny: blackout + no positions + no orders + candidates exist → skip (was run before)', async () => {
   const rt = makeRuntime([
     ['/api/v1/penny/candidates?min_score=60', () => candidates(3)],
-    ['/api/v1/positions/managed', () => managed([])],
+    ['/api/v1/positions?strategy=penny-momentum', () => pennyPositions([])],
+    ['/api/v1/orders?status=open', () => pennyOrders([])],
     ['/api/v1/econ/blackout', () => blackoutOn('NFP release')],
   ]);
   const r = await resolvePreflight('penny-momentum', rt, {});
@@ -108,20 +113,33 @@ test('penny: blackout + no managed positions + candidates exist → skip (was ru
   assert.match(r.reason, /econ blackout/);
 });
 
-test('penny: blackout + open managed position → run (exits must happen)', async () => {
+test('penny: blackout + open position → run (exits must happen)', async () => {
   const rt = makeRuntime([
     ['/api/v1/penny/candidates?min_score=60', () => candidates(0)],
-    ['/api/v1/positions/managed', () => managed([{ status: 'ACTIVE' }])],
+    ['/api/v1/positions?strategy=penny-momentum', () => pennyPositions([{ symbol: 'ABCD', qty: 100 }])],
+    ['/api/v1/orders?status=open', () => pennyOrders([])],
     ['/api/v1/econ/blackout', () => blackoutOn('CPI release')],
   ]);
   const r = await resolvePreflight('penny-momentum', rt, {});
   assert.equal(r.skip, false);
 });
 
-test('penny: blackout endpoint error + candidates + no positions → run (fail open)', async () => {
+test('penny: blackout + pending open order → run (in-flight order needs evaluation)', async () => {
+  const rt = makeRuntime([
+    ['/api/v1/penny/candidates?min_score=60', () => candidates(0)],
+    ['/api/v1/positions?strategy=penny-momentum', () => pennyPositions([])],
+    ['/api/v1/orders?status=open', () => pennyOrders([{ symbol: 'XYZ', status: 'new' }])],
+    ['/api/v1/econ/blackout', () => blackoutOn('CPI release')],
+  ]);
+  const r = await resolvePreflight('penny-momentum', rt, {});
+  assert.equal(r.skip, false);
+});
+
+test('penny: blackout endpoint error + candidates + nothing in flight → run (fail open)', async () => {
   const rt = makeRuntime([
     ['/api/v1/penny/candidates?min_score=60', () => candidates(2)],
-    ['/api/v1/positions/managed', () => managed([])],
+    ['/api/v1/positions?strategy=penny-momentum', () => pennyPositions([])],
+    ['/api/v1/orders?status=open', () => pennyOrders([])],
     ['/api/v1/econ/blackout', () => { throw new Error('boom'); }],
   ]);
   const r = await resolvePreflight('penny-momentum', rt, {});

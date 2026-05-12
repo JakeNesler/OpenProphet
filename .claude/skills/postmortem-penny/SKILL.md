@@ -8,13 +8,24 @@ You are performing a surgical post-mortem on a specific PennyProphet trade or se
 
 **Input:** `$ARGUMENTS` — may be a ticker symbol, a date (YYYY-MM-DD), or empty.
 
+## Step 0 — Resolve sandboxes by agent (do this first, before Step 1)
+
+This skill operates over **every** sandbox running the `penny-prophet` agent — not by sandbox name, never by hardcoded ID.
+
+1. Read `data/agent-config.json`.
+2. In `agents[]`, find `id === 'penny-prophet'` (fallback: name matching `/penny/i`).
+3. Iterate `sandboxes`, keep every entry where `agent.activeAgentId === 'penny-prophet'`. Collect their `accountId` values as `<PENNY_DIRS>`. If empty, stop and tell the user no sandbox currently uses the agent.
+4. State the resolved list before continuing.
+
+Every glob below must be run once **per** `<DIR>` in `<PENNY_DIRS>` and the results merged. Tag each loaded record with its sandbox.
+
 ## Step 1 — Identify the subject
 
-- If `$ARGUMENTS` contains a ticker symbol (all-caps, 1–5 letters): find all decisive actions where `symbol` matches, sorted by timestamp.
-- If `$ARGUMENTS` is a date (YYYY-MM-DD): find all decisive actions from that date, and the activity log for that date.
-- If `$ARGUMENTS` is empty: glob `data/sandboxes/a788a4e3/decisive_actions/*.json`, read the 50 most recent, find the most recent SELL or CIRCUIT_BREAKER action where `reasoning` contains a loss signal (words like "stop", "circuit breaker", "score dropped", "social fade", "loss", "cut", "−5%", "−7%", "−8%", "−10%", "down", "deteriorat", "20-minute", "time exit"). Use that trade as the subject.
+- If `$ARGUMENTS` contains a ticker symbol (all-caps, 1–5 letters): across every `<DIR>` in `<PENNY_DIRS>`, glob `data/sandboxes/<DIR>/decisive_actions/*.json` and find all decisive actions where `symbol` matches. Merge and sort by timestamp.
+- If `$ARGUMENTS` is a date (YYYY-MM-DD): across every `<DIR>`, find all decisive actions from that date plus the activity log for that date.
+- If `$ARGUMENTS` is empty: across every `<DIR>`, glob `data/sandboxes/<DIR>/decisive_actions/*.json`, merge, sort by mtime descending, read the **50 most recent overall**, and find the most recent SELL or CIRCUIT_BREAKER action where `reasoning` contains a loss signal (words like "stop", "circuit breaker", "score dropped", "social fade", "loss", "cut", "−5%", "−7%", "−8%", "−10%", "down", "deteriorat", "20-minute", "time exit"). Use that trade as the subject — note which sandbox it came from in the report.
 
-Load all relevant files. For a symbol search, also load the activity logs from the same date range to get portfolio context.
+Load all relevant files. For a symbol search, also load the activity logs from the same date range (across all `<PENNY_DIRS>`) to get portfolio context.
 
 ## Step 2 — Reconstruct the trade timeline
 
@@ -30,7 +41,7 @@ Note: entry price, composite score at entry, dominant signal type, position size
 
 ## Step 3 — Strategy compliance check
 
-Go through the timeline and check each decision against the active strategy rules (read `data/agent-config.json`, find strategy with id `penny-momentum`, use its `customRules`):
+Go through the timeline and check each decision against the active strategy rules. Resolve the strategy by following the agent linkage: in `data/agent-config.json`, look up agent `penny-prophet` and take its `strategyId` (expected `penny-momentum`), then read that strategy's `customRules` from `strategies[]`. State which strategy you resolved (name + id) before quoting rules.
 
 For the **entry**:
 - Was composite score ≥ 60? Was the score-tier sizing rule respected (5–7% for ≥80, 2–3% for 60–79, hard cap 8%)?
@@ -90,6 +101,6 @@ Use this format:
 
 ## Step 6 — Pattern check
 
-Glob `data/sandboxes/a788a4e3/decisive_actions/*.json`. Read the 80 most recent. Search for any other decisions on the same symbol or with similar reasoning language (same error words: "stop", "circuit breaker", "score dropped", "social fade", "might recover", "20-minute", "still strong"). Also search by `dominant_signal` in details to see if this is a signal-type-specific failure pattern (e.g. all social-time-window violations, or all sub-60 entries).
+For each `<DIR>` in `<PENNY_DIRS>`: glob `data/sandboxes/<DIR>/decisive_actions/*.json`. Merge across sandboxes, read the **80 most recent overall**. Search for any other decisions on the same symbol or with similar reasoning language (same error words: "stop", "circuit breaker", "score dropped", "social fade", "might recover", "20-minute", "still strong"). Also search by `dominant_signal` in details to see if this is a signal-type-specific failure pattern (e.g. all social-time-window violations, or all sub-60 entries).
 
-Report: is this an isolated incident or a recurring pattern? If it has happened before, list the prior dates and (where possible) the dominant signal involved.
+Report: is this an isolated incident or a recurring pattern? If it has happened before, list the prior dates, **which sandbox each occurred in**, and (where possible) the dominant signal involved. A pattern that spans sandboxes is a strategy issue; one confined to a single sandbox may point at a per-sandbox config drift instead.

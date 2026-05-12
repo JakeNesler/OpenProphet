@@ -6,40 +6,39 @@ allowed-tools: Read Glob
 
 You are closing the learning loop for the PennyProphet trading agent. Your job is to read what the agent actually did, compare it to what the strategy says it should do, find the gaps, and propose concrete rule changes — then apply the ones the user approves.
 
-## Step 1 — Load current strategy
+## Step 1 — Resolve target agent, strategy, and sandboxes
 
-Read `data/agent-config.json`. Find the strategy with id `penny-momentum` (name `Penny Stock Momentum`) and extract its full `customRules` text. This is the ground truth you will be editing.
+This skill targets the **`penny-prophet`** agent (name "PennyProphet"). Sandboxes are resolved by agent — never by sandbox name. Activity from every sandbox running this agent is aggregated so the strategy is tuned against the full history.
 
-Also note: the `id` of this strategy is `penny-momentum` (you will need it if applying changes).
+1. Read `data/agent-config.json`.
+2. In `agents[]`, find the entry with `id === 'penny-prophet'` (fallback: `name` matching `/penny/i`). Take its `strategyId` — this is the strategy this skill will edit (expected: `penny-momentum`).
+3. In `strategies[]`, find the entry with that `id`. Extract `id`, `name`, and the full `customRules` text. State the strategy name + id in one line before continuing — this is the ground truth you will be editing.
+4. Iterate `sandboxes` (object map). Keep every entry whose `agent.activeAgentId === 'penny-prophet'`. For each kept entry, record `(name, accountId)`. Call this list `<PENNY_DIRS>`.
+5. If `<PENNY_DIRS>` is empty, stop and tell the user: "No sandbox currently uses agent `penny-prophet`. Assign it to a sandbox first." Do not proceed.
 
-## Step 2 — Resolve the Penny sandbox directory
+State the resolved sandbox list (sandbox name → accountId directory) before continuing. Steps 3 and 4 below glob across **every** directory in `<PENNY_DIRS>` and merge results.
 
-Sandbox IDs rotate when the user resets accounts, so do NOT hardcode an ID. From the same `data/agent-config.json` you just read, resolve the Penny sandbox in this order:
+## Step 3 — Load recent decisions (last 30 days, all Penny sandboxes)
 
-1. Iterate `sandboxes` (object map). Pick the entry whose `name` matches `/penny/i` (e.g. `"PennyTrades"`). Take that entry's `accountId` field — this is the on-disk directory name.
-2. Verify the resolved directory exists at `data/sandboxes/<dir>/activity_logs/` and contains `activity_*.json` files. If it is empty (freshly rotated sandbox), Glob `data/sandboxes/*/activity_logs/activity_*.json`, then for each candidate directory peek at one recent decisive_action's `symbol` field — Penny tickers are exchange-listed $2–$10 stocks (e.g. plain 1–5 letter equity symbols), distinct from Prophet's options OCC symbols (containing strike digits like `260717C00665000`). Pick the directory whose recent decisive_actions are dominated by plain equity symbols and whose newest `activity_*.json` is most recent.
-
-Record the resolved directory name as `<PENNY_SANDBOX>` and use it for Steps 3 and 4. State which sandbox you resolved and why (one line) before continuing.
-
-## Step 3 — Load recent decisions (last 30 days)
-
-Glob `data/sandboxes/<PENNY_SANDBOX>/decisive_actions/*.json`. Read the 80 most recent files. For each, extract:
+For each `<DIR>` in `<PENNY_DIRS>`: glob `data/sandboxes/<DIR>/decisive_actions/*.json`. Merge all matched files into one list, sort by file mtime descending, read the **80 most recent overall** (not 80 per sandbox). For each, extract:
 - `timestamp`
+- `sandboxId` (record which directory it came from — useful for spotting sandbox-specific drift)
 - `action` (BUY / SELL / HOLD / SKIP / CIRCUIT_BREAKER / etc.)
 - `symbol`
 - `reasoning` (full text)
 - Any `details` fields containing `composite_score`, `dominant_signal`, `position_size_pct`, `stop_pct`, `target_pct`
 
-Penny generates more decisions per day than Prophet, so 80 files typically covers ~2–4 weeks of activity.
+Penny generates more decisions per day than Prophet, so 80 files across one sandbox typically covers ~2–4 weeks. Across multiple sandboxes it'll be tighter; that's fine — recency matters more than depth.
 
-## Step 4 — Load recent P&L context
+## Step 4 — Load recent P&L context (all Penny sandboxes)
 
-Glob `data/sandboxes/<PENNY_SANDBOX>/activity_logs/activity_*.json`. Read the 7 most recent. From each `summary`:
+For each `<DIR>` in `<PENNY_DIRS>`: glob `data/sandboxes/<DIR>/activity_logs/activity_*.json`. Read the **7 most recent per sandbox**. From each `summary`:
 - winning_trades, losing_trades, total_pnl, largest_win, largest_loss
 - capital_deployed (segment-cap utilization)
 - positions_opened, positions_closed
+- Tag the row with its sandbox name
 
-Compute aggregate profit factor across all loaded days.
+Compute aggregate profit factor across all loaded days from all sandboxes combined. Also note per-sandbox profit factor — large divergences (one sandbox profitable, another deeply red) are themselves a finding worth surfacing in Step 5.
 
 ## Step 5 — Gap analysis
 
@@ -122,11 +121,11 @@ Show the user all proposed edits clearly. Ask which ones to apply. Do not modify
 
 For each approved edit:
 1. Re-read `data/agent-config.json` to get the freshest version.
-2. In the `strategies` array, find the entry with id `penny-momentum`.
+2. In the `strategies` array, find the entry by **the `id` you resolved in Step 1** (do NOT look up by name — names can drift, the id is the link from the agent to the strategy).
 3. Edit `customRules` — replace the old rule text with the new rule text exactly as proposed. Preserve all surrounding content.
 4. Update `updatedAt` on the strategy entry to now (ISO string).
 5. Write the file back.
 
-After all edits are applied, show the final diff of what changed in the strategy's `customRules`. Remind the user the changes take effect on the agent's next heartbeat.
+After all edits are applied, show the final diff of what changed in the strategy's `customRules`. Remind the user the changes take effect on the next heartbeat of **every** sandbox using agent `penny-prophet` — all of them share this strategy.
 
 Note: `TRADING_RULES_PENNY.md` is a stale read-only mirror with a deprecation header. Do NOT edit it — the inline `customRules` in `data/agent-config.json` is the live source of truth.

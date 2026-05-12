@@ -3,7 +3,6 @@
 // Prophet Agent Web Server - SSE streaming dashboard + agent control
 import 'dotenv/config';
 import express from 'express';
-import http from 'http';
 import fs from 'fs/promises';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -12,7 +11,7 @@ import { spawn, execSync } from 'child_process';
 const OPENCODE_BIN = process.platform === 'win32' ? 'cmd.exe' : 'opencode';
 const OPENCODE_WIN_PREFIX = process.platform === 'win32' ? ['/c', 'opencode.cmd'] : [];
 import axios from 'axios';
-import { AgentHarness, buildSystemPrompt } from './harness.js';
+import { buildSystemPrompt } from './harness.js';
 import { AnalysisScheduler } from './analysis-scheduler.js';
 import ChatStore from './chat-store.js';
 import AgentOrchestrator from './orchestrator.js';
@@ -37,14 +36,6 @@ const PORT = process.env.AGENT_PORT || 3737;
 const TRADING_BOT_PORT = process.env.TRADING_BOT_PORT || '4534';
 const TRADING_BOT_URL = process.env.TRADING_BOT_URL || `http://localhost:${TRADING_BOT_PORT}`;
 
-function getSandboxDbPathForAccount(accountId) {
-  return path.join(PROJECT_ROOT, 'data', 'sandboxes', accountId, 'prophet_trader.db');
-}
-
-// Pooled HTTP agent for Go backend calls — reuses TCP connections
-const goHttpAgent = new http.Agent({ keepAlive: true, maxSockets: 10, keepAliveMsecs: 30000 });
-const goAxios = axios.create({ baseURL: TRADING_BOT_URL, httpAgent: goHttpAgent, timeout: 5000 });
-
 const app = express();
 app.use(express.json({ limit: '1mb' }));
 
@@ -63,148 +54,6 @@ function authMiddleware(req, res, next) {
   res.status(401).json({ error: 'Unauthorized. Set Authorization: Bearer <token> header.' });
 }
 app.use('/api', authMiddleware);
-
-// ── Go Backend Manager ─────────────────────────────────────────────
-// Manages the Go trading bot lifecycle, supports restarting with different Alpaca keys
-let goProc = null;
-let goReady = false;
-
-async function startGoBackend(account) {
-  // Kill existing if running
-  await stopGoBackend();
-
-  if (!account) {
-    console.log('  No active account — Go backend not started');
-    return false;
-  }
-
-  // Build binary if needed
-  const binaryName = process.platform === 'win32' ? 'prophet_bot.exe' : 'prophet_bot';
-  const binaryPath = path.join(PROJECT_ROOT, binaryName);
-  try {
-    const fs = await import('fs');
-    if (!fs.existsSync(binaryPath)) {
-      console.log('  Building Go binary...');
-      execSync(`go build -o ${binaryName} ./cmd/bot`, { cwd: PROJECT_ROOT, timeout: 60000 });
-    }
-  } catch (err) {
-    console.error('  Failed to build Go binary:', err.message);
-    return false;
-  }
-
-  const env = {
-    ...process.env,
-    ALPACA_API_KEY: account.publicKey,
-    ALPACA_SECRET_KEY: account.secretKey,
-    ALPACA_BASE_URL: account.baseUrl || (account.paper ? 'https://paper-api.alpaca.markets' : 'https://api.alpaca.markets'),
-    ALPACA_PAPER: account.paper ? 'true' : 'false',
-    PORT: TRADING_BOT_PORT,
-    DATABASE_PATH: getSandboxDbPathForAccount(account.id),
-    ACTIVITY_LOG_DIR: path.join(PROJECT_ROOT, 'data', 'sandboxes', account.id, 'activity_logs'),
-    OPENPROPHET_ACCOUNT_ID: account.id,
-    OPENPROPHET_SANDBOX_ID: `sbx_${account.id}`,
-  };
-
-  await fs.mkdir(path.dirname(env.DATABASE_PATH), { recursive: true });
-
-  console.log(`  Starting Go backend for account "${account.name}" (${account.paper ? 'paper' : 'live'})...`);
-
-  goProc = spawn(binaryPath, [], {
-    cwd: PROJECT_ROOT,
-    env,
-    stdio: ['ignore', 'pipe', 'pipe'],
-  });
-
-  goProc.stdout.on('data', (d) => {
-    const msg = d.toString().trim();
-    if (msg) console.log(`  [go] ${msg}`);
-  });
-  goProc.stderr.on('data', (d) => {
-    const msg = d.toString().trim();
-    if (msg) console.log(`  [go-err] ${msg}`);
-  });
-  goProc.on('exit', (code, signal) => {
-    console.log(`  Go backend exited (code: ${code}, signal: ${signal})`);
-    goReady = false;
-    goProc = null;
-    // Auto-restart on unexpected crash (not manual stop)
-    if (code !== 0 && code !== null && signal !== 'SIGTERM') {
-      console.log('  Go backend crashed — auto-restarting in 5s...');
-      broadcast('agent_log', {
-        message: 'Trading backend crashed — auto-restarting in 5s...',
-        level: 'error',
-        timestamp: new Date().toISOString(),
-      });
-      setTimeout(() => {
-        const acc = getActiveAccount();
-        if (acc) startGoBackend(acc);
-      }, 5000);
-    }
-  });
-
-  // Wait for health check
-  goReady = false;
-  for (let i = 0; i < 20; i++) {
-    await new Promise(r => setTimeout(r, 500));
-    try {
-      await goAxios.get('/health', { timeout: 2000 });
-      goReady = true;
-      console.log(`  Go backend ready on port ${TRADING_BOT_PORT} (account: ${account.name})`);
-      broadcast('agent_log', {
-        message: `Trading backend started for account "${account.name}" (${account.paper ? 'paper' : 'live'})`,
-        level: 'success',
-        timestamp: new Date().toISOString(),
-      });
-      return true;
-    } catch {}
-  }
-
-  console.error('  Go backend failed to start within 10s');
-  broadcast('agent_log', {
-    message: 'Trading backend failed to start. Check logs.',
-    level: 'error',
-    timestamp: new Date().toISOString(),
-  });
-  return false;
-}
-
-async function stopGoBackend() {
-  if (goProc) {
-    const pid = goProc.pid;
-    goProc.kill('SIGTERM');
-    await new Promise(r => setTimeout(r, 1500));
-    // Check if still alive
-    try { process.kill(pid, 0); goProc.kill('SIGKILL'); } catch {}
-    goProc = null;
-    goReady = false;
-    await new Promise(r => setTimeout(r, 500));
-  }
-  // Kill any orphaned Go backend on the port (but NOT our own Node process)
-  const myPid = process.pid;
-  try {
-    let pids = '';
-    if (process.platform === 'win32') {
-      const out = execSync(`netstat -ano -p TCP 2>NUL`, { encoding: 'utf-8' });
-      for (const line of out.split('\n')) {
-        if (line.includes(`:${TRADING_BOT_PORT}`) && line.includes('LISTENING')) {
-          const pid = parseInt(line.trim().split(/\s+/).pop());
-          if (pid && pid !== myPid) pids += pid + '\n';
-        }
-      }
-    } else {
-      pids = execSync(`lsof -t -i :${TRADING_BOT_PORT} -sTCP:LISTEN 2>/dev/null`, { encoding: 'utf-8' }).trim();
-    }
-    if (pids.trim()) {
-      for (const pid of pids.trim().split('\n')) {
-        const p = parseInt(pid);
-        if (p && p !== myPid) {
-          try { process.kill(p, 'SIGTERM'); } catch {}
-        }
-      }
-      await new Promise(r => setTimeout(r, 500));
-    }
-  } catch {}
-}
 
 // ── Load Config ────────────────────────────────────────────────────
 await loadConfig();
@@ -241,60 +90,32 @@ const orchestrator = new AgentOrchestrator({
   agentUrl: `http://localhost:${PORT}`,
   tradingBotBasePort: Number(TRADING_BOT_PORT),
 });
-let harness = createHarnessForActiveSandbox();
 const sseClients = new Set();
 const boundOperationalHarnesses = new WeakSet();
 const dailySummaryTimers = new Map();
 
-function createHarnessForActiveSandbox() {
-  const sandbox = getActiveSandbox();
-  return new AgentHarness({
-    sandboxId: sandbox?.id || null,
-    accountId: sandbox?.accountId || null,
-    getSandbox,
-    getAccount: getAccountById,
-    getAgent: getAgentById,
-    getResolvedAgent: getResolvedAgentForSandbox,
-    getStrategyById,
-    getHeartbeatForPhase: getHeartbeatForSandboxPhase,
-    getPermissions: getPermissionsForSandbox,
-    chatStore,
-    opencodeEnv: {
-      TRADING_BOT_URL,
-      AGENT_URL: `http://localhost:${PORT}`,
-      OPENPROPHET_SANDBOX_ID: sandbox?.id || '',
-      OPENPROPHET_ACCOUNT_ID: sandbox?.accountId || '',
-      DATABASE_PATH: sandbox?.accountId ? getSandboxDbPathForAccount(sandbox.accountId) : '',
-    },
-  });
-}
-
-function rebindHarness() {
-  harness = createHarnessForActiveSandbox();
-  bindHarnessEvents(harness);
-  bindOperationalHooks(harness);
-}
-
-function getOrCreateSandboxRuntime(sandboxId) {
-  if (!sandboxId || isActiveSandbox(sandboxId)) return null;
-  const runtime = orchestrator.ensureRuntime(sandboxId);
-  bindOperationalHooks(runtime.harness);
-  return runtime;
+// Every sandbox flows through the orchestrator. The "active sandbox" is purely
+// a UI focus pointer (which sandbox the dashboard highlights, and which is the
+// default when an API endpoint receives no sandboxId) — it does not select a
+// different code path.
+function getRuntimeForSandbox(sandboxId) {
+  const id = sandboxId || getActiveSandbox()?.id;
+  if (!id) return null;
+  try {
+    const runtime = orchestrator.ensureRuntime(id);
+    bindOperationalHooks(runtime.harness);
+    return runtime;
+  } catch {
+    return null;
+  }
 }
 
 function getHarnessForSandbox(sandboxId) {
-  if (!sandboxId) return harness;
-  if (harness?.sandboxId === sandboxId) return harness;
-  return getOrCreateSandboxRuntime(sandboxId)?.harness || null;
-}
-
-function isActiveSandbox(sandboxId) {
-  return sandboxId && sandboxId === getActiveSandbox()?.id;
+  return getRuntimeForSandbox(sandboxId)?.harness || null;
 }
 
 function getGoClientForSandbox(sandboxId) {
-  if (!sandboxId || sandboxId === getActiveSandbox()?.id) return goAxios;
-  return getOrCreateSandboxRuntime(sandboxId)?.goAxios || null;
+  return getRuntimeForSandbox(sandboxId)?.goAxios || null;
 }
 
 async function refreshHarnessConfigForSandbox(sandboxId, options = {}) {
@@ -305,7 +126,6 @@ async function refreshHarnessConfigForSandbox(sandboxId, options = {}) {
 
 async function refreshAllHarnessConfigs(options = {}) {
   const tasks = [];
-  if (harness) tasks.push(harness.reloadConfig(options));
   for (const runtime of orchestrator.runtimes.values()) {
     if (runtime.harness) tasks.push(runtime.harness.reloadConfig(options));
   }
@@ -325,16 +145,6 @@ const EVENTS = [
   'tool_call', 'tool_result', 'heartbeat_change', 'schedule', 'trade',
 ];
 
-function bindHarnessEvents(activeHarness) {
-  for (const evt of EVENTS) {
-    activeHarness.state.on(evt, (data) => {
-      broadcast(evt, { ...data, sandboxId: activeHarness.sandboxId || getActiveSandbox()?.id || null, timestamp: new Date().toISOString() });
-    });
-  }
-}
-
-bindHarnessEvents(harness);
-bindOperationalHooks(harness);
 for (const evt of EVENTS) {
   orchestrator.on(evt, (data) => {
     broadcast(evt, { ...data, timestamp: new Date().toISOString() });
@@ -344,10 +154,7 @@ for (const evt of EVENTS) {
 // ── Analysis Scheduler ─────────────────────────────────────────────
 const scheduler = new AnalysisScheduler({
   model: getConfig().activeModel || 'anthropic/claude-sonnet-4-6',
-  onEmergencyWake: (reason) => {
-    if (harness?.state?.running && !harness?.state?.paused) harness.emergencyWake(reason);
-    orchestrator.triggerEmergencyHeartbeat(reason);
-  },
+  onEmergencyWake: (reason) => orchestrator.triggerEmergencyHeartbeat(reason),
 });
 scheduler.on('agent_log', (data) => broadcast('agent_log', data));
 scheduler.on('scheduler_job_start', ({ job, date }) => broadcast('agent_log', {
@@ -480,32 +287,42 @@ app.get('/api/events', (req, res) => {
     'Connection': 'keep-alive',
     'Access-Control-Allow-Origin': '*',
   });
-  res.write(`event: state\ndata: ${JSON.stringify({ ...harness.state.toJSON(), sandboxId: getActiveSandbox()?.id || null })}\n\n`);
+  const activeId = getActiveSandbox()?.id || null;
+  const activeRuntime = activeId ? orchestrator.getSandboxRuntime(activeId) : null;
+  const state = activeRuntime ? activeRuntime.harness.state.toJSON() : { running: false };
+  res.write(`event: state\ndata: ${JSON.stringify({ ...state, sandboxId: activeId })}\n\n`);
   res.write(`event: config\ndata: ${JSON.stringify(safeConfig())}\n\n`);
   sseClients.add(res);
   req.on('close', () => sseClients.delete(res));
 });
 
 // ── Agent Control ──────────────────────────────────────────────────
+// These operate on the currently-active sandbox (UI focus). For explicit
+// per-sandbox control, see /api/sandboxes/:id/start|stop|pause|resume.
 app.post('/api/agent/start', async (req, res) => {
   try {
-    await harness.start();
+    const id = getActiveSandbox()?.id;
+    if (!id) return res.status(404).json({ error: 'No active sandbox' });
+    await orchestrator.startSandbox(id);
     res.json({ ok: true, status: 'started' });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 app.post('/api/agent/stop', async (req, res) => {
-  await harness.stop();
+  const id = getActiveSandbox()?.id;
+  if (id) await orchestrator.stopSandbox(id);
   res.json({ ok: true, status: 'stopped' });
 });
 
 app.post('/api/agent/pause', (req, res) => {
-  harness.pause();
+  const id = getActiveSandbox()?.id;
+  if (id) orchestrator.pauseSandbox(id);
   res.json({ ok: true, status: 'paused' });
 });
 
 app.post('/api/agent/resume', (req, res) => {
-  harness.resume();
+  const id = getActiveSandbox()?.id;
+  if (id) orchestrator.resumeSandbox(id);
   res.json({ ok: true, status: 'resumed' });
 });
 
@@ -785,45 +602,34 @@ Use /newagent to open the agent builder!`;
       const sandboxes = getSandboxes();
       let msg = 'Available sandboxes (portfolios):\n';
       for (const s of sandboxes) {
-        const isActive = getActiveSandbox()?.id === s.id;
         const runtime = orchestrator.getSandboxRuntime(s.id);
-        const state = isActive ? harness.state.running : (runtime ? runtime.harness.state.running : false);
-        msg += `\n- ${s.name} (${s.id})\n  Account: ${s.accountId}\n  Status: ${state ? 'running' : 'stopped'}\n  Agent: ${s.agent?.activeAgentId || 'default'}\n`;
+        const running = runtime ? runtime.harness.state.running : false;
+        msg += `\n- ${s.name} (${s.id})\n  Account: ${s.accountId}\n  Status: ${running ? 'running' : 'stopped'}\n  Agent: ${s.agent?.activeAgentId || 'default'}\n`;
       }
       msg += '\nUse /start <sandboxId> or /stop <sandboxId> to control';
       return res.json({ ok: true, text: msg });
     }
-    
+
     // /start <sandboxId> - start agent on a specific sandbox
     const startMatch = trimmed.match(/^\/start\s+(\S+)/);
     if (startMatch) {
       const sbxId = startMatch[1];
       const sandbox = getSandbox(sbxId);
       if (!sandbox) return res.status(404).json({ error: 'Sandbox not found' });
-      const isActive = getActiveSandbox()?.id === sbxId;
-      if (isActive) {
-        if (!harness.state.running) { await harness.start(); }
-      } else {
-        await orchestrator.startSandbox(sbxId);
-      }
+      await orchestrator.startSandbox(sbxId);
       return res.json({ ok: true, text: `Started agent on sandbox ${sandbox.name}` });
     }
-    
+
     // /stop <sandboxId> - stop agent on a specific sandbox
     const stopMatch = trimmed.match(/^\/stop\s+(\S+)/);
     if (stopMatch) {
       const sbxId = stopMatch[1];
       const sandbox = getSandbox(sbxId);
       if (!sandbox) return res.status(404).json({ error: 'Sandbox not found' });
-      const isActive = getActiveSandbox()?.id === sbxId;
-      if (isActive) {
-        if (harness.state.running) { await harness.stop(); }
-      } else {
-        await orchestrator.stopSandbox(sbxId);
-      }
+      await orchestrator.stopSandbox(sbxId);
       return res.json({ ok: true, text: `Stopped agent on sandbox ${sandbox.name}` });
     }
-    
+
     // /status - show status of all sandboxes
     if (trimmed === '/status' || trimmed === '/portfolio' || trimmed === '/portfolios') {
       const sandboxes = getSandboxes();
@@ -832,81 +638,70 @@ Use /newagent to open the agent builder!`;
       msg += `\nActive: ${account?.name || 'none'} (${account?.paper ? 'paper' : 'live'})\n`;
       msg += '\nSandbox Status:\n';
       for (const s of sandboxes) {
-        const isActive = getActiveSandbox()?.id === s.id;
         const runtime = orchestrator.getSandboxRuntime(s.id);
-        const state = isActive ? harness.state.toJSON() : (runtime ? runtime.harness.state.toJSON() : { running: false, beat: 0 });
+        const state = runtime ? runtime.harness.state.toJSON() : { running: false, beat: 0 };
         msg += `\n${s.name}: ${state.running ? 'running' : 'stopped'} (beat #${state.beat || 0})`;
       }
       return res.json({ ok: true, text: msg });
     }
 
-    const result = await harness.sendMessage(trimmed);
+    const activeId = getActiveSandbox()?.id;
+    if (!activeId) return res.status(404).json({ error: 'No active sandbox' });
+    const result = await orchestrator.sendMessage(activeId, trimmed);
     res.json({ ok: true, ...result });
   } catch (err) { res.status(400).json({ error: err.message }); }
 });
 
 app.get('/api/agent/state', (req, res) => {
-  res.json(harness.state.toJSON());
+  const id = getActiveSandbox()?.id;
+  const runtime = id ? orchestrator.getSandboxRuntime(id) : null;
+  res.json(runtime ? runtime.harness.state.toJSON() : { running: false });
 });
 
 // Multi-sandbox orchestration
 app.get('/api/sandboxes', (req, res) => {
-  const sandboxes = getSandboxes().map(sandbox => ({
-    ...sandbox,
-    runtime: isActiveSandbox(sandbox.id)
-      ? harness.state.toJSON()
-      : (orchestrator.getSandboxRuntime(sandbox.id) ? orchestrator.getState(sandbox.id) : null),
-    isActive: getActiveSandbox()?.id === sandbox.id,
-  }));
+  const activeId = getActiveSandbox()?.id || null;
+  const sandboxes = getSandboxes().map(sandbox => {
+    const runtime = orchestrator.getSandboxRuntime(sandbox.id);
+    return {
+      ...sandbox,
+      runtime: runtime ? runtime.harness.state.toJSON() : null,
+      isActive: activeId === sandbox.id,
+    };
+  });
   res.json({ sandboxes });
 });
 
 app.get('/api/sandboxes/:id/state', (req, res) => {
   try {
-    if (isActiveSandbox(req.params.id)) return res.json(harness.state.toJSON());
     res.json(orchestrator.getState(req.params.id));
   } catch (err) { res.status(404).json({ error: err.message }); }
 });
 
 app.post('/api/sandboxes/:id/start', async (req, res) => {
   try {
-    if (isActiveSandbox(req.params.id)) {
-      const account = getActiveAccount();
-      if (!goReady && account) await startGoBackend(account);
-      await harness.start();
-    }
-    // Always also start via orchestrator so both can run
-    if (!isActiveSandbox(req.params.id)) {
-      await orchestrator.startSandbox(req.params.id);
-    }
+    await orchestrator.startSandbox(req.params.id);
     res.json({ ok: true, status: 'started', sandboxId: req.params.id });
   } catch (err) { res.status(400).json({ error: err.message }); }
 });
 
 app.post('/api/sandboxes/:id/stop', async (req, res) => {
   try {
-    if (isActiveSandbox(req.params.id)) {
-      await harness.stop();
-      await stopGoBackend();
-    } else {
-      await orchestrator.stopSandbox(req.params.id);
-    }
+    await orchestrator.stopSandbox(req.params.id);
     res.json({ ok: true, status: 'stopped', sandboxId: req.params.id });
   } catch (err) { res.status(400).json({ error: err.message }); }
 });
 
 app.post('/api/sandboxes/:id/pause', (req, res) => {
   try {
-    if (isActiveSandbox(req.params.id)) harness.pause();
-    else orchestrator.pauseSandbox(req.params.id);
+    orchestrator.pauseSandbox(req.params.id);
     res.json({ ok: true, status: 'paused', sandboxId: req.params.id });
   } catch (err) { res.status(400).json({ error: err.message }); }
 });
 
 app.post('/api/sandboxes/:id/resume', (req, res) => {
   try {
-    if (isActiveSandbox(req.params.id)) harness.resume();
-    else orchestrator.resumeSandbox(req.params.id);
+    orchestrator.resumeSandbox(req.params.id);
     res.json({ ok: true, status: 'resumed', sandboxId: req.params.id });
   } catch (err) { res.status(400).json({ error: err.message }); }
 });
@@ -963,9 +758,7 @@ app.post('/api/sandboxes/:id/message', async (req, res) => {
       return res.json({ ok: true, text: msg });
     }
 
-    const result = isActiveSandbox(sandboxId)
-      ? await harness.sendMessage(trimmed)
-      : await orchestrator.sendMessage(sandboxId, trimmed);
+    const result = await orchestrator.sendMessage(sandboxId, trimmed);
     res.json({ ok: true, sandboxId, ...result });
   } catch (err) { res.status(400).json({ error: err.message }); }
 });
@@ -988,14 +781,8 @@ app.get('/api/sandboxes/:id/dashboard', (req, res) => {
     const heartbeat = getSandbox(req.params.id)?.heartbeat || {};
     const permissions = getPermissionsForSandbox(req.params.id);
     const slack = getPluginForSandbox(req.params.id, 'slack');
-    const isActive = isActiveSandbox(req.params.id);
-    let state;
-    if (isActive) {
-      state = harness.state.toJSON();
-    } else {
-      const runtime = orchestrator.getSandboxRuntime(req.params.id);
-      state = runtime ? runtime.harness.state.toJSON() : { running: false, status: 'stopped', beat: 0 };
-    }
+    const runtime = orchestrator.getSandboxRuntime(req.params.id);
+    const state = runtime ? runtime.harness.state.toJSON() : { running: false, status: 'stopped', beat: 0 };
 
     const config = getConfig();
     const providers = [...new Set((config.models || []).map(m => m.id.split('/')[0]))];
@@ -1020,19 +807,17 @@ app.post('/api/sandboxes/:id/activate', async (req, res) => {
     const sandbox = getSandbox(req.params.id);
     if (!sandbox) return res.status(404).json({ error: 'Sandbox not found' });
 
-    const wasRunning = harness.state.running;
-    if (wasRunning) await harness.stop();
-    if (orchestrator.getSandboxRuntime(req.params.id)) {
-      await orchestrator.stopSandbox(req.params.id);
-    }
-
+    // Activation is a UI focus switch. Sandboxes run independently — we do
+    // not stop any harness here. We just ensure the newly-focused sandbox
+    // has a runtime and its Go backend is up so the dashboard renders data.
     await setActiveSandbox(req.params.id);
-    rebindHarness();
     const account = getActiveAccount();
     if (account) {
       await migrateLegacyDataForAccount(account.id);
-      await startGoBackend(account);
-      if (wasRunning) await harness.start();
+      const runtime = getRuntimeForSandbox(req.params.id);
+      if (runtime && !runtime.goReady) {
+        await orchestrator.startGoBackend(req.params.id);
+      }
     }
     broadcast('config', safeConfig());
     res.json({ ok: true, sandboxId: req.params.id });
@@ -1200,25 +985,20 @@ app.delete('/api/accounts/:id', async (req, res) => {
 app.post('/api/accounts/:id/activate', async (req, res) => {
   try {
     const nextSandboxId = `sbx_${req.params.id}`;
-    const wasRunning = harness.state.running;
-    if (wasRunning) await harness.stop();
-    if (orchestrator.getSandboxRuntime(nextSandboxId)) {
-      await orchestrator.stopSandbox(nextSandboxId);
-    }
     await setActiveAccount(req.params.id);
     const account = getActiveAccount();
-    rebindHarness();
     broadcast('config', safeConfig());
-    // Restart Go backend with new account credentials
     if (account) {
       await migrateLegacyDataForAccount(account.id);
       broadcast('agent_log', {
-        message: `Switching to account "${account.name}"... restarting trading backend.`,
+        message: `Switching to account "${account.name}"... ensuring trading backend.`,
         level: 'info',
         timestamp: new Date().toISOString(),
       });
-      await startGoBackend(account);
-      if (wasRunning) await harness.start();
+      const runtime = getRuntimeForSandbox(nextSandboxId);
+      if (runtime && !runtime.goReady) {
+        await orchestrator.startGoBackend(nextSandboxId);
+      }
     }
     res.json({ ok: true });
   } catch (err) { res.status(400).json({ error: err.message }); }
@@ -1618,26 +1398,37 @@ app.post('/api/auth/logout', (req, res) => {
 
 // ── Health ──────────────────────────────────────────────────────────
 app.get('/api/health', async (req, res) => {
-  let botHealthy = false;
-  try {
-    await goAxios.get('/health', { timeout: 3000 });
-    botHealthy = true;
-  } catch {}
   const account = getActiveAccount();
-  const sandboxStates = getSandboxes().map(sandbox => ({
-    sandboxId: sandbox.id,
-    port: isActiveSandbox(sandbox.id) ? Number(TRADING_BOT_PORT) : orchestrator.getSandboxRuntime(sandbox.id)?.port || null,
-    goReady: isActiveSandbox(sandbox.id) ? goReady : (orchestrator.getSandboxRuntime(sandbox.id)?.goReady || false),
-    goPid: isActiveSandbox(sandbox.id) ? (goProc?.pid || null) : (orchestrator.getSandboxRuntime(sandbox.id)?.goProc?.pid || null),
-    state: isActiveSandbox(sandbox.id) ? harness.state.toJSON() : (orchestrator.getSandboxRuntime(sandbox.id)?.harness.state.toJSON() || null),
-  }));
+  const activeId = getActiveSandbox()?.id || null;
+  const activeRuntime = activeId ? orchestrator.getSandboxRuntime(activeId) : null;
+
+  // trading_bot health reflects the active sandbox's Go backend (the one the
+  // dashboard is currently focused on). Per-sandbox health is in sandboxes[].
+  let botHealthy = false;
+  if (activeRuntime?.goAxios) {
+    try {
+      await activeRuntime.goAxios.get('/health', { timeout: 3000 });
+      botHealthy = true;
+    } catch {}
+  }
+
+  const sandboxStates = getSandboxes().map(sandbox => {
+    const runtime = orchestrator.getSandboxRuntime(sandbox.id);
+    return {
+      sandboxId: sandbox.id,
+      port: runtime?.port || null,
+      goReady: runtime?.goReady || false,
+      goPid: runtime?.goProc?.pid || null,
+      state: runtime ? runtime.harness.state.toJSON() : null,
+    };
+  });
   res.json({
     agent: 'healthy',
     trading_bot: botHealthy ? 'healthy' : 'unavailable',
-    trading_bot_managed: goProc !== null,
+    trading_bot_managed: !!activeRuntime?.goProc,
     activeAccount: account ? { name: account.name, paper: account.paper } : null,
     uptime: process.uptime(),
-    state: harness.state.toJSON(),
+    state: activeRuntime ? activeRuntime.harness.state.toJSON() : null,
     sandboxes: sandboxStates,
     scheduler: scheduler.getStatus(),
   });
@@ -1665,39 +1456,39 @@ app.use((req, res, next) => {
 
 // ── Start Server ───────────────────────────────────────────────────
 
-for (const sandbox of getSandboxes()) {
-  if (!isActiveSandbox(sandbox.id)) {
-    const runtime = orchestrator.ensureRuntime(sandbox.id);
-    bindOperationalHooks(runtime.harness);
-  }
+// Every sandbox gets an orchestrator-managed runtime up front so heartbeats,
+// preflight, and dashboard endpoints have something to read from on boot.
+await orchestrator.ensureAllRuntimes();
+for (const runtime of orchestrator.runtimes.values()) {
+  bindOperationalHooks(runtime.harness);
 }
 
-// Start Go backend with active account
+// Auto-start the Go backend for the active sandbox so the dashboard renders
+// portfolio data immediately. Other sandboxes start their Go backend lazily
+// when the user opens or starts them.
 const activeAccount = getActiveAccount();
-if (activeAccount) {
-  await startGoBackend(activeAccount);
+const startupActiveSandboxId = getActiveSandbox()?.id;
+if (startupActiveSandboxId && activeAccount) {
+  await orchestrator.startGoBackend(startupActiveSandboxId);
 } else {
-  console.log('  No active account configured — Go backend not started');
+  console.log('  No active sandbox/account configured — trading backend not started');
 }
 
 await scheduler.start();
 scheduler.runStartupChecks().catch(() => {});
 
-// Graceful shutdown
+// Graceful shutdown — orchestrator.shutdown() stops every runtime's harness
+// and Go backend, so a single call replaces the old singleton teardown.
 process.on('SIGTERM', async () => {
   console.log('\n  Shutting down...');
   scheduler.stop();
-  await harness.stop();
   await orchestrator.shutdown();
-  await stopGoBackend();
   process.exit(0);
 });
 process.on('SIGINT', async () => {
   console.log('\n  Shutting down...');
   scheduler.stop();
-  await harness.stop();
   await orchestrator.shutdown();
-  await stopGoBackend();
   process.exit(0);
 });
 

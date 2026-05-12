@@ -3551,7 +3551,7 @@ function showModal(type, data) {
       + '<div class="modal-actions"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn primary" onclick="submitEditAccount(\''+esc(a.id||'')+'\')">Save</button></div>';
   }
   else if(type === 'agent-create' || type === 'agent-edit') {
-    const a = data || { name:'', description:'', systemPromptTemplate:'default', customSystemPrompt:'', strategyId:'default', model: config.activeModel, heartbeatOverrides:{} };
+    const a = data || { name:'', description:'', systemPromptTemplate:'default', customSystemPrompt:'', strategyId:'v2-options', model: config.activeModel, heartbeatOverrides:{} };
     const stratOpts = (config.strategies||[]).map(s => '<option value="'+s.id+'"'+(s.id===a.strategyId?' selected':'')+'>'+esc(s.name)+'</option>').join('');
     const currentProvider = a.model ? a.model.split('/')[0] : 'anthropic';
     const providers = [...new Set((config.models||[]).map(m => m.id.split('/')[0]))].sort();
@@ -3626,7 +3626,7 @@ async function submitStrategy(id) {
 
 function openAgentBuilder(mode, agent, models, strategies, sandboxId) {
   const isEdit = mode === 'edit' && agent;
-  const a = agent || { name: '', description: '', systemPromptTemplate: 'default', customSystemPrompt: '', strategyId: 'default', model: config.activeModel, heartbeatOverrides: {} };
+  const a = agent || { name: '', description: '', systemPromptTemplate: 'default', customSystemPrompt: '', strategyId: 'v2-options', model: config.activeModel, heartbeatOverrides: {} };
   const allModels = models || config.models || [];
   const currentProvider = a.model ? a.model.split('/')[0] : 'anthropic';
   const providers = [...new Set(allModels.map(m => m.id.split('/')[0]))].sort();

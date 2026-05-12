@@ -1098,7 +1098,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: 'set_heartbeat',
-        description: 'Override the agent heartbeat interval. Use this to speed up or slow down your own heartbeat cycle based on market conditions or workload. For example, set to 60s during volatile markets or 600s when nothing is happening.',
+        description: 'Override the agent heartbeat interval (clamped 30-3600s). Pick the longest value consistent with how soon you actually need to look again. Suggested anchors: 30-60s during volatile markets or active scalping, 300-600s for routine monitoring, 1200-1800s when only holding multi-day swing positions with no near-term stops or catalysts, up to 3600s when fully idle. The harness automatically wakes you at the next phase boundary (market_open, midday, market_close) regardless of this setting, so long intervals are safe within a single phase.',
         inputSchema: {
           type: 'object',
           properties: {
