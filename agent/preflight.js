@@ -11,6 +11,52 @@
 //
 // See docs/preflight-skip-spec.md for the full design.
 
+// isEconomicBlackout queries /api/v1/econ/blackout for the shared US-release
+// blackout window (30 min before / 15 min after CPI, NFP, FOMC, PCE, PPI,
+// core retail). Fails open: any error → { blackout: false, error } so the
+// predicate runs the LLM beat. The LLM then sees the error via
+// get_econ_blackout_status and applies the rules-side fail-closed policy
+// (no new entries when the source is flaky).
+//
+// Uses a 1500ms inner timeout so a slow blackout endpoint doesn't consume
+// the full 2s budget of the surrounding resolvePreflight Promise.race.
+export async function isEconomicBlackout(_now, runtime) {
+  if (!runtime || !runtime.goAxios) {
+    return { blackout: false, error: 'no runtime' };
+  }
+  try {
+    const resp = await runtime.goAxios.get('/api/v1/econ/blackout', { timeout: 1500 });
+    const body = resp?.data || {};
+    if (body.is_blackout === true) {
+      return { blackout: true, reason: body.reason || 'econ blackout' };
+    }
+    if (body.error) {
+      return { blackout: false, error: body.error };
+    }
+    return { blackout: false };
+  } catch (err) {
+    return { blackout: false, error: err.message };
+  }
+}
+
+// econBlackoutSkipIfNoPositions returns a {skip:true, reason} object when the
+// strategy has zero live positions AND we are in an econ blackout, otherwise
+// null. Predicates call this AFTER they've decided they would otherwise run.
+//
+// Positions-existing always wins: exit-management beats must run during a
+// blackout. Endpoint errors fail open here (null) so the predicate proceeds.
+export async function econBlackoutSkipIfNoPositions(runtime, livePositionCount) {
+  if (livePositionCount > 0) return null;
+  const econ = await isEconomicBlackout(new Date(), runtime);
+  if (econ.blackout) {
+    return {
+      skip: true,
+      reason: `econ blackout: ${econ.reason} (no positions to manage)`,
+    };
+  }
+  return null;
+}
+
 // PennyProphet predicate. Skips the LLM beat when there are no candidates
 // above the composite-score threshold AND no penny-tagged positions to manage
 // AND no open broker orders pending fill.
@@ -63,6 +109,13 @@ async function pennyPreflight(runtime, agentConfig) {
     };
   }
 
+  // Econ-blackout gate: if there's nothing to manage (no positions, no orders
+  // in flight) AND we're inside a US-release blackout window, skip the beat.
+  // The LLM can't open new entries anyway during blackout.
+  const liveCount = positions.length + openOrders.length;
+  const econSkip = await econBlackoutSkipIfNoPositions(runtime, liveCount);
+  if (econSkip) return econSkip;
+
   if (candidateCount > 0) {
     return { skip: false, reason: `${candidateCount} candidate(s) above threshold` };
   }
@@ -101,49 +154,45 @@ export function isClosedPhase(now) {
 
 // Prophet predicate. Only considers skipping during the 'closed' phase
 // (overnight 8pm-4am ET on weekdays + full weekends). All other phases
-// always run the LLM because Prophet's mandates depend on them:
-//   - pre_market: read daily_brief, scan bulletins, plan entries
-//   - market_open / midday / market_close: monitor positions, execute
-//   - after_hours: scan after-hours earnings, log activity
+// always run the LLM because Prophet's mandates depend on them.
 //
-// During 'closed', if there are no open positions AND no open broker orders,
-// there is literally nothing to manage — the broker is shut, news will be
-// re-read at 6am via the daily_briefing scheduler job, and the harness fires
-// an early heartbeat exactly at the next phase boundary (pre_market start)
-// so we don't miss the morning wake-up.
+// Uses /api/v1/positions?strategy=v2-options so co-located agents on a
+// shared Alpaca account (e.g., PennyProphet, TrendProphet) don't keep
+// Prophet awake. Attribution is derived from each position's most recent
+// buy order's strategy tag (see HandleGetPositions). The open-orders check
+// from the prior implementation is dropped: during 'closed' phase the
+// broker is shut, partial fills can't occur, and day orders are
+// auto-canceled by Alpaca at close.
 async function prophetPreflight(runtime, agentConfig) {
   const phase = isClosedPhase(new Date());
-  if (!phase.closed) {
-    return { skip: false, reason: 'phase active — Prophet runs' };
-  }
-
   const { goAxios } = runtime;
-  const [positionsResp, ordersResp] = await Promise.all([
-    goAxios.get('/api/v1/positions'),
-    goAxios.get('/api/v1/orders?status=open'),
-  ]);
 
-  if (!Array.isArray(positionsResp.data)) {
-    return { skip: false, reason: 'positions response shape unexpected' };
-  }
-  if (!Array.isArray(ordersResp.data)) {
-    return { skip: false, reason: 'orders response shape unexpected' };
-  }
-
-  const positions = positionsResp.data;
-  const openOrders = ordersResp.data;
-
-  if (positions.length === 0 && openOrders.length === 0) {
-    return {
-      skip: true,
-      reason: `closed phase (${phase.reason}), no positions, no open orders`,
-    };
+  if (phase.closed) {
+    const positionsResp = await goAxios.get('/api/v1/positions?strategy=v2-options');
+    if (typeof positionsResp.data?.count !== 'number') {
+      return { skip: false, reason: 'positions response shape unexpected' };
+    }
+    const positionCount = positionsResp.data.count;
+    if (positionCount === 0) {
+      return {
+        skip: true,
+        reason: `closed phase (${phase.reason}), no v2-options positions`,
+      };
+    }
+    return { skip: false, reason: `${positionCount} open position(s) to evaluate` };
   }
 
-  if (positions.length > 0) {
-    return { skip: false, reason: `${positions.length} open position(s) to evaluate` };
+  // Open phase — Prophet normally always runs. New: gate on econ blackout
+  // when there are no positions to manage. Adds one /api/v1/positions call
+  // per open-phase beat (~5ms) in exchange for skipping high-noise release
+  // windows that would otherwise burn tokens.
+  const positionsResp = await goAxios.get('/api/v1/positions?strategy=v2-options');
+  const positionCount = (typeof positionsResp.data?.count === 'number') ? positionsResp.data.count : -1;
+  if (positionCount === 0) {
+    const econSkip = await econBlackoutSkipIfNoPositions(runtime, 0);
+    if (econSkip) return econSkip;
   }
-  return { skip: false, reason: `${openOrders.length} open order(s) pending fill` };
+  return { skip: false, reason: 'phase active — Prophet runs' };
 }
 
 const TREND_UNIVERSE = ['TLT', 'GLD', 'USO', 'DBC', 'UUP', 'EEM'];
@@ -171,11 +220,12 @@ export function outOfTrendWindow(now) {
 
 // TrendProphet predicate. Skips the LLM beat when:
 //  (a) it is outside the 16:55-17:05 ET window (cheap; no API calls), OR
-//  (b) it is in window but there are no open positions and no universe ticker
-//      shows an entry signal.
+//  (b) it is in window but there are no open trend positions and no universe
+//      ticker shows an entry signal.
 //
-// Account isolation makes "any position in this sandbox" === "TrendProphet
-// position" today. When shared-account tagging lands, filter by strategy="trend".
+// Uses /api/v1/positions?strategy=trend so co-located agents on a shared
+// Alpaca account don't keep TrendProphet awake. Attribution is derived from
+// each position's most recent buy order's strategy tag.
 async function trendPreflight(runtime, agentConfig) {
   // Step 1 — time window. Skips the bulk of beats without any API calls.
   const window = outOfTrendWindow(new Date());
@@ -183,16 +233,16 @@ async function trendPreflight(runtime, agentConfig) {
     return { skip: true, reason: window.reason };
   }
 
-  // Step 2 — in window. Check positions first; if any exist, the agent must
-  // run to evaluate exit rules.
+  // Step 2 — in window. Check trend-attributed positions first; if any exist,
+  // the agent must run to evaluate exit rules.
   const { goAxios } = runtime;
-  const positionsResp = await goAxios.get('/api/v1/positions');
-  if (!Array.isArray(positionsResp.data)) {
+  const positionsResp = await goAxios.get('/api/v1/positions?strategy=trend');
+  if (typeof positionsResp.data?.count !== 'number') {
     return { skip: false, reason: 'positions response shape unexpected' };
   }
-  const positions = positionsResp.data;
-  if (positions.length > 0) {
-    return { skip: false, reason: `${positions.length} open position(s) to evaluate` };
+  const positionCount = positionsResp.data.count;
+  if (positionCount > 0) {
+    return { skip: false, reason: `${positionCount} open position(s) to evaluate` };
   }
 
   // Step 3 — no positions. Check if any universe ticker has a fresh entry
@@ -220,6 +270,11 @@ async function trendPreflight(runtime, agentConfig) {
       reason: 'in window, no positions, no entry signals across 6-ticker universe',
     };
   }
+
+  // Econ blackout (no positions branch — positions>0 already returned above).
+  const econSkip = await econBlackoutSkipIfNoPositions(runtime, 0);
+  if (econSkip) return econSkip;
+
   return { skip: false, reason: 'in window, entry signal available' };
 }
 
@@ -273,6 +328,11 @@ async function harvestPreflight(runtime, agentConfig) {
     return { skip: true, reason: 'no open condors and FOMC blackout' };
   }
 
+  // Shared US-release blackout (CPI, NFP, PCE, PPI, core retail). The 24h
+  // pre-FOMC ban above remains as a Harvest-specific strategy guardrail.
+  const econSkip = await econBlackoutSkipIfNoPositions(runtime, 0);
+  if (econSkip) return econSkip;
+
   // Defensive: at-cap with zero condors should be impossible, but treat as skip.
   if ((state.deployed_buying_power_pct ?? 0) >= 12.0) {
     return { skip: true, reason: 'no open condors but deployed buying power at cap' };
@@ -298,6 +358,30 @@ async function harvestPreflight(runtime, agentConfig) {
     }
   } catch (err) {
     return { skip: false, reason: `harvest chain probe error: ${err.message}` };
+  }
+
+  // SPY IV–RV premium-edge gate. When SPY's stored ATM IV ≤ trailing 20-day
+  // realized vol, the whole vol-selling regime is weak and entries across the
+  // universe would have no edge. Skip the beat. Per-underlying check still
+  // runs in the LLM's Step-3 routine (TRADING_RULES_HARVEST.md).
+  //
+  // Cold-start safety: gate fires only when realized_vol_20d > 0. If the RV
+  // service isn't wired or has insufficient bars, fall through rather than
+  // misread a fabricated positive spread.
+  //
+  // Soft-fail on endpoint error: missing IV data should not block beats.
+  try {
+    const ivResp = await goAxios.get('/api/v1/iv/SPY');
+    const rv = Number(ivResp.data?.realized_vol_20d);
+    const spread = Number(ivResp.data?.iv_minus_rv);
+    if (rv > 0 && Number.isFinite(spread) && spread <= 0) {
+      return {
+        skip: true,
+        reason: `no open condors and SPY IV ≤ RV (spread ${spread.toFixed(4)}, RV ${rv.toFixed(4)}) — no premium-selling edge`,
+      };
+    }
+  } catch (_err) {
+    // Soft-fail; do not block on IV endpoint outage.
   }
 
   return { skip: false, reason: 'no open condors but chain data available' };

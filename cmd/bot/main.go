@@ -81,9 +81,17 @@ func main() {
 	newsService := services.NewNewsService()
 	newsController := controllers.NewNewsController(newsService)
 
-	// Create economic feeds service and controller
+	// Create economic feeds service and controller.
+	// EconCalendarService is optional: when FMP_API_KEY is unset, the
+	// /api/v1/econ/blackout endpoint returns 503 and preflight fails open.
 	economicFeedsService := services.NewEconomicFeedsService()
-	economicFeedsController := controllers.NewEconomicFeedsController(economicFeedsService)
+	var econCalendarService *services.EconCalendarService
+	if cfg.FMPAPIKey != "" {
+		econCalendarService = services.NewEconCalendarService(cfg.FMPAPIKey)
+	} else {
+		logger.Warn("FMP_API_KEY unset — econ blackout endpoint will return 503 and preflight will fail open")
+	}
+	economicFeedsController := controllers.NewEconomicFeedsController(economicFeedsService, econCalendarService)
 
 	// Create AI news cleaner (provider selected via AI_PROVIDER env var or auto-detected)
 	var aiService services.NewsCleanerService
@@ -165,10 +173,15 @@ func main() {
 	}
 
 	pennyUniverseService := services.NewPennyUniverseService(cfg.FMPAPIKey, cfg.AlpacaAPIKey, cfg.AlpacaSecretKey, cfg.AlpacaBaseURL, earningsService, nil)
-	pennyScreenerService := services.NewPennyScreenerService(cfg.AlpacaAPIKey, cfg.AlpacaSecretKey, pennyUniverseService)
+	// Intraday context cache for the penny screener (ORB-15 capture + trailing
+	// 20-day avg volume per ticker). Bounded HTTP cost: cache is per-ticker
+	// per-session for ORB, per-ticker per-day for avg volume.
+	pennyIntradayCache := services.NewPennyIntradayCache(dataService)
+	pennyScreenerService := services.NewPennyScreenerService(cfg.AlpacaAPIKey, cfg.AlpacaSecretKey, pennyUniverseService, pennyIntradayCache)
 	secEdgarService := services.NewSECEdgarService(pennyUniverseService, nil, cfg.OperatorEmail, earningsService)
 	socialSignalService := services.NewSocialSignalService(pennyUniverseService, nil)
-	pennyAggregator := services.NewPennySignalAggregator(pennyUniverseService, pennyScreenerService, secEdgarService, socialSignalService)
+	pennyMaxFilter := services.NewPennyMaxFilterService(pennyUniverseService, dataService)
+	pennyAggregator := services.NewPennySignalAggregator(pennyUniverseService, pennyScreenerService, secEdgarService, socialSignalService, pennyMaxFilter)
 	pennyController := controllers.NewPennyController(pennyAggregator)
 
 	// Wire dilution filter to operator-visible held-position logging.
@@ -179,6 +192,7 @@ func main() {
 	go pennyScreenerService.Start(ctx)
 	go secEdgarService.Start(ctx)
 	go socialSignalService.Start(ctx)
+	go pennyMaxFilter.Start(ctx)
 	go pennyAggregator.Start(ctx)
 
 	logger.Debug("Penny stock signal pipeline started")
@@ -186,6 +200,11 @@ func main() {
 	// Initialize Harvest services
 	harvestIVRSvc := services.NewHarvestIVRService(storageService)
 	harvestSvc := services.NewHarvestService(storageService)
+
+	// Wire the IV provider into StockAnalysisService so analyze_stocks
+	// responses include per-symbol IV rank / percentile / days_of_history.
+	// Safe to set after construction; the field is read inside AnalyzeStock.
+	stockAnalysisService.SetIVProvider(harvestIVRSvc)
 
 	getPortfolioValue := func() (float64, error) {
 		acct, err := orderController.GetAccount()
@@ -202,9 +221,15 @@ func main() {
 		return tradingService.PlaceMultiLegOrder(ctx, order)
 	})
 
+	// Realized-vol service used to compute the IV–RV spread that gates
+	// Harvest condor entries. Wired into both HarvestController (legacy
+	// harvest/ivr route) and IVController (generic iv/:symbol route).
+	realizedVolSvc := services.NewRealizedVolService(dataService)
+
 	harvestController := controllers.NewHarvestController(
 		harvestSvc,
 		harvestIVRSvc,
+		realizedVolSvc,
 		storageService,
 		placeMLegFn,
 		getPortfolioValue,
@@ -225,8 +250,19 @@ func main() {
 	segmentPnLController := controllers.NewSegmentPnLController(segmentPnLSvc)
 	logger.Debug("Segment P&L service initialized")
 
+	// Generic IV-rank controller (shared by Harvest and Prophet via /api/v1/iv/:symbol).
+	// rvSvc enriches the response with realized_vol_20d + iv_minus_rv.
+	ivController := controllers.NewIVController(harvestIVRSvc, realizedVolSvc)
+	logger.Debug("IV controller initialized")
+
+	// Intraday signal service + controller (auto-pushed into Prophet beats,
+	// also available on-demand via the get_intraday_signals MCP tool)
+	intradaySignalSvc := services.NewIntradaySignalService(dataService)
+	intradayController := controllers.NewIntradayController(intradaySignalSvc)
+	logger.Debug("Intraday signal service initialized")
+
 	// Setup HTTP server
-	router := setupRouter(orderController, newsController, intelligenceController, positionController, activityController, economicFeedsController, pennyController, guardController, harvestController, trendController, segmentPnLController)
+	router := setupRouter(orderController, newsController, intelligenceController, positionController, activityController, economicFeedsController, pennyController, guardController, harvestController, trendController, segmentPnLController, ivController, intradayController)
 
 	// Start data cleanup routine
 	go startDataCleanup(ctx, storageService, cfg.DataRetentionDays, logger)
@@ -256,7 +292,7 @@ func main() {
 	}
 }
 
-func setupRouter(orderController *controllers.OrderController, newsController *controllers.NewsController, intelligenceController *controllers.IntelligenceController, positionController *controllers.PositionManagementController, activityController *controllers.ActivityController, economicFeedsController *controllers.EconomicFeedsController, pennyController *controllers.PennyController, guardController *controllers.GuardController, harvestController *controllers.HarvestController, trendController *controllers.TrendController, segmentPnLController *controllers.SegmentPnLController) *gin.Engine {
+func setupRouter(orderController *controllers.OrderController, newsController *controllers.NewsController, intelligenceController *controllers.IntelligenceController, positionController *controllers.PositionManagementController, activityController *controllers.ActivityController, economicFeedsController *controllers.EconomicFeedsController, pennyController *controllers.PennyController, guardController *controllers.GuardController, harvestController *controllers.HarvestController, trendController *controllers.TrendController, segmentPnLController *controllers.SegmentPnLController, ivController *controllers.IVController, intradayController *controllers.IntradayController) *gin.Engine {
 	router := gin.Default()
 	router.SetTrustedProxies([]string{"127.0.0.1"})
 
@@ -335,6 +371,15 @@ func setupRouter(orderController *controllers.OrderController, newsController *c
 		api.GET("/feeds/usaspending", economicFeedsController.HandleGetUSASpending)
 		api.GET("/feeds/comtrade", economicFeedsController.HandleGetComtrade)
 
+		// US-economic-release blackout window (shared across all four agents)
+		api.GET("/econ/blackout", economicFeedsController.HandleGetEconBlackout)
+
+		// Generic IV rank/percentile lookup (latest stored snapshot per symbol)
+		api.GET("/iv/:symbol", ivController.HandleGetIV)
+
+		// Intraday signals (compact per-symbol blob; cached 60s)
+		api.GET("/intraday/signals", intradayController.HandleGetSignals)
+
 		api.GET("/activity/current", activityController.HandleGetCurrentActivity)
 		api.GET("/activity/:date", activityController.HandleGetActivityByDate)
 		api.GET("/activity", activityController.HandleListActivityLogs)
@@ -400,14 +445,22 @@ func startDataCleanup(ctx context.Context, storage interfaces.StorageService, re
 	}
 }
 
-// startHarvestIVCollection records ATM IV for all Harvest underlyings once per trading day.
+// startHarvestIVCollection records ATM IV for Harvest + Prophet underlyings
+// every 6h. Despite the name, the universe now spans both strategies: SPY/QQQ
+// are shared, IWM/GLD/TLT are Harvest-specific, and NVDA/AMD/TSLA/MSTR are
+// Prophet-specific. The function name is unchanged to keep this diff small;
+// the IV data is consumed by both HarvestIVRService.GetIVRData (for Harvest's
+// IVR ≥ 30 entry filter) and StockAnalysisService (for Prophet's IV-rank gate).
 func startHarvestIVCollection(ctx context.Context, ivrSvc *services.HarvestIVRService, tradingService *services.AlpacaTradingService, logger *logrus.Logger) {
-	harvestUniverse := []string{"SPY", "QQQ", "IWM", "GLD", "TLT"}
+	ivUniverse := []string{
+		"SPY", "QQQ", "IWM", "GLD", "TLT", // Harvest condor underlyings
+		"NVDA", "AMD", "TSLA", "MSTR", // Prophet-specific watchlist
+	}
 	ticker := time.NewTicker(6 * time.Hour)
 	defer ticker.Stop()
 
 	collectAll := func() {
-		for _, symbol := range harvestUniverse {
+		for _, symbol := range ivUniverse {
 			if tradingService == nil {
 				continue
 			}
@@ -458,7 +511,13 @@ func calcATMIV(chain []*interfaces.OptionContract) float64 {
 	return sum / float64(count)
 }
 
-// Background task to monitor and save positions
+// Background task to monitor and save account snapshots.
+//
+// Position snapshots were previously written here but the DBPosition schema's
+// uniqueIndex on Symbol made every save after the first per symbol error with
+// `UNIQUE constraint failed: positions.symbol`. Nothing in the codebase reads
+// the positions table, so the save was removed rather than fixed. Position
+// history is available via DBOrder + Alpaca's live positions endpoint.
 func startPositionMonitor(ctx context.Context, orderController *controllers.OrderController, storage *database.LocalStorage, logger *logrus.Logger) {
 	ticker := time.NewTicker(5 * time.Minute) // Check every 5 minutes
 	defer ticker.Stop()
@@ -468,28 +527,11 @@ func startPositionMonitor(ctx context.Context, orderController *controllers.Orde
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			// Get current positions
-			positions, err := orderController.GetPositions()
-			if err != nil {
-				logger.WithError(err).Error("Failed to get positions")
-				continue
-			}
-
-			// Save position snapshots
-			for _, position := range positions {
-				if err := storage.SavePosition(position); err != nil {
-					logger.WithError(err).Error("Failed to save position snapshot")
-				}
-			}
-
-			// Get and save account snapshot
 			if account, err := orderController.GetAccount(); err == nil {
 				if err := storage.SaveAccountSnapshot(account); err != nil {
 					logger.WithError(err).Error("Failed to save account snapshot")
 				}
 			}
-
-			logger.WithField("positions", len(positions)).Debug("Position monitor update complete")
 		}
 	}
 }

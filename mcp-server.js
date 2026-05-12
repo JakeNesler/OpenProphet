@@ -702,6 +702,38 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         },
       },
       {
+        name: 'get_econ_blackout_status',
+        description: 'Returns the current US-economic-release blackout status. Window is 30 minutes before / 15 minutes after CPI, NFP, FOMC, PCE, PPI, and core retail sales releases. Response fields: is_blackout (bool), reason (string), blackout_until (ISO time), next_event, window_before_min, window_after_min, error (string when fetch failed). RULES: call once per beat before considering any new entry. If is_blackout=true OR error is non-empty, do NOT open new positions this beat — manage existing positions only.',
+        inputSchema: { type: 'object', properties: {} },
+      },
+      {
+        name: 'get_iv_rank',
+        description: 'Returns IV rank (52-week min-max position) and IV percentile (share of trailing days at or below current IV) for a single underlying. Response fields: underlying, current_iv, low52_wk, high52_wk, ivr (0-100; -1 = no history), iv_percentile (0-100; -1 = no history), days_of_history. INTERPRETATION: ivr < 30 = premium cheap → prefer long options. ivr > 70 = premium expensive → prefer credit spreads. If days_of_history < 20, treat both metrics as low-confidence and do not let them dominate the entry decision. Use iv_percentile as a tiebreaker when ivr is mid-range (30-70). Data is from the latest stored snapshot (refreshed every 6h).',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            symbol: { type: 'string', description: 'Underlying ticker, uppercase (e.g., "SPY", "NVDA").' },
+          },
+          required: ['symbol'],
+        },
+      },
+      {
+        name: 'get_intraday_signals',
+        description: 'Returns a per-symbol intraday context blob: session VWAP and distance from it, RVOL (time-of-day-adjusted relative volume), session high/low / ATR-20 range, % change vs prior close, and the sector ETF % change when mapped. Use to read intraday tape for off-watchlist symbols or to recompute fresh values on-demand. NOTE: for Prophet beats during market hours, SPY/QQQ/NVDA/AMD/TSLA/MSTR are already pushed into your prompt automatically — call this tool only when you need different symbols, fresher data, or you are reasoning outside a market-hours beat. Cached 60s server-side.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            symbols: {
+              type: 'array',
+              items: { type: 'string' },
+              description: 'Tickers to fetch (uppercase). Example: ["AAPL", "META", "COIN"].',
+              minItems: 1,
+            },
+          },
+          required: ['symbols'],
+        },
+      },
+      {
         name: 'analyze_stocks',
         description: 'Analyze multiple stocks with comprehensive technical indicators, news, and AI-powered recommendations. Returns RSI, trend, volatility, support/resistance, catalysts, and trade recommendations for each stock.',
         inputSchema: {
@@ -1986,6 +2018,29 @@ ${allNews.map((article, i) =>
       }
       case 'get_global_trade_flows': {
         const data = await callTradingBot('/feeds/comtrade');
+        return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
+      }
+
+      case 'get_econ_blackout_status': {
+        const data = await callTradingBot('/econ/blackout');
+        return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
+      }
+
+      case 'get_iv_rank': {
+        if (!args || !args.symbol) {
+          return { content: [{ type: 'text', text: JSON.stringify({ error: 'symbol is required' }, null, 2) }] };
+        }
+        const symbol = String(args.symbol).toUpperCase();
+        const data = await callTradingBot(`/iv/${encodeURIComponent(symbol)}`);
+        return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
+      }
+
+      case 'get_intraday_signals': {
+        if (!args || !Array.isArray(args.symbols) || args.symbols.length === 0) {
+          return { content: [{ type: 'text', text: JSON.stringify({ error: 'symbols (non-empty array) is required' }, null, 2) }] };
+        }
+        const symbols = args.symbols.map(s => String(s).toUpperCase()).filter(Boolean).join(',');
+        const data = await callTradingBot(`/intraday/signals?symbols=${encodeURIComponent(symbols)}`);
         return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
       }
 

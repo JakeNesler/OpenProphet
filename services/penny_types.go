@@ -56,7 +56,19 @@ type CandidateScore struct {
 	TechnicalContext string    `json:"technical_context,omitempty"`
 	RegulatoryEvent  string    `json:"regulatory_event,omitempty"`
 	SocialContext    string    `json:"social_context,omitempty"`
-	LastUpdated      time.Time `json:"last_updated"`
+
+	// Intraday context (see TRADING_RULES_PENNY pre-trade checklist).
+	// RVOL is the time-of-day-adjusted relative volume (today's cumulative
+	// volume / (20-day avg daily volume × fraction of session elapsed)).
+	// 0 means "no signal yet" — usually pre-market or insufficient history.
+	// ORBStatus is one of: "awaiting" (pre 9:45 ET or capture failed),
+	// "inside_or", "above_or_high", "below_or_low".
+	RVOL      float64 `json:"rvol"`
+	ORBHigh   float64 `json:"orb_high,omitempty"`
+	ORBLow    float64 `json:"orb_low,omitempty"`
+	ORBStatus string  `json:"orb_status,omitempty"`
+
+	LastUpdated time.Time `json:"last_updated"`
 }
 
 // scoreWithDecay applies exponential decay to a base score.

@@ -338,10 +338,32 @@ Log one line via `log_activity`:
 
 ---
 
+## Cross-Asset Context (analyze_stocks Field)
+
+When `analyze_stocks` returns a Trend universe symbol (TLT, GLD, USO, DBC, UUP, EEM), the response includes a `cross_asset` block with 5-day moves of three macro proxies. Use these to confirm or pause a directional breakout — a Donchian-100 break carries more weight when the macro tape agrees with it.
+
+- `cross_asset.dxy_change_pct_5d` — 5-day return of UUP (US dollar proxy).
+  - **Positive = dollar bid.** Bullish for UUP itself; bearish for GLD, USO, EEM (commodities/EM weaken under a strong dollar).
+- `cross_asset.rate_proxy_pct_5d` — 5-day return of IEF (7-10y Treasury ETF, **inverse** to 10y yield).
+  - **Positive = rates FALLING** (yields down, IEF up). Bullish for TLT, GLD; bearish for UUP.
+  - **Negative = rates RISING.** Bearish for TLT, GLD, EEM; bullish for UUP, USO.
+- `cross_asset.hyg_change_pct_5d` — 5-day return of HYG (high-yield credit ETF).
+  - **Positive = credit appetite up (risk-on).** Supports EEM longs and equity-correlated commodity longs.
+  - **Negative = risk-off.** Favor TLT longs, treat EEM/USO/DBC longs with caution.
+
+How to read together:
+- A TLT long with `rate_proxy_pct_5d > 0` AND `hyg_change_pct_5d < 0` = aligned risk-off tape → high-confidence entry.
+- A TLT long with `rate_proxy_pct_5d < 0` (rates rising) = macro disagrees with the Donchian break. Wait or size smaller.
+- A UUP long with `dxy_change_pct_5d > 0` is self-confirming (UUP **is** DXY) — read `rate_proxy_pct_5d` instead for additional confluence.
+- If `cross_asset` is absent or all three values are zero, the data fetch failed for one or more proxies. Make the call from the Donchian/SMA/ATR signal alone; do not treat absence as "no macro support".
+
+---
+
 ## Pre-Trade Checklist
 
 Before every trend entry:
 
+- [ ] `get_econ_blackout_status` returned `is_blackout=false` AND no `error` field? (Call once per beat before the first entry. If blackout or error → skip ALL new entries this beat; manage existing positions only.)
 - [ ] `last_close` > Donchian-100 high?
 - [ ] `last_close` > 200-day SMA?
 - [ ] ATR(20) / `last_close` ≥ 0.5%?

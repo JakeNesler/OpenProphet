@@ -47,6 +47,8 @@ Call `get_harvest_state`. If any of the following are true, skip Steps 2–3 ent
 
 Call `get_harvest_fomc`. If `is_blackout` is true, skip Steps 2–3 entirely.
 
+Call `get_econ_blackout_status` (once per beat). If `is_blackout` is true OR the `error` field is non-empty, skip Step 3 (new entries) entirely — exit-management in Step 2 still runs. This is the shared US-release blackout (CPI, NFP, PCE, PPI, core retail) and stacks on top of the 24h pre-FOMC ban above.
+
 ### Step 2: Exit checks (for each open condor in `get_harvest_state` response)
 
 For each condor in `open_condors_detail`:
@@ -80,6 +82,8 @@ Skip this underlying if:
 Call `get_harvest_ivr` for this underlying.
 - If `ivr` < 30 → skip, log "IVR {value} below 30 for {underlying}"
 - If `quote_age_seconds` > 60 → skip, log "stale quote for {underlying}"
+- If `realized_vol_20d` > 0 AND `iv_minus_rv` ≤ 0 → skip, log "no premium edge for {underlying}: IV {current_iv} ≤ RV {realized_vol_20d}". Selling condors when implied vol is at or below realized vol means writing premium at fair value or worse — no edge for the strategy.
+- If `realized_vol_20d` == 0 → ignore the IV–RV spread for this underlying (insufficient data). The IVR ≥ 30 check still applies.
 
 Call `get_harvest_expirations` for this underlying.
 - If no expiration returned → skip, log "no monthly expiration in [35,55] DTE for {underlying}"

@@ -116,6 +116,59 @@
 
 ---
 
+## Pre-Trade Blackout Checks
+
+**Rule:** Check US economic-release blackout before any new entry
+- Tool: `mcp__prophet__get_econ_blackout_status` (call ONCE per beat, before considering any new entry)
+- Window: 30 min before / 15 min after CPI, NFP, FOMC, PCE, PPI, core retail sales
+- If `is_blackout=true` OR the `error` field is non-empty → NO new entries this beat. Manage existing positions only.
+- Rationale: Entries in release windows are among the most common avoidable losses; the LLM cannot price volatility shocks better than the market does in the surrounding 45 minutes.
+
+---
+
+## Intraday Context Block
+
+During market hours (9:30 AM – 4:00 PM ET) you will see an **"Intraday Context"** table prepended to each heartbeat covering SPY, QQQ, NVDA, AMD, TSLA, MSTR. It is read-only context — not a checklist — but use it as follows:
+
+- **Distance from VWAP (`vwap%`):** Positive = price above session VWAP (buyers in control); negative = below VWAP (sellers in control). Magnitude > 1% on a high-RVOL day usually means real one-sided flow.
+- **RVOL:** Time-of-day-adjusted relative volume. `rvol > 1.5` = heavy volume vs the 20-day pace; `rvol < 0.7` = thin tape, scale entries down or wait. Do not enter scalps when RVOL < 1.0 — there isn't enough flow to confirm direction.
+- **Range over ATR (`rng/A`):** Today's session range divided by ATR-20. `> 1.0` = day's range already exceeds typical full-day range, expect mean-reversion. `< 0.4` mid-session = compressed, watch for a break.
+- **Sector ETF % (`sec%`):** Mapped sector benchmark — NVDA/AMD → SMH, TSLA → XLY, MSTR → XLK. SPY/QQQ have no sector. If the underlying is moving against its sector by > 1%, treat the move as idiosyncratic (news-driven) rather than tape-driven.
+- **Off-watchlist symbols:** Call `mcp__prophet__get_intraday_signals` with an explicit `symbols` array. Same fields, on demand.
+- **Missing data:** If a row shows `--` or the block is absent, do not retry — the harness already tried with an 800ms timeout. Make decisions from the data you do have and call the MCP tool if a specific symbol's reading is essential.
+
+---
+
+## Sector Context (analyze_stocks Field)
+
+When `analyze_stocks` returns a stock that has a mapped sector ETF (NVDA/AMD → SMH, TSLA → XLY, MSTR → XLK), the response includes a `sector` block:
+
+- `sector.etf` — the mapped ETF ticker.
+- `sector.change_pct_day` — today's % change of the sector ETF.
+- `sector.relative_strength_5d` — symbol's 5-day return minus the sector ETF's 5-day return. **Positive = symbol outperforming the sector** (a tape-confirmed leader); **negative = symbol underperforming** (lagging or under distribution).
+
+How to use:
+- `relative_strength_5d > +3` → genuine outperformer, prefer long-bias trades on dips.
+- `relative_strength_5d < -3` → underperformer, fade rallies or avoid longs.
+- `|relative_strength_5d| < 1` → trading with the sector, no edge from this signal.
+- If `sector` is absent from the response, the symbol has no mapped sector (SPY/QQQ are the broad references themselves) or the ETF data fetch failed. Treat absence as "no signal".
+
+---
+
+## IV Rank Gate (Options Entries)
+
+**Rule:** Every options entry must read IV rank before sizing
+- Tool: `mcp__prophet__get_iv_rank` with the underlying symbol (or read the `iv` block from `analyze_stocks` if the symbol is already in the analyze call). Data refreshes every 6h.
+- Action by reading:
+  - `ivr < 30` → premium is **cheap**. Prefer **buying** premium: long calls / long puts. Avoid selling premium or debit spreads with thin width.
+  - `ivr > 70` → premium is **expensive**. Prefer **selling** premium: credit spreads (vertical, condor). Avoid naked long premium — theta and vega will both hurt.
+  - `30 ≤ ivr ≤ 70` → neutral. Use `iv_percentile` as a tiebreaker (above 50 = leans expensive, below 50 = leans cheap).
+- Confidence gate: if `days_of_history < 20`, treat IVR and percentile as **low-confidence**. Do not size up on the IV thesis alone — require independent technical + catalyst confluence. (Newly added Prophet symbols warm up over ~5 calendar days.)
+- No-data path: if `ivr == -1` AND `iv_percentile == -1`, the symbol has zero stored history. Same as low-confidence above — IV reading is not actionable.
+- Rationale: The single largest persistent edge in directional options trading is buying when volatility is cheap and selling when it is rich. Mechanical adherence to this gate is the difference between a flat options book and a profitable one over a year.
+
+---
+
 ## Trade Execution
 
 **Rule:** Opening volatility trading allowed (9:30-9:45 AM)

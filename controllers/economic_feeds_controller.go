@@ -2,21 +2,42 @@ package controllers
 
 import (
 	"net/http"
+	"time"
+
 	"prophet-trader/services"
 
 	"github.com/gin-gonic/gin"
 )
 
-// EconomicFeedsController handles economic intelligence feed requests
+// EconomicFeedsController handles economic intelligence feed requests and
+// the shared US-economic-release blackout used by all four agents.
 type EconomicFeedsController struct {
-	feedsService *services.EconomicFeedsService
+	feedsService    *services.EconomicFeedsService
+	econCalendar    *services.EconCalendarService // optional; nil disables blackout endpoint
 }
 
-// NewEconomicFeedsController creates a new economic feeds controller
-func NewEconomicFeedsController(feedsService *services.EconomicFeedsService) *EconomicFeedsController {
+// NewEconomicFeedsController creates a new economic feeds controller.
+// econCalendar may be nil when FMP_API_KEY is unset; in that case the
+// blackout endpoint returns a 503 so preflight fails open.
+func NewEconomicFeedsController(feedsService *services.EconomicFeedsService, econCalendar *services.EconCalendarService) *EconomicFeedsController {
 	return &EconomicFeedsController{
 		feedsService: feedsService,
+		econCalendar: econCalendar,
 	}
+}
+
+// HandleGetEconBlackout returns the current US-economic-release blackout
+// status (30 min before / 15 min after CPI, NFP, FOMC, PCE, PPI, core retail).
+// GET /api/v1/econ/blackout
+func (c *EconomicFeedsController) HandleGetEconBlackout(ctx *gin.Context) {
+	if c.econCalendar == nil {
+		ctx.JSON(http.StatusServiceUnavailable, gin.H{
+			"error": "econ calendar service not configured (FMP_API_KEY missing)",
+		})
+		return
+	}
+	status := c.econCalendar.GetBlackoutStatus(ctx.Request.Context(), time.Now().UTC())
+	ctx.JSON(http.StatusOK, status)
 }
 
 // HandleGetTreasury fetches US Treasury data (debt, interest rates)

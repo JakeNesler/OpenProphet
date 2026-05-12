@@ -10,12 +10,23 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
+// IVProvider is the narrow interface StockAnalysisService uses to enrich
+// analyses with IV-rank context. Set via SetIVProvider; when nil, IV fields
+// are omitted from the response. In production this is wired to
+// HarvestIVRService (the daily collection now covers both Harvest and Prophet
+// underlyings).
+type IVProvider interface {
+	GetIVRDataLatest(underlying string) (*IVRData, error)
+}
+
 // StockAnalysisService provides comprehensive stock analysis
 type StockAnalysisService struct {
-	dataService   interfaces.DataService
-	newsService   *NewsService
-	claudeService NewsCleanerService
-	logger        *logrus.Logger
+	dataService    interfaces.DataService
+	newsService    *NewsService
+	claudeService  NewsCleanerService
+	ivProvider     IVProvider
+	sectorContext  *sectorContextCache // lazy-initialized on first use
+	logger         *logrus.Logger
 }
 
 // NewStockAnalysisService creates a new stock analysis service
@@ -29,8 +40,15 @@ func NewStockAnalysisService(dataService interfaces.DataService, newsService *Ne
 		dataService:   dataService,
 		newsService:   newsService,
 		claudeService: claudeService,
+		sectorContext: newSectorContextCache(dataService),
 		logger:        logger,
 	}
+}
+
+// SetIVProvider wires the optional IV-rank provider. Idempotent; pass nil to
+// disable enrichment. Adds ~30 tokens per AnalyzeStock response when wired.
+func (sas *StockAnalysisService) SetIVProvider(p IVProvider) {
+	sas.ivProvider = p
 }
 
 // StockAnalysis represents comprehensive analysis of a stock
@@ -41,7 +59,21 @@ type StockAnalysis struct {
 	Technical       TechnicalAnalysis      `json:"technical"`
 	NewsSummary     string                 `json:"news_summary"` // Just summary, not full articles
 	TradeSetup      TradeSetup             `json:"trade_setup"`
+	IV              *IVSummary             `json:"iv,omitempty"` // optional IV context (Prophet's IV-rank gate)
+	Sector          *SectorSummary         `json:"sector,omitempty"`      // equity sector ETF context (4.6)
+	CrossAsset      *CrossAssetSummary     `json:"cross_asset,omitempty"` // macro cross-asset snapshots for TrendProphet (4.6)
 	Timestamp       time.Time              `json:"timestamp"`
+}
+
+// IVSummary is the per-symbol IV context exposed to the LLM. Rank and
+// Percentile are -1 when the symbol has no recorded history yet (newly
+// added to the collection universe); DaysOfHistory makes that explicit.
+// Rules layer (TRADING_RULES_V2.md) treats DaysOfHistory < 20 as
+// low-confidence regardless of Rank.
+type IVSummary struct {
+	Rank          float64 `json:"rank"`            // 0..100 or -1 if no history
+	Percentile    float64 `json:"percentile"`      // 0..100 or -1 if no history
+	DaysOfHistory int     `json:"days_of_history"` // 0 means symbol just added
 }
 
 // TechnicalAnalysis contains technical indicators
@@ -163,7 +195,36 @@ func (sas *StockAnalysisService) AnalyzeStock(ctx context.Context, symbol string
 	// Generate NEUTRAL trade setup (no recommendations, just data)
 	analysis.TradeSetup = sas.generateTradeSetup(analysis.Technical, catalysts, analysis.CurrentPrice)
 
+	// Optional IV-rank enrichment for the Prophet IV gate. No-op when the
+	// provider is unset or the symbol is outside the IV-collection universe.
+	enrichAnalysisWithIV(analysis, sas.ivProvider, symbol)
+
+	// Sector / cross-asset enrichment (4.6). Both helpers are no-ops when the
+	// symbol doesn't match a known mapping or the data fetch fails; the
+	// analysis still returns intact.
+	enrichAnalysisWithSector(ctx, analysis, sas.sectorContext, symbol, time.Now().UTC())
+	enrichAnalysisWithCrossAsset(ctx, analysis, sas.sectorContext, symbol, time.Now().UTC())
+
 	return analysis, nil
+}
+
+// enrichAnalysisWithIV attaches the IVSummary to an analysis when the
+// provider returns usable data. Provider error or nil response leaves
+// analysis.IV unchanged. A zero-history response attaches an explicit
+// sentinel so the LLM can see "symbol on file, not yet warmed up".
+func enrichAnalysisWithIV(analysis *StockAnalysis, provider IVProvider, symbol string) {
+	if analysis == nil || provider == nil {
+		return
+	}
+	d, err := provider.GetIVRDataLatest(symbol)
+	if err != nil || d == nil {
+		return
+	}
+	analysis.IV = &IVSummary{
+		Rank:          d.IVR,
+		Percentile:    d.IVPercentile,
+		DaysOfHistory: d.DaysOfHistory,
+	}
 }
 
 // calculateTechnicalIndicators calculates technical indicators from historical bars
