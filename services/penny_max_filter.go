@@ -53,6 +53,63 @@ func NewPennyMaxFilterService(universe *PennyUniverseService, bars MultiBarsFetc
 	}
 }
 
+// refresh fetches 30 calendar days of daily bars for the entire universe
+// and recomputes MAX values. On fetcher error, the existing cache is
+// preserved (stale but readable).
+func (s *PennyMaxFilterService) refresh(ctx context.Context) {
+	tickers := s.universe.GetTickers()
+	if len(tickers) == 0 {
+		s.logger.Info("PennyMaxFilterService: empty universe, skipping refresh")
+		return
+	}
+
+	now := s.nowFunc()
+	start := now.AddDate(0, 0, -30)
+
+	// Chunk to stay within Alpaca's per-request symbol cap.
+	const chunkSize = 100
+	combined := make(map[string][]*interfaces.Bar)
+	for i := 0; i < len(tickers); i += chunkSize {
+		end := i + chunkSize
+		if end > len(tickers) {
+			end = len(tickers)
+		}
+		resp, err := s.bars.GetMultiBars(ctx, tickers[i:end], start, now, "1Day")
+		if err != nil {
+			s.logger.WithError(err).Warn("PennyMaxFilterService: GetMultiBars failed; preserving prior cache")
+			return
+		}
+		for k, v := range resp {
+			combined[k] = v
+		}
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for ticker, bars := range combined {
+		entry, ok := computeMaxFromBars(bars)
+		if !ok {
+			continue
+		}
+		entry.ComputedAt = now
+		s.cache[ticker] = entry
+	}
+	s.logger.WithField("entries", len(s.cache)).Info("PennyMaxFilterService: refresh complete")
+}
+
+// GetMax returns the cached MAX entry for ticker.
+// ok=false when: the ticker has no cache entry (universe miss, first
+// refresh not yet succeeded, or fewer than 2 daily bars available).
+// ok=true with BarsUsed < 21 indicates a low-confidence value (newly
+// listed ticker); the caller should still log it and downstream
+// analysis can filter by BarsUsed.
+func (s *PennyMaxFilterService) GetMax(ticker string) (MaxEntry, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	e, ok := s.cache[ticker]
+	return e, ok
+}
+
 // computeMaxFromBars returns the MAX entry computed from ascending-time
 // daily bars. ok=false when fewer than 2 bars are available (zero returns).
 // Uses the most recent 22 bars to produce up to 21 close-to-close returns.
