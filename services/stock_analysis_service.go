@@ -21,11 +21,12 @@ type IVProvider interface {
 
 // StockAnalysisService provides comprehensive stock analysis
 type StockAnalysisService struct {
-	dataService   interfaces.DataService
-	newsService   *NewsService
-	claudeService NewsCleanerService
-	ivProvider    IVProvider
-	logger        *logrus.Logger
+	dataService    interfaces.DataService
+	newsService    *NewsService
+	claudeService  NewsCleanerService
+	ivProvider     IVProvider
+	sectorContext  *sectorContextCache // lazy-initialized on first use
+	logger         *logrus.Logger
 }
 
 // NewStockAnalysisService creates a new stock analysis service
@@ -39,6 +40,7 @@ func NewStockAnalysisService(dataService interfaces.DataService, newsService *Ne
 		dataService:   dataService,
 		newsService:   newsService,
 		claudeService: claudeService,
+		sectorContext: newSectorContextCache(dataService),
 		logger:        logger,
 	}
 }
@@ -58,6 +60,8 @@ type StockAnalysis struct {
 	NewsSummary     string                 `json:"news_summary"` // Just summary, not full articles
 	TradeSetup      TradeSetup             `json:"trade_setup"`
 	IV              *IVSummary             `json:"iv,omitempty"` // optional IV context (Prophet's IV-rank gate)
+	Sector          *SectorSummary         `json:"sector,omitempty"`      // equity sector ETF context (4.6)
+	CrossAsset      *CrossAssetSummary     `json:"cross_asset,omitempty"` // macro cross-asset snapshots for TrendProphet (4.6)
 	Timestamp       time.Time              `json:"timestamp"`
 }
 
@@ -194,6 +198,12 @@ func (sas *StockAnalysisService) AnalyzeStock(ctx context.Context, symbol string
 	// Optional IV-rank enrichment for the Prophet IV gate. No-op when the
 	// provider is unset or the symbol is outside the IV-collection universe.
 	enrichAnalysisWithIV(analysis, sas.ivProvider, symbol)
+
+	// Sector / cross-asset enrichment (4.6). Both helpers are no-ops when the
+	// symbol doesn't match a known mapping or the data fetch fails; the
+	// analysis still returns intact.
+	enrichAnalysisWithSector(ctx, analysis, sas.sectorContext, symbol, time.Now().UTC())
+	enrichAnalysisWithCrossAsset(ctx, analysis, sas.sectorContext, symbol, time.Now().UTC())
 
 	return analysis, nil
 }

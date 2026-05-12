@@ -139,6 +139,22 @@ During market hours (9:30 AM – 4:00 PM ET) you will see an **"Intraday Context
 
 ---
 
+## Sector Context (analyze_stocks Field)
+
+When `analyze_stocks` returns a stock that has a mapped sector ETF (NVDA/AMD → SMH, TSLA → XLY, MSTR → XLK), the response includes a `sector` block:
+
+- `sector.etf` — the mapped ETF ticker.
+- `sector.change_pct_day` — today's % change of the sector ETF.
+- `sector.relative_strength_5d` — symbol's 5-day return minus the sector ETF's 5-day return. **Positive = symbol outperforming the sector** (a tape-confirmed leader); **negative = symbol underperforming** (lagging or under distribution).
+
+How to use:
+- `relative_strength_5d > +3` → genuine outperformer, prefer long-bias trades on dips.
+- `relative_strength_5d < -3` → underperformer, fade rallies or avoid longs.
+- `|relative_strength_5d| < 1` → trading with the sector, no edge from this signal.
+- If `sector` is absent from the response, the symbol has no mapped sector (SPY/QQQ are the broad references themselves) or the ETF data fetch failed. Treat absence as "no signal".
+
+---
+
 ## IV Rank Gate (Options Entries)
 
 **Rule:** Every options entry must read IV rank before sizing
