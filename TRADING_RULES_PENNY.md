@@ -278,6 +278,12 @@ Before every penny stock entry:
 - [ ] `get_econ_blackout_status` returned `is_blackout=false` AND no `error` field? (Call once per beat before the first entry. If blackout or error → skip ALL new entries this beat; manage existing positions only.)
 - [ ] `get_penny_candidates` returned this ticker at score ≥ 60?
 - [ ] `get_penny_signal_detail` confirms dominant signal type?
+- [ ] **RVOL ≥ 1.5?** (time-of-day-adjusted relative volume — see `rvol` field on the candidate). RVOL below 1.0 = thin tape, no flow to confirm direction. RVOL ≥ 1.5 = real participation. Hard floor: do NOT enter with `rvol` < 1.0.
+- [ ] **ORB direction matches the trade?** Check `orb_status`:
+  - `above_or_high` → consistent with **long** entries (price has broken the opening range to the upside).
+  - `below_or_low` → consistent with **short** entries only (PennyProphet does not short, so this means SKIP a long).
+  - `inside_or` → no confirmation. Prefer to wait for a break unless other signals are very strong.
+  - `awaiting` → opening range not yet captured (pre-9:45 ET) or capture failed. Use composite score + dominant signal alone; do not let absence of ORB block an otherwise-high-conviction entry.
 - [ ] Position size within tier limits (2–7%, hard cap 8%)?
 - [ ] Total open penny positions < 10?
 - [ ] Total deployed capital < 30% of portfolio?
@@ -286,6 +292,12 @@ Before every penny stock entry:
 - [ ] For social signals: is it still market hours with ≥30 minutes to close?
 
 **If any answer is NO, skip the trade.**
+
+### Field reference
+
+- `rvol` — today's cumulative volume divided by 20-day avg daily volume × fraction of session elapsed. Replaces the old absolute volume ratio. 0 means insufficient history (new ticker in universe or data outage); treat as "no signal" and rely on the other gates.
+- `orb_high` / `orb_low` — high and low of the 9:30–9:45 ET opening range. Omitted from JSON when not yet captured.
+- `orb_status` — see the four states above.
 
 ---
 

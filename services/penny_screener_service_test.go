@@ -27,15 +27,22 @@ func TestPennyScreenerService_ComputeEntry_HighVolume(t *testing.T) {
 			Volume: 100_000,
 		},
 	}
+	// RVOL = 3.0 hits the volume-score ceiling (min(3/3, 1) × 20 = 20).
+	// gapPct = 10% → gapScore=10; distFromHigh=(6.0-5.9)/6.0≈0.0167 ≤ 0.02 → breakoutScore=10.
+	// total = 20 + 10 + 10 = 40.
+	intra := intradayContext{rvol: 3.0}
 	beforeCall := time.Now()
-	entry := svc.computeEntry("TEST", snap)
+	entry := svc.computeEntry("TEST", snap, intra, beforeCall)
 	afterCall := time.Now()
-	// volumeRatio=5.0 → volScore=20; gapPct=10% → gapScore=10; distFromHigh=(6.0-5.9)/6.0≈0.0167 ≤ 0.02 → breakoutScore=10; total=40
 	if entry.Entry.BaseScore != 40.0 {
 		t.Errorf("expected score=40.0 for high-volume entry, got %f", entry.Entry.BaseScore)
 	}
+	if entry.RVOL != 3.0 {
+		t.Errorf("expected RVOL=3.0, got %f", entry.RVOL)
+	}
+	// Legacy field still computed from daily ratio.
 	if entry.VolumeRatio != 5.0 {
-		t.Errorf("expected volumeRatio=5.0, got %f", entry.VolumeRatio)
+		t.Errorf("expected legacy volumeRatio=5.0, got %f", entry.VolumeRatio)
 	}
 	if entry.Entry.HalfLifeHrs != 2.0 {
 		t.Errorf("expected HalfLifeHrs=2.0, got %f", entry.Entry.HalfLifeHrs)
@@ -45,9 +52,54 @@ func TestPennyScreenerService_ComputeEntry_HighVolume(t *testing.T) {
 	}
 }
 
+func TestPennyScreenerService_ComputeEntry_LowRVOLScalesDownVolumeScore(t *testing.T) {
+	svc := &PennyScreenerService{scores: make(map[string]TechnicalEntry), logger: newTestLogger()}
+	snap := &alpacaMarket.Snapshot{
+		DailyBar:     &alpacaMarket.Bar{Open: 5.5, High: 6.0, Low: 5.0, Close: 5.9, Volume: 100_000},
+		PrevDailyBar: &alpacaMarket.Bar{Open: 5.0, High: 5.2, Low: 4.8, Close: 5.0, Volume: 100_000},
+	}
+	// RVOL = 0.6 → volScore = 0.6/3 × 20 = 4.0
+	// gapPct = 10% → 10; breakout (6-5.9)/6=0.0167 ≤ 0.02 → 10. Total = 24.
+	intra := intradayContext{rvol: 0.6}
+	entry := svc.computeEntry("TEST", snap, intra, time.Now())
+	if entry.Entry.BaseScore != 24.0 {
+		t.Errorf("expected score=24.0 (low RVOL), got %f", entry.Entry.BaseScore)
+	}
+}
+
+func TestPennyScreenerService_ComputeEntry_PopulatesORBFields(t *testing.T) {
+	svc := &PennyScreenerService{scores: make(map[string]TechnicalEntry), logger: newTestLogger()}
+	snap := &alpacaMarket.Snapshot{
+		DailyBar:     &alpacaMarket.Bar{Open: 5.5, High: 6.0, Low: 5.0, Close: 5.30, Volume: 100_000},
+		PrevDailyBar: &alpacaMarket.Bar{Open: 5.0, High: 5.2, Low: 4.8, Close: 5.0, Volume: 100_000},
+	}
+	intra := intradayContext{rvol: 1.0, orbHigh: 5.20, orbLow: 4.85, orbOK: true}
+	entry := svc.computeEntry("TEST", snap, intra, time.Now())
+	if entry.ORBHigh != 5.20 || entry.ORBLow != 4.85 {
+		t.Errorf("expected OR (5.20, 4.85), got (%f, %f)", entry.ORBHigh, entry.ORBLow)
+	}
+	// Close=5.30 > orHigh=5.20 → above_or_high
+	if entry.ORBStatus != "above_or_high" {
+		t.Errorf("expected ORBStatus=above_or_high, got %s", entry.ORBStatus)
+	}
+}
+
+func TestPennyScreenerService_ComputeEntry_ORBAwaitingWhenNotCaptured(t *testing.T) {
+	svc := &PennyScreenerService{scores: make(map[string]TechnicalEntry), logger: newTestLogger()}
+	snap := &alpacaMarket.Snapshot{
+		DailyBar:     &alpacaMarket.Bar{Open: 5.5, High: 6.0, Low: 5.0, Close: 5.30, Volume: 100_000},
+		PrevDailyBar: &alpacaMarket.Bar{Open: 5.0, High: 5.2, Low: 4.8, Close: 5.0, Volume: 100_000},
+	}
+	intra := intradayContext{rvol: 1.0} // orbOK=false, bounds=0
+	entry := svc.computeEntry("TEST", snap, intra, time.Now())
+	if entry.ORBStatus != "awaiting" {
+		t.Errorf("expected ORBStatus=awaiting when OR not captured, got %s", entry.ORBStatus)
+	}
+}
+
 func TestPennyScreenerService_ComputeEntry_NilSnapshot(t *testing.T) {
 	svc := &PennyScreenerService{scores: make(map[string]TechnicalEntry), logger: newTestLogger()}
-	entry := svc.computeEntry("TEST", nil)
+	entry := svc.computeEntry("TEST", nil, intradayContext{}, time.Now())
 	if entry.Entry.BaseScore != 0 {
 		t.Errorf("expected 0 for nil snapshot, got %f", entry.Entry.BaseScore)
 	}
@@ -59,7 +111,7 @@ func TestPennyScreenerService_ComputeEntry_PartialNil(t *testing.T) {
 		DailyBar: &alpacaMarket.Bar{Open: 5.5, High: 6.0, Low: 5.0, Close: 5.9, Volume: 100_000},
 		// PrevDailyBar intentionally nil
 	}
-	entry := svc.computeEntry("TEST", snap)
+	entry := svc.computeEntry("TEST", snap, intradayContext{}, time.Now())
 	if entry.Entry.BaseScore != 0 {
 		t.Errorf("expected 0 score for partial-nil snapshot, got %f", entry.Entry.BaseScore)
 	}
@@ -145,7 +197,7 @@ func TestPennyScreenerService_ComputeEntry_NilSnapshot_PreservesPrior(t *testing
 	svc.scores["TEST"] = TechnicalEntry{
 		Entry: DecayEntry{BaseScore: 30.0, EventTime: anchor, HalfLifeHrs: 2.0},
 	}
-	entry := svc.computeEntry("TEST", nil)
+	entry := svc.computeEntry("TEST", nil, intradayContext{}, time.Now())
 	if entry.Entry.BaseScore != 30.0 {
 		t.Errorf("nil snapshot with prior: expected BaseScore=30.0 preserved, got %f", entry.Entry.BaseScore)
 	}

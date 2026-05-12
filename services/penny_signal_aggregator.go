@@ -263,6 +263,7 @@ func (a *PennySignalAggregator) aggregate() {
 
 	for _, u := range universe {
 		techScore, techCtx := a.screener.GetTechnicalScore(u.Ticker)
+		techEntry, _ := a.screener.GetTechnicalEntry(u.Ticker) // for RVOL/ORB propagation
 		regScore, regEvent := a.edgar.GetRegulatoryScore(u.Ticker)
 		socScore, socCtx := a.social.GetSocialScore(u.Ticker)
 
@@ -321,6 +322,10 @@ func (a *PennySignalAggregator) aggregate() {
 			TechnicalContext:    techCtx,
 			RegulatoryEvent:     regEvent,
 			SocialContext:       socCtx,
+			RVOL:                techEntry.RVOL,
+			ORBHigh:             techEntry.ORBHigh,
+			ORBLow:              techEntry.ORBLow,
+			ORBStatus:           techEntry.ORBStatus,
 			LastUpdated:         now,
 		}
 	}

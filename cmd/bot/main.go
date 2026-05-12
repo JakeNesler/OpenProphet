@@ -173,7 +173,11 @@ func main() {
 	}
 
 	pennyUniverseService := services.NewPennyUniverseService(cfg.FMPAPIKey, cfg.AlpacaAPIKey, cfg.AlpacaSecretKey, cfg.AlpacaBaseURL, earningsService, nil)
-	pennyScreenerService := services.NewPennyScreenerService(cfg.AlpacaAPIKey, cfg.AlpacaSecretKey, pennyUniverseService)
+	// Intraday context cache for the penny screener (ORB-15 capture + trailing
+	// 20-day avg volume per ticker). Bounded HTTP cost: cache is per-ticker
+	// per-session for ORB, per-ticker per-day for avg volume.
+	pennyIntradayCache := services.NewPennyIntradayCache(dataService)
+	pennyScreenerService := services.NewPennyScreenerService(cfg.AlpacaAPIKey, cfg.AlpacaSecretKey, pennyUniverseService, pennyIntradayCache)
 	secEdgarService := services.NewSECEdgarService(pennyUniverseService, nil, cfg.OperatorEmail, earningsService)
 	socialSignalService := services.NewSocialSignalService(pennyUniverseService, nil)
 	pennyMaxFilter := services.NewPennyMaxFilterService(pennyUniverseService, dataService)
