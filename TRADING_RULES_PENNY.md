@@ -343,3 +343,31 @@ has signaled active or imminent share dilution.
 - `PENNY_DILUTION_FILTER_MODE=shadow` (default): blocks are logged but
   candidates are not suppressed.
 - `PENNY_DILUTION_FILTER_MODE=enforce`: blocks suppress candidates.
+
+## MAX Filter (Shadow Mode)
+
+The agent's signal pipeline now logs a 21-session MAX value for every
+candidate that reaches the post-dilution stage of `get_penny_candidates`.
+MAX is the maximum close-to-close return over the prior 21 trading
+sessions, sourced from Bali, Cakici & Whitelaw (2011), "Maxing Out:
+Stocks as Lotteries and the Cross-Section of Expected Returns" (JFE).
+
+**Current mode:** shadow. The agent's behavior is unchanged. The MAX
+value, the best-day date, and pre-computed `would_skip_at_X` boolean
+flags at 15%, 20%, and 25% thresholds are written to the operator log
+on every candidate evaluation.
+
+**This filter does not affect:**
+- Composite score calculation
+- Entry decisions (in shadow mode)
+- Existing managed positions (ever — same "block ≠ exit" principle as
+  the dilution filter)
+- The agent's tool surface; this is operator-side telemetry only
+
+**Future:** after a four-week shadow window, operator reviews the logs
+against actual trade outcomes and either (a) promotes to enforce at a
+validated threshold, or (b) removes the filter. The decision is
+documented in a follow-up spec under `docs/superpowers/specs/`.
+
+The shadow-vs-enforce toggle is the env var `PENNY_MAX_FILTER_MODE`.
+The agent does not read this; only the operator sets it.
