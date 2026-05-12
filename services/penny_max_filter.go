@@ -52,3 +52,44 @@ func NewPennyMaxFilterService(universe *PennyUniverseService, bars MultiBarsFetc
 		logger:   logger,
 	}
 }
+
+// computeMaxFromBars returns the MAX entry computed from ascending-time
+// daily bars. ok=false when fewer than 2 bars are available (zero returns).
+// Uses the most recent 22 bars to produce up to 21 close-to-close returns.
+func computeMaxFromBars(bars []*interfaces.Bar) (MaxEntry, bool) {
+	if len(bars) < 2 {
+		return MaxEntry{}, false
+	}
+	// Trim to the most recent 22 bars (yields 21 returns).
+	start := 0
+	if len(bars) > 22 {
+		start = len(bars) - 22
+	}
+	window := bars[start:]
+
+	var maxVal float64
+	var maxDay time.Time
+	first := true
+	for i := 1; i < len(window); i++ {
+		prev := window[i-1].Close
+		curr := window[i].Close
+		if prev <= 0 {
+			continue
+		}
+		r := (curr / prev) - 1
+		if first || r > maxVal {
+			maxVal = r
+			maxDay = window[i].Timestamp
+			first = false
+		}
+	}
+	if first {
+		// No usable returns (e.g., all prev closes were zero).
+		return MaxEntry{}, false
+	}
+	return MaxEntry{
+		Value:    maxVal,
+		BestDay:  maxDay,
+		BarsUsed: len(window) - 1,
+	}, true
+}
