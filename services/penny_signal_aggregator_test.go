@@ -1,6 +1,7 @@
 package services
 
 import (
+	"os"
 	"testing"
 	"time"
 
@@ -8,7 +9,8 @@ import (
 )
 
 // aggregatorForTest builds a PennySignalAggregator with pre-seeded sub-service state.
-func aggregatorForTest(techScore, regScore, socScore float64, tickers []string) *PennySignalAggregator {
+// maxFilter may be nil to test the nil-safe path.
+func aggregatorForTest(techScore, regScore, socScore float64, tickers []string, maxFilter *PennyMaxFilterService) *PennySignalAggregator {
 	universe := &PennyUniverseService{logger: logrus.New()}
 	universe.universe = make([]UniverseSymbol, len(tickers))
 	for i, t := range tickers {
@@ -46,11 +48,27 @@ func aggregatorForTest(techScore, regScore, socScore float64, tickers []string) 
 		}
 	}
 
-	return NewPennySignalAggregator(universe, screener, edgar, social)
+	return NewPennySignalAggregator(universe, screener, edgar, social, maxFilter)
+}
+
+// maxFilterWithEntry returns a service whose cache contains one seeded entry.
+func maxFilterWithEntry(ticker string, value float64) *PennyMaxFilterService {
+	svc := &PennyMaxFilterService{
+		cache:   make(map[string]MaxEntry),
+		nowFunc: time.Now,
+		logger:  logrus.New(),
+	}
+	svc.cache[ticker] = MaxEntry{
+		Value:      value,
+		BestDay:    time.Now().AddDate(0, 0, -3),
+		BarsUsed:   21,
+		ComputedAt: time.Now(),
+	}
+	return svc
 }
 
 func TestAggregator_Composite(t *testing.T) {
-	agg := aggregatorForTest(30.0, 20.0, 10.0, []string{"TICK"})
+	agg := aggregatorForTest(30.0, 20.0, 10.0, []string{"TICK"}, nil)
 	agg.aggregate()
 	candidates := agg.GetCandidates(0)
 	if len(candidates) != 1 {
@@ -73,7 +91,7 @@ func TestAggregator_Composite(t *testing.T) {
 }
 
 func TestAggregator_EvictsLowScore(t *testing.T) {
-	agg := aggregatorForTest(5.0, 2.0, 1.0, []string{"WEAK"}) // composite=8 < evictionThreshold=10
+	agg := aggregatorForTest(5.0, 2.0, 1.0, []string{"WEAK"}, nil) // composite=8 < evictionThreshold=10
 	agg.aggregate()
 	candidates := agg.GetCandidates(0)
 	if len(candidates) != 0 {
@@ -82,7 +100,7 @@ func TestAggregator_EvictsLowScore(t *testing.T) {
 }
 
 func TestAggregator_MinScoreFilter(t *testing.T) {
-	agg := aggregatorForTest(30.0, 25.0, 15.0, []string{"HIGH", "MED"})
+	agg := aggregatorForTest(30.0, 25.0, 15.0, []string{"HIGH", "MED"}, nil)
 	// Directly seed candidates to avoid aggregate() recomputing the scores.
 	agg.candidates["MED"] = CandidateScore{Ticker: "MED", CompositeScore: 65, CompositeEligible: true}
 	agg.candidates["HIGH"] = CandidateScore{Ticker: "HIGH", CompositeScore: 82, CompositeEligible: true}
@@ -94,7 +112,7 @@ func TestAggregator_MinScoreFilter(t *testing.T) {
 }
 
 func TestAggregator_GetCandidateSummaries_StripsContext(t *testing.T) {
-	agg := aggregatorForTest(0, 0, 0, []string{"ABC"})
+	agg := aggregatorForTest(0, 0, 0, []string{"ABC"}, nil)
 	agg.candidates["ABC"] = CandidateScore{
 		Ticker:            "ABC",
 		CompositeScore:    75,
@@ -132,7 +150,7 @@ func TestAggregator_GetCandidateSummaries_StripsContext(t *testing.T) {
 }
 
 func TestAggregator_GetSignalDetail(t *testing.T) {
-	agg := aggregatorForTest(30.0, 20.0, 10.0, []string{"TICK"})
+	agg := aggregatorForTest(30.0, 20.0, 10.0, []string{"TICK"}, nil)
 	agg.aggregate()
 	detail := agg.GetSignalDetail("TICK")
 	if detail == nil {
@@ -150,7 +168,7 @@ func TestAggregator_GetSignalDetail(t *testing.T) {
 }
 
 func TestAggregator_GetSignalDetail_NotFound(t *testing.T) {
-	agg := aggregatorForTest(0, 0, 0, []string{})
+	agg := aggregatorForTest(0, 0, 0, []string{}, nil)
 	detail := agg.GetSignalDetail("NONE")
 	if detail != nil {
 		t.Errorf("expected nil for unknown ticker, got %+v", detail)
@@ -159,7 +177,7 @@ func TestAggregator_GetSignalDetail_NotFound(t *testing.T) {
 
 func TestAggregator_SingleSignalBlocked_HighReg(t *testing.T) {
 	// tech=10 (<15 min), reg=30 (≥25), social=5 (<10 min) → only reg contributes → single → not eligible
-	agg := aggregatorForTest(10.0, 30.0, 5.0, []string{"TICK"})
+	agg := aggregatorForTest(10.0, 30.0, 5.0, []string{"TICK"}, nil)
 	agg.aggregate()
 	candidates := agg.GetCandidates(0)
 	if len(candidates) != 0 {
@@ -179,7 +197,7 @@ func TestAggregator_SingleSignalBlocked_HighReg(t *testing.T) {
 
 func TestAggregator_TwoSignalPasses(t *testing.T) {
 	// tech=20 (≥15), reg=30 (≥25), social=5 (<10) → tech+reg contribute → eligible
-	agg := aggregatorForTest(20.0, 30.0, 5.0, []string{"TICK"})
+	agg := aggregatorForTest(20.0, 30.0, 5.0, []string{"TICK"}, nil)
 	agg.aggregate()
 	candidates := agg.GetCandidates(0)
 	if len(candidates) != 1 {
@@ -199,7 +217,7 @@ func TestAggregator_TwoSignalPasses(t *testing.T) {
 
 func TestAggregator_ThreeSignalMaxCapped(t *testing.T) {
 	// tech=40, reg=40, social=20 → composite = min(100, 100) = 100
-	agg := aggregatorForTest(40.0, 40.0, 20.0, []string{"TICK"})
+	agg := aggregatorForTest(40.0, 40.0, 20.0, []string{"TICK"}, nil)
 	agg.aggregate()
 	candidates := agg.GetCandidates(0)
 	if len(candidates) != 1 {
@@ -216,7 +234,7 @@ func TestAggregator_ThreeSignalMaxCapped(t *testing.T) {
 func TestAggregator_DominantSignal_UsesEffective(t *testing.T) {
 	// tech=10 (below min → techEff=0), reg=30 (≥25 → regEff=30), social=15 (≥10 → socEff=15)
 	// dominant from effective: reg=30, soc=15 → reg wins
-	agg := aggregatorForTest(10.0, 30.0, 15.0, []string{"TICK"})
+	agg := aggregatorForTest(10.0, 30.0, 15.0, []string{"TICK"}, nil)
 	agg.aggregate()
 	detail := agg.GetSignalDetail("TICK")
 	if detail == nil {
@@ -228,7 +246,7 @@ func TestAggregator_DominantSignal_UsesEffective(t *testing.T) {
 }
 
 func TestAggregator_Blacklist_FiltersFromGetCandidates(t *testing.T) {
-	agg := aggregatorForTest(30.0, 30.0, 15.0, []string{"TICK"})
+	agg := aggregatorForTest(30.0, 30.0, 15.0, []string{"TICK"}, nil)
 	agg.aggregate()
 	// Confirm candidate is eligible before blacklisting
 	before := agg.GetCandidates(0)
@@ -243,7 +261,7 @@ func TestAggregator_Blacklist_FiltersFromGetCandidates(t *testing.T) {
 }
 
 func TestAggregator_Blacklist_RemoveRestoresCandidates(t *testing.T) {
-	agg := aggregatorForTest(30.0, 30.0, 15.0, []string{"TICK"})
+	agg := aggregatorForTest(30.0, 30.0, 15.0, []string{"TICK"}, nil)
 	agg.aggregate()
 	agg.AddToBlacklist("TICK", "test")
 	agg.RemoveFromBlacklist("TICK")
@@ -254,7 +272,7 @@ func TestAggregator_Blacklist_RemoveRestoresCandidates(t *testing.T) {
 }
 
 func TestAggregator_Blacklist_ClearUnblocksAll(t *testing.T) {
-	agg := aggregatorForTest(30.0, 30.0, 15.0, []string{"A", "B"})
+	agg := aggregatorForTest(30.0, 30.0, 15.0, []string{"A", "B"}, nil)
 	agg.aggregate()
 	agg.AddToBlacklist("A", "test")
 	agg.AddToBlacklist("B", "test")
@@ -266,7 +284,7 @@ func TestAggregator_Blacklist_ClearUnblocksAll(t *testing.T) {
 }
 
 func TestAggregator_Blacklist_AttemptCountIncrements(t *testing.T) {
-	agg := aggregatorForTest(0, 0, 0, []string{})
+	agg := aggregatorForTest(0, 0, 0, []string{}, nil)
 	agg.AddToBlacklist("TICK", "first")
 	agg.AddToBlacklist("TICK", "second")
 	// IsBlacklisted confirms it's still there; AttemptCount is internal but
@@ -301,7 +319,7 @@ func TestGetCandidates_SuppressesDilutionBlocked(t *testing.T) {
 		Bucket:   "takedown",
 	}
 	social := &SocialSignalService{}
-	agg := NewPennySignalAggregator(universe, screener, edgar, social)
+	agg := NewPennySignalAggregator(universe, screener, edgar, social, nil)
 	agg.dilutionMode = "enforce"
 
 	SeedCandidateForTest(agg, CandidateScore{
@@ -347,7 +365,7 @@ func TestDilutionBlockDoesNotDeleteSignalDetail(t *testing.T) {
 		FiledAt:  time.Date(2026, 5, 10, 9, 0, 0, 0, time.UTC),
 		Bucket:   "takedown",
 	}
-	agg := NewPennySignalAggregator(&PennyUniverseService{}, &PennyScreenerService{}, edgar, &SocialSignalService{})
+	agg := NewPennySignalAggregator(&PennyUniverseService{}, &PennyScreenerService{}, edgar, &SocialSignalService{}, nil)
 	agg.dilutionMode = "enforce"
 	SeedCandidateForTest(agg, CandidateScore{
 		Ticker:            "HELD",
@@ -391,7 +409,7 @@ func TestDilutionFilterMode_ShadowDoesNotSuppress(t *testing.T) {
 		FiledAt:  time.Date(2026, 5, 10, 9, 0, 0, 0, time.UTC),
 		Bucket:   "takedown",
 	}
-	agg := NewPennySignalAggregator(&PennyUniverseService{}, &PennyScreenerService{}, edgar, &SocialSignalService{})
+	agg := NewPennySignalAggregator(&PennyUniverseService{}, &PennyScreenerService{}, edgar, &SocialSignalService{}, nil)
 	agg.dilutionMode = "shadow"
 	SeedCandidateForTest(agg, CandidateScore{
 		Ticker: "BLOCKED", CompositeScore: 85, CompositeEligible: true,
@@ -422,7 +440,7 @@ func TestDilutionFilterMode_EnforceSuppresses(t *testing.T) {
 		FiledAt:  time.Date(2026, 5, 10, 9, 0, 0, 0, time.UTC),
 		Bucket:   "takedown",
 	}
-	agg := NewPennySignalAggregator(&PennyUniverseService{}, &PennyScreenerService{}, edgar, &SocialSignalService{})
+	agg := NewPennySignalAggregator(&PennyUniverseService{}, &PennyScreenerService{}, edgar, &SocialSignalService{}, nil)
 	agg.dilutionMode = "enforce"
 	SeedCandidateForTest(agg, CandidateScore{
 		Ticker: "BLOCKED", CompositeScore: 85, CompositeEligible: true,
@@ -435,8 +453,61 @@ func TestDilutionFilterMode_EnforceSuppresses(t *testing.T) {
 }
 
 func TestDilutionFilterMode_DefaultIsShadow(t *testing.T) {
-	agg := NewPennySignalAggregator(&PennyUniverseService{}, &PennyScreenerService{}, nil, &SocialSignalService{})
+	agg := NewPennySignalAggregator(&PennyUniverseService{}, &PennyScreenerService{}, nil, &SocialSignalService{}, nil)
 	if agg.dilutionMode != "shadow" {
 		t.Errorf("expected default dilutionMode=shadow, got %q", agg.dilutionMode)
+	}
+}
+
+func TestMaxFilter_ShadowNeverSuppresses(t *testing.T) {
+	os.Setenv("PENNY_MAX_FILTER_MODE", "shadow")
+	defer os.Unsetenv("PENNY_MAX_FILTER_MODE")
+
+	// socScore=15 (>10 threshold) ensures the candidate is composite-eligible
+	// regardless of sub-millisecond decay, so the max filter behavior is isolated.
+	maxF := maxFilterWithEntry("HIGH", 0.50) // 50% MAX, well above any threshold
+	agg := aggregatorForTest(30.0, 20.0, 15.0, []string{"HIGH"}, maxF)
+	agg.aggregate()
+	out := agg.GetCandidates(0)
+	if len(out) != 1 {
+		t.Fatalf("shadow mode must not suppress: got %d candidates, want 1", len(out))
+	}
+}
+
+func TestMaxFilter_EnforceSuppressesAbove20(t *testing.T) {
+	os.Setenv("PENNY_MAX_FILTER_MODE", "enforce")
+	defer os.Unsetenv("PENNY_MAX_FILTER_MODE")
+
+	maxF := maxFilterWithEntry("HIGH", 0.30)
+	agg := aggregatorForTest(30.0, 20.0, 15.0, []string{"HIGH"}, maxF)
+	agg.aggregate()
+	out := agg.GetCandidates(0)
+	if len(out) != 0 {
+		t.Errorf("enforce mode must suppress MAX=0.30: got %d candidates, want 0", len(out))
+	}
+}
+
+func TestMaxFilter_EnforcePassesBelow20(t *testing.T) {
+	os.Setenv("PENNY_MAX_FILTER_MODE", "enforce")
+	defer os.Unsetenv("PENNY_MAX_FILTER_MODE")
+
+	maxF := maxFilterWithEntry("LOW", 0.10)
+	agg := aggregatorForTest(30.0, 20.0, 15.0, []string{"LOW"}, maxF)
+	agg.aggregate()
+	out := agg.GetCandidates(0)
+	if len(out) != 1 {
+		t.Errorf("enforce mode must pass MAX=0.10: got %d candidates, want 1", len(out))
+	}
+}
+
+func TestMaxFilter_NilIsNoOp(t *testing.T) {
+	os.Setenv("PENNY_MAX_FILTER_MODE", "enforce") // even in enforce, nil filter must not panic
+	defer os.Unsetenv("PENNY_MAX_FILTER_MODE")
+
+	agg := aggregatorForTest(30.0, 20.0, 15.0, []string{"ANY"}, nil)
+	agg.aggregate()
+	out := agg.GetCandidates(0)
+	if len(out) != 1 {
+		t.Errorf("nil filter must be no-op: got %d candidates, want 1", len(out))
 	}
 }

@@ -23,11 +23,13 @@ type BracketBlacklistEntry struct {
 }
 
 // Lock ordering: PennySignalAggregator.mu must always be acquired before
-// BracketBlacklist.mu and before SECEdgarService.dilutionMu. GetCandidates
-// holds a.mu.RLock while calling blacklist.IsBlacklisted (b.mu.RLock) and
-// edgar.IsDilutionBlocked (which may take dilutionMu.Lock during eviction).
-// No code path may acquire BracketBlacklist.mu or SECEdgarService.dilutionMu
-// before PennySignalAggregator.mu.
+// BracketBlacklist.mu, before SECEdgarService.dilutionMu, and before
+// PennyMaxFilterService.mu. GetCandidates holds a.mu.RLock while calling
+// blacklist.IsBlacklisted (b.mu.RLock), edgar.IsDilutionBlocked (which may
+// take dilutionMu.Lock during eviction), and maxFilter.GetMax (which takes
+// maxFilter.mu.RLock for a single map lookup). No code path may acquire
+// BracketBlacklist.mu, SECEdgarService.dilutionMu, or
+// PennyMaxFilterService.mu before PennySignalAggregator.mu.
 type BracketBlacklist struct {
 	mu      sync.RWMutex
 	entries map[string]BracketBlacklistEntry
@@ -50,11 +52,13 @@ type PennySignalAggregator struct {
 	screener     *PennyScreenerService
 	edgar        *SECEdgarService
 	social       *SocialSignalService
+	maxFilter    *PennyMaxFilterService
 	mu           sync.RWMutex
 	candidates   map[string]CandidateScore
 	blacklist    *BracketBlacklist
 	logger       *logrus.Logger
 	dilutionMode string // "shadow" (log only) or "enforce" (suppress); default "shadow"
+	maxMode      string // "shadow" (log only) or "enforce" (suppress); default "shadow"
 }
 
 // NewPennySignalAggregator creates the aggregator.
@@ -63,23 +67,34 @@ func NewPennySignalAggregator(
 	screener *PennyScreenerService,
 	edgar *SECEdgarService,
 	social *SocialSignalService,
+	maxFilter *PennyMaxFilterService,
 ) *PennySignalAggregator {
 	logger := logrus.New()
 	logger.SetFormatter(&logrus.TextFormatter{FullTimestamp: true})
-	mode := os.Getenv("PENNY_DILUTION_FILTER_MODE")
-	if mode != "enforce" {
-		mode = "shadow"
+
+	dilutionMode := os.Getenv("PENNY_DILUTION_FILTER_MODE")
+	if dilutionMode != "enforce" {
+		dilutionMode = "shadow"
 	}
-	logger.WithField("mode", mode).Info("PennySignalAggregator: dilution filter mode")
+	logger.WithField("mode", dilutionMode).Info("PennySignalAggregator: dilution filter mode")
+
+	maxMode := os.Getenv("PENNY_MAX_FILTER_MODE")
+	if maxMode != "enforce" {
+		maxMode = "shadow"
+	}
+	logger.WithField("mode", maxMode).Info("PennySignalAggregator: max filter mode")
+
 	return &PennySignalAggregator{
 		universe:     universe,
 		screener:     screener,
 		edgar:        edgar,
 		social:       social,
+		maxFilter:    maxFilter,
 		candidates:   make(map[string]CandidateScore),
 		blacklist:    newBracketBlacklist(),
 		logger:       logger,
-		dilutionMode: mode,
+		dilutionMode: dilutionMode,
+		maxMode:      maxMode,
 	}
 }
 
@@ -155,6 +170,25 @@ func (a *PennySignalAggregator) GetCandidates(minScore float64) []CandidateScore
 					"mode":      a.dilutionMode,
 				}).Info("dilution block detected on candidate")
 				if a.dilutionMode == "enforce" {
+					continue
+				}
+			}
+		}
+		if a.maxFilter != nil {
+			if entry, ok := a.maxFilter.GetMax(c.Ticker); ok {
+				a.logger.WithFields(logrus.Fields{
+					"ticker":           c.Ticker,
+					"composite":        c.CompositeScore,
+					"max_21":           entry.Value,
+					"max_best_day":     entry.BestDay.Format("2006-01-02"),
+					"bars_used":        entry.BarsUsed,
+					"would_skip_15pct": entry.Value >= 0.15,
+					"would_skip_20pct": entry.Value >= 0.20,
+					"would_skip_25pct": entry.Value >= 0.25,
+					"computed_at":      entry.ComputedAt.Format(time.RFC3339),
+					"mode":             a.maxMode,
+				}).Info("max filter evaluation")
+				if a.maxMode == "enforce" && entry.Value >= 0.20 {
 					continue
 				}
 			}

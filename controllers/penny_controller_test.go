@@ -33,6 +33,7 @@ func emptyAggregator() *services.PennySignalAggregator {
 		&services.PennyScreenerService{},
 		&services.SECEdgarService{},
 		&services.SocialSignalService{},
+		nil,
 	)
 }
 
