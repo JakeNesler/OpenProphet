@@ -110,6 +110,21 @@ func (s *PennyMaxFilterService) GetMax(ticker string) (MaxEntry, bool) {
 	return e, ok
 }
 
+// nextRefreshTime returns the next 07:00 America/New_York instant strictly
+// after now. Falls back to UTC if the tz database is unavailable.
+func nextRefreshTime(now time.Time) time.Time {
+	loc, err := time.LoadLocation("America/New_York")
+	if err != nil {
+		loc = time.UTC
+	}
+	et := now.In(loc)
+	candidate := time.Date(et.Year(), et.Month(), et.Day(), 7, 0, 0, 0, loc)
+	if !candidate.After(et) {
+		candidate = candidate.AddDate(0, 0, 1)
+	}
+	return candidate
+}
+
 // computeMaxFromBars returns the MAX entry computed from ascending-time
 // daily bars. ok=false when fewer than 2 bars are available (zero returns).
 // Uses the most recent 22 bars to produce up to 21 close-to-close returns.

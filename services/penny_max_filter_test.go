@@ -222,3 +222,45 @@ var errFakeOutage = &fakeOutageErr{}
 type fakeOutageErr struct{}
 
 func (e *fakeOutageErr) Error() string { return "fake outage" }
+
+func TestNextRefreshTime(t *testing.T) {
+	et, err := time.LoadLocation("America/New_York")
+	if err != nil {
+		t.Fatalf("load ET: %v", err)
+	}
+
+	cases := []struct {
+		name string
+		now  time.Time
+		want time.Time
+	}{
+		{
+			name: "before 07:00 ET fires same day",
+			now:  time.Date(2026, 5, 12, 6, 30, 0, 0, et),
+			want: time.Date(2026, 5, 12, 7, 0, 0, 0, et),
+		},
+		{
+			name: "exactly 07:00 ET fires next day",
+			now:  time.Date(2026, 5, 12, 7, 0, 0, 0, et),
+			want: time.Date(2026, 5, 13, 7, 0, 0, 0, et),
+		},
+		{
+			name: "after 07:00 ET fires next day",
+			now:  time.Date(2026, 5, 12, 14, 0, 0, 0, et),
+			want: time.Date(2026, 5, 13, 7, 0, 0, 0, et),
+		},
+		{
+			name: "UTC input is normalized to ET",
+			now:  time.Date(2026, 5, 12, 10, 0, 0, 0, time.UTC), // 06:00 ET (DST)
+			want: time.Date(2026, 5, 12, 7, 0, 0, 0, et),
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := nextRefreshTime(tc.now)
+			if !got.Equal(tc.want) {
+				t.Errorf("got %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
