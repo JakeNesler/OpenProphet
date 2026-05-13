@@ -29,6 +29,7 @@ import {
   getActiveSandbox, getSandbox, getHeartbeatForSandboxPhase, getSandboxes,
   getHeartbeatProfiles, getPhaseTimeRanges, applyHeartbeatProfile, updatePhaseTimeRange,
 } from './config-store.js';
+import { appendTrade, readTrades } from './trades-store.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = path.join(__dirname, '..');
@@ -227,8 +228,32 @@ function bindOperationalHooks(targetHarness) {
     }
   });
 
-  targetHarness.state.on('trade', (trade) => {
+  targetHarness.state.on('trade', async (trade) => {
     const sandboxId = targetHarness.sandboxId;
+
+    // Persist before the Slack notifications so a slow webhook doesn't delay
+    // the disk write. Errors are soft-fail: log and continue, never throw.
+    try {
+      const sandbox = getSandbox(sandboxId);
+      const accountId = sandbox?.accountId;
+      const resolved = getResolvedAgentForSandbox(sandboxId);
+      if (accountId) {
+        await appendTrade(PROJECT_ROOT, accountId, {
+          ...trade,
+          sandboxId,
+          agentId: resolved?.id || null,
+          agentName: resolved?.name || null,
+        });
+      }
+    } catch (err) {
+      broadcast('agent_log', {
+        message: `appendTrade failed: ${err.message}`,
+        level: 'warning',
+        sandboxId,
+        timestamp: new Date().toISOString(),
+      });
+    }
+
     if (slackEnabled('tradeExecuted', sandboxId)) {
       const side = (trade.side || '').toUpperCase();
       const emoji = side === 'BUY' ? ':chart_with_upwards_trend:' : ':chart_with_downwards_trend:';
@@ -670,6 +695,44 @@ app.get('/api/sandboxes', (req, res) => {
     };
   });
   res.json({ sandboxes });
+});
+
+// ── Trade history ──────────────────────────────────────────────────
+// Reads NDJSON files written by the per-runtime trade listener. Defaults to
+// today (ET). Hard caps: max 90-day range, max 2000 trades returned.
+app.get('/api/trades', async (req, res) => {
+  const _etFmt = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'America/New_York',
+    year: 'numeric', month: '2-digit', day: '2-digit',
+  });
+  const today = _etFmt.format(new Date());
+  const from = String(req.query.from || today);
+  const to = String(req.query.to || today);
+  const sandboxId = req.query.sandboxId ? String(req.query.sandboxId) : undefined;
+
+  const ymdRe = /^\d{4}-\d{2}-\d{2}$/;
+  if (!ymdRe.test(from) || !ymdRe.test(to)) {
+    return res.status(400).json({ error: 'from/to must be YYYY-MM-DD' });
+  }
+  if (from > to) {
+    return res.status(400).json({ error: 'from must be <= to' });
+  }
+  const fromMs = Date.parse(from + 'T00:00:00Z');
+  const toMs = Date.parse(to + 'T00:00:00Z');
+  if (Number.isNaN(fromMs) || Number.isNaN(toMs)) {
+    return res.status(400).json({ error: 'unparseable date' });
+  }
+  const days = (toMs - fromMs) / 86400000 + 1;
+  if (days > 90) {
+    return res.status(400).json({ error: 'range exceeds 90 days' });
+  }
+
+  try {
+    const { trades, truncated } = await readTrades(PROJECT_ROOT, { from, to, sandboxId });
+    res.json({ from, to, count: trades.length, truncated, trades });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 app.get('/api/sandboxes/:id/state', (req, res) => {

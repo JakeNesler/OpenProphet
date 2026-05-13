@@ -161,6 +161,14 @@ export class AgentOrchestrator extends EventEmitter {
     const sandboxPerms = getPermissionsForSandbox(sandboxId) || {};
     const maxDailyLossPct = Number(sandboxPerms.maxDailyLoss);
 
+    // The Go binary unconditionally constructs every service, but the penny
+    // screener's 60s scan loop + 40-day-bar warm-up burns Alpaca quota and
+    // floods the log stream for non-penny sandboxes that never read its output.
+    // Only enable the background pipeline when this sandbox's resolved agent
+    // actually runs the penny strategy.
+    const resolvedAgent = getResolvedAgentForSandbox(sandboxId);
+    const pennyPipelineEnabled = resolvedAgent?.strategyId === 'penny-momentum';
+
     const env = {
       ...process.env,
       ALPACA_API_KEY: account.publicKey,
@@ -173,6 +181,7 @@ export class AgentOrchestrator extends EventEmitter {
       OPENPROPHET_SANDBOX_ID: sandboxId,
       OPENPROPHET_ACCOUNT_ID: account.id,
       ...(Number.isFinite(maxDailyLossPct) && maxDailyLossPct > 0 ? { MAX_DAILY_LOSS_PCT: String(maxDailyLossPct) } : {}),
+      ...(pennyPipelineEnabled ? { ENABLE_PENNY_PIPELINE: 'true' } : {}),
     };
 
     const binaryName = process.platform === 'win32' ? 'prophet_bot.exe' : 'prophet_bot';

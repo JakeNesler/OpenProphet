@@ -17,9 +17,11 @@ fast.yaml
 
 # Build artifacts
 prophet_bot
+prophet_bot.exe
 prophet-trader-bot
 prophet-trader
 prophet-bot
+prophet-bot.exe
 main
 
 # Archives

@@ -1074,6 +1074,16 @@
             <option value="__all__">All Agents</option>
           </select>
           <span class="trades-filter-count" id="trades-filter-count"></span>
+          <label class="trades-historic-toggle">
+            <input type="checkbox" id="trades-historic-toggle" />
+            Show historic trades
+          </label>
+          <span id="trades-historic-controls" style="display:none">
+            <input type="date" id="trades-from-date" />
+            <input type="date" id="trades-to-date" />
+            <button id="trades-apply-btn">Apply</button>
+            <span id="trades-truncation-notice" class="trades-filter-count"></span>
+          </span>
         </div>
         <div id="trades-feed"><div class="no-data">No trades yet. Start the agent to see live activity.</div></div>
       </div>
@@ -1705,6 +1715,8 @@ let _sseReconnectAttempts = 0;
 function connectSSE() {
   if (_eventSource) { try { _eventSource.close(); } catch {} }
   if (_sseReconnectTimer) { clearTimeout(_sseReconnectTimer); _sseReconnectTimer = null; }
+  seedTodayTrades();
+  _wireHistoricControls();
   const es = new EventSource(withAuthUrl('/api/events'));
   _eventSource = es;
   es.onopen = () => { 
@@ -1795,7 +1807,8 @@ function connectSSE() {
     _set('hb-interval', fmtInt(d.seconds));
     updatePhase(d.phase); startProgress();
   });
-  es.addEventListener('trade', e => { 
+  es.addEventListener('trade', e => {
+    if (_historicMode) return;
     const t = JSON.parse(e.data);
     addTradeCard(t);
     const side = t.side || t.action || 'TRADE';
@@ -2249,9 +2262,28 @@ function clearPortfolioView(sid) {
 }
 
 // ── Trade feed ─────────────────────────────
+// ── Trade feed module state ───────────────
+let _historicMode = false;
+const TRADE_CAP_LIVE = 50;
+const TRADE_CAP_HISTORIC = 2000;
+const _renderedTradeKeys = new Set();
+
+function _tradeKey(t) {
+  return [t.sandboxId || '', t.timestamp || '', t.tool || '', t.symbol || ''].join('|');
+}
+
+function _resetRenderedTradeKeys() {
+  _renderedTradeKeys.clear();
+}
+
 function addTradeCard(trade) {
   const feed = document.getElementById('trades-feed');
   if(feed.querySelector('.no-data')) feed.innerHTML = '';
+
+  // Skip if this trade key was already rendered (seed/live overlap).
+  const key = _tradeKey(trade);
+  if (_renderedTradeKeys.has(key)) return;
+  _renderedTradeKeys.add(key);
 
   // Resolve sandbox -> agent
   const sandboxId = trade.sandboxId || '';
@@ -2304,10 +2336,105 @@ function addTradeCard(trade) {
   card.innerHTML = headerHtml + detailsHtml + timeHtml + expandedHtml;
 
   feed.insertBefore(card, feed.firstChild);
-  while(feed.children.length > 50) feed.removeChild(feed.lastChild);
+  const cap = _historicMode ? TRADE_CAP_HISTORIC : TRADE_CAP_LIVE;
+  while(feed.children.length > cap) feed.removeChild(feed.lastChild);
 
   ensureAgentInFilter(agentId, agentName);
   applyTradesFilterToCard(card);
+}
+
+// Render a batch of trades (newest-first as returned from /api/trades) so the
+// final DOM order matches: iterate ascending so each insertBefore puts older
+// trades below the previously-inserted one.
+function renderTradesBulk(trades) {
+  const feed = document.getElementById('trades-feed');
+  if (feed.querySelector('.no-data')) feed.innerHTML = '';
+  if (!trades.length) {
+    feed.innerHTML = '<div class="no-data">No trades in this range.</div>';
+    return;
+  }
+  for (let i = trades.length - 1; i >= 0; i--) {
+    addTradeCard(trades[i]);
+  }
+}
+
+async function fetchTrades(from, to) {
+  const params = new URLSearchParams({ from, to });
+  const res = await fetch('/api/trades?' + params.toString());
+  if (!res.ok) throw new Error('fetch failed: ' + res.status);
+  return res.json();
+}
+
+function _todayEt() {
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'America/New_York',
+    year: 'numeric', month: '2-digit', day: '2-digit',
+  }).format(new Date());
+}
+
+async function seedTodayTrades() {
+  try {
+    const today = _todayEt();
+    const data = await fetchTrades(today, today);
+    renderTradesBulk(data.trades);
+  } catch (err) {
+    console.warn('seedTodayTrades failed:', err);
+  }
+}
+
+function _wireHistoricControls() {
+  const toggle = document.getElementById('trades-historic-toggle');
+  const controls = document.getElementById('trades-historic-controls');
+  const fromInput = document.getElementById('trades-from-date');
+  const toInput = document.getElementById('trades-to-date');
+  const applyBtn = document.getElementById('trades-apply-btn');
+  const truncEl = document.getElementById('trades-truncation-notice');
+  if (!toggle) return;
+
+  const today = _todayEt();
+  fromInput.value = today;
+  toInput.value = today;
+
+  toggle.addEventListener('change', async () => {
+    const feed = document.getElementById('trades-feed');
+    if (toggle.checked) {
+      _historicMode = true;
+      controls.style.display = '';
+      feed.innerHTML = '';
+      _resetRenderedTradeKeys();
+      truncEl.textContent = '';
+      await applyHistoricRange();
+    } else {
+      _historicMode = false;
+      controls.style.display = 'none';
+      feed.innerHTML = '';
+      _resetRenderedTradeKeys();
+      truncEl.textContent = '';
+      await seedTodayTrades();
+    }
+  });
+
+  applyBtn.addEventListener('click', applyHistoricRange);
+}
+
+async function applyHistoricRange() {
+  const from = document.getElementById('trades-from-date').value;
+  const to = document.getElementById('trades-to-date').value;
+  const truncEl = document.getElementById('trades-truncation-notice');
+  const feed = document.getElementById('trades-feed');
+  if (!from || !to) return;
+  feed.innerHTML = '<div class="no-data">Loading…</div>';
+  _resetRenderedTradeKeys();
+  try {
+    const data = await fetchTrades(from, to);
+    feed.innerHTML = '';
+    renderTradesBulk(data.trades);
+    truncEl.textContent = data.truncated
+      ? `truncated: showing ${data.trades.length} of more`
+      : `${data.count} trade${data.count === 1 ? '' : 's'}`;
+  } catch (err) {
+    feed.innerHTML = '<div class="no-data">Error: ' + (err.message || 'unknown') + '</div>';
+  }
 }
 
 function toggleTradeCard(card, ev) {

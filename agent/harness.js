@@ -174,9 +174,10 @@ export class AgentState extends EventEmitter {
   }
 
   addTrade(trade) {
-    this.recentTrades.unshift({ ...trade, timestamp: new Date().toISOString() });
+    const stamped = { ...trade, timestamp: new Date().toISOString() };
+    this.recentTrades.unshift(stamped);
     if (this.recentTrades.length > 50) this.recentTrades.pop();
-    this.emit('trade', trade);
+    this.emit('trade', stamped);
   }
 
   toJSON() {

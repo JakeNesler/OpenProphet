@@ -198,6 +198,34 @@ func TestPennyIntradayCache_GetAvgDailyVolume20d_EmptyReturnsZero(t *testing.T) 
 	}
 }
 
+func TestPennyIntradayCache_GetAvgDailyVolume20d_EmptyResultIsCached(t *testing.T) {
+	// An empty Alpaca response (delisted / OTC / illiquid symbol with no IEX data)
+	// must be cached for the rest of the UTC day. Without this, the 60s screener
+	// loop re-fetches the same empty 40-day window every cycle for every dead ticker.
+	now := etTime(2026, 6, 15, 10, 0)
+	ds := &stubPennyData{dailyBars: map[string][]*interfaces.Bar{}}
+	cache := NewPennyIntradayCache(ds)
+
+	avg1, err := cache.GetAvgDailyVolume20d(context.Background(), "DEAD", now)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if avg1 != 0 {
+		t.Fatalf("expected avg=0 on empty data, got %d", avg1)
+	}
+	if got := atomic.LoadInt32(&ds.calls); got != 1 {
+		t.Fatalf("expected 1 HTTP call, got %d", got)
+	}
+
+	avg2, _ := cache.GetAvgDailyVolume20d(context.Background(), "DEAD", now.Add(3*time.Hour))
+	if avg2 != 0 {
+		t.Errorf("expected cached avg=0, got %d", avg2)
+	}
+	if got := atomic.LoadInt32(&ds.calls); got != 1 {
+		t.Errorf("empty result not cached: expected still 1 HTTP call, got %d", got)
+	}
+}
+
 func TestPennyIntradayCache_GetAvgDailyVolume20d_CachedSameDay(t *testing.T) {
 	now := etTime(2026, 6, 15, 10, 0)
 	ds := &stubPennyData{dailyBars: map[string][]*interfaces.Bar{"AAA": {mkBar(1, 1, 1000)}}}
