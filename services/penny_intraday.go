@@ -122,15 +122,18 @@ func (c *PennyIntradayCache) GetAvgDailyVolume20d(ctx context.Context, ticker st
 	if len(bars) > pennyAvgVolLookbackDays {
 		bars = bars[len(bars)-pennyAvgVolLookbackDays:]
 	}
-	if len(bars) == 0 {
-		return 0, nil
+	// Cache the result — including zero — for the rest of the UTC day. IEX
+	// returns no bars for delisted / OTC / illiquid symbols, and without
+	// caching zero the 60s screener loop re-fetches every dead ticker each cycle.
+	// Errors above are deliberately NOT cached so transient failures can retry.
+	var avg int64
+	if len(bars) > 0 {
+		var sum int64
+		for _, b := range bars {
+			sum += b.Volume
+		}
+		avg = sum / int64(len(bars))
 	}
-	var sum int64
-	for _, b := range bars {
-		sum += b.Volume
-	}
-	avg := sum / int64(len(bars))
-
 	c.mu.Lock()
 	c.avg[ticker] = avgVolRecord{day: dayKey, avg: avg}
 	c.mu.Unlock()

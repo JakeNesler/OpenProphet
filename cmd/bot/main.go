@@ -165,11 +165,19 @@ func main() {
 		logger.Debug("Activity logging session started")
 	}
 
-	// Initialize penny stock signal pipeline
+	// Initialize penny stock signal pipeline. Services are always constructed so
+	// the HTTP controller stays non-nil; background goroutines + the FMP earnings
+	// refresh are gated on ENABLE_PENNY_PIPELINE. Non-penny sandboxes (TrendProphet,
+	// Harvest, Prophet) leave it unset, which skips the 60s scan loop and the
+	// 40-day-bar warm-up that was generating the bulk of the IEX-fetch log noise.
+	pennyPipelineEnabled := os.Getenv("ENABLE_PENNY_PIPELINE") == "true"
+
 	earningsService := services.NewEarningsCalendarService(cfg.FMPAPIKey, cfg.AlpacaAPIKey, cfg.AlpacaSecretKey, cfg.AlpacaBaseURL, nil)
-	go earningsService.Start(ctx)
-	if !earningsService.WaitForFirstRefresh(services.FirstRefreshWaitTimeout) {
-		logger.Warn("earnings calendar first refresh did not complete within timeout — universe will start in fail-open mode")
+	if pennyPipelineEnabled {
+		go earningsService.Start(ctx)
+		if !earningsService.WaitForFirstRefresh(services.FirstRefreshWaitTimeout) {
+			logger.Warn("earnings calendar first refresh did not complete within timeout — universe will start in fail-open mode")
+		}
 	}
 
 	pennyUniverseService := services.NewPennyUniverseService(cfg.FMPAPIKey, cfg.AlpacaAPIKey, cfg.AlpacaSecretKey, cfg.AlpacaBaseURL, earningsService, nil)
@@ -187,15 +195,17 @@ func main() {
 	// Wire dilution filter to operator-visible held-position logging.
 	secEdgarService.SetHeldTickersFn(positionManager.HeldPennyTickers)
 
-	// Start penny pipeline goroutines
-	go pennyUniverseService.Start(ctx)
-	go pennyScreenerService.Start(ctx)
-	go secEdgarService.Start(ctx)
-	go socialSignalService.Start(ctx)
-	go pennyMaxFilter.Start(ctx)
-	go pennyAggregator.Start(ctx)
-
-	logger.Debug("Penny stock signal pipeline started")
+	if pennyPipelineEnabled {
+		go pennyUniverseService.Start(ctx)
+		go pennyScreenerService.Start(ctx)
+		go secEdgarService.Start(ctx)
+		go socialSignalService.Start(ctx)
+		go pennyMaxFilter.Start(ctx)
+		go pennyAggregator.Start(ctx)
+		logger.Debug("Penny stock signal pipeline started")
+	} else {
+		logger.Info("Penny pipeline disabled (ENABLE_PENNY_PIPELINE != true) — endpoints return empty")
+	}
 
 	// Initialize Harvest services
 	harvestIVRSvc := services.NewHarvestIVRService(storageService)
