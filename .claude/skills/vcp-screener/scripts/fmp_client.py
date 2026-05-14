@@ -212,8 +212,16 @@ class FMPClient:
         if cache_key in self.cache:
             return self.cache[cache_key]
 
-        url = f"{self.BASE_URL}/sp500_constituent"
-        data = self._rate_limited_get(url)
+        # Try stable endpoint first (post-Aug-2025 accounts), fall back to v3 (legacy).
+        candidates = [
+            ("https://financialmodelingprep.com/stable/sp500-constituent", True),
+            (f"{self.BASE_URL}/sp500_constituent", False),
+        ]
+        data = None
+        for url, quiet in candidates:
+            data = self._rate_limited_get(url, quiet=quiet)
+            if data:
+                break
         if data:
             self.cache[cache_key] = data
         return data
