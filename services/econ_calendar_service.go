@@ -142,6 +142,11 @@ func (s *EconCalendarService) ensureFresh(ctx context.Context, now time.Time) er
 
 // refresh unconditionally fetches the FMP calendar over [now-1d, now+14d]
 // and replaces the cache. Caller controls when this is invoked.
+//
+// Endpoint order: stable first (post-Aug-2025 accounts), legacy v3 fallback
+// for pre-Aug-2025 subscriptions. FMP retired the v3 path with a 403
+// "Legacy Endpoint" body on Aug 31 2025, so the stable URL is now the
+// primary on every new account.
 func (s *EconCalendarService) refresh(ctx context.Context, now time.Time) error {
 	from := now.Add(-econLookback).UTC().Format("2006-01-02")
 	to := now.Add(econHorizon).UTC().Format("2006-01-02")
@@ -152,30 +157,28 @@ func (s *EconCalendarService) refresh(ctx context.Context, now time.Time) error 
 	if s.apiKey != "" {
 		params.Set("apikey", s.apiKey)
 	}
-	endpoint := "https://financialmodelingprep.com/api/v3/economic_calendar?" + params.Encode()
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
-	if err != nil {
-		return fmt.Errorf("building fmp request: %w", err)
-	}
-	resp, err := s.client.Do(req)
-	if err != nil {
-		return fmt.Errorf("fmp econ_calendar fetch: %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("fmp econ_calendar status %d: %s", resp.StatusCode, string(body))
+	endpoints := []string{
+		"https://financialmodelingprep.com/stable/economic-calendar",
+		"https://financialmodelingprep.com/api/v3/economic_calendar",
 	}
 
-	var raw []struct {
+	type rawEvent struct {
 		Date    string `json:"date"`
 		Country string `json:"country"`
 		Event   string `json:"event"`
 		Impact  string `json:"impact"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
-		return fmt.Errorf("decoding fmp econ_calendar: %w", err)
+	var raw []rawEvent
+	var lastErr error
+	for _, base := range endpoints {
+		raw = nil
+		lastErr = s.fetchFMPCalendar(ctx, base+"?"+params.Encode(), &raw)
+		if lastErr == nil {
+			break
+		}
+	}
+	if lastErr != nil {
+		return lastErr
 	}
 
 	classified := make([]EconEvent, 0, len(raw))
@@ -203,6 +206,30 @@ func (s *EconCalendarService) refresh(ctx context.Context, now time.Time) error 
 	s.fetchedAt = now
 	s.cachedHorizon = now.Add(econHorizon)
 	s.mu.Unlock()
+	return nil
+}
+
+// fetchFMPCalendar issues one GET against the given URL and decodes the JSON
+// array into out. Non-2xx or transport errors are returned; the body is
+// included in the error so callers (and the LLM via the blackout endpoint)
+// can distinguish "legacy endpoint retired" from a real outage.
+func (s *EconCalendarService) fetchFMPCalendar(ctx context.Context, endpoint string, out any) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return fmt.Errorf("building fmp request: %w", err)
+	}
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("fmp econ_calendar fetch: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("fmp econ_calendar status %d: %s", resp.StatusCode, string(body))
+	}
+	if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
+		return fmt.Errorf("decoding fmp econ_calendar: %w", err)
+	}
 	return nil
 }
 

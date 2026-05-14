@@ -44,6 +44,10 @@ export class AnalysisScheduler extends EventEmitter {
     super();
     this.model = options.model || 'anthropic/claude-sonnet-4-6';
     this.onEmergencyWake = options.onEmergencyWake || null;
+    // Resolver for a live trading-bot URL — used to point analysis subagents
+    // at a real Go bot port instead of the unbound TRADING_BOT_URL fallback.
+    // Returns "http://localhost:<port>" of any goReady sandbox, or null.
+    this._getHealthySandboxUrl = options.getHealthySandboxUrl || (() => null);
     this._timer = null;
     this._running = false;
     this._activeJob = null;
@@ -903,6 +907,15 @@ Limit vcp_candidates and pead_candidates to top 5 each by score. Write only the 
         args.push(prompt);
       }
 
+      // Route analysis subagents at a live Go bot. The MCP server inside
+      // opencode looks up its sandbox by ID in /api/health; sandbox "analysis"
+      // doesn't exist, so without an explicit TRADING_BOT_URL it falls back to
+      // the unbound default port and every data-feed tool returns ECONNREFUSED.
+      const liveBotUrl = this._getHealthySandboxUrl();
+      if (!liveBotUrl) {
+        this._log(`[${jobName}] no healthy trading-bot sandbox available — data-feed tools will fail`, 'warning');
+      }
+
       const proc = spawn(OPENCODE_BIN, [...OPENCODE_WIN_PREFIX, ...args], {
         cwd: PROJECT_ROOT,
         env: {
@@ -910,6 +923,7 @@ Limit vcp_candidates and pead_candidates to top 5 each by score. Write only the 
           ANTHROPIC_API_KEY: process.env.CLAUDE_API_KEY || process.env.ANTHROPIC_API_KEY || '',
           OPENPROPHET_SANDBOX_ID: 'analysis',
           OPENPROPHET_ACCOUNT_ID: 'analysis',
+          ...(liveBotUrl ? { TRADING_BOT_URL: liveBotUrl } : {}),
         },
         stdio: ['pipe', 'pipe', 'pipe'],
       });

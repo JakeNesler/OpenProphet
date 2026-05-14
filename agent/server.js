@@ -156,6 +156,10 @@ for (const evt of EVENTS) {
 const scheduler = new AnalysisScheduler({
   model: getConfig().activeModel || 'anthropic/claude-sonnet-4-6',
   onEmergencyWake: (reason) => orchestrator.triggerEmergencyHeartbeat(reason),
+  getHealthySandboxUrl: () => {
+    const runtime = orchestrator.listRuntimes().find(r => r.goReady && r.port);
+    return runtime ? `http://localhost:${runtime.port}` : null;
+  },
 });
 scheduler.on('agent_log', (data) => broadcast('agent_log', data));
 scheduler.on('scheduler_job_start', ({ job, date }) => broadcast('agent_log', {
