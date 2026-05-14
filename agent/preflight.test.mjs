@@ -9,6 +9,8 @@ import assert from 'node:assert/strict';
 import {
   isEconomicBlackout,
   econBlackoutSkipIfNoPositions,
+  isRegimeGateBlock,
+  regimeGateBlockSkipIfNoPositions,
   resolvePreflight,
 } from './preflight.js';
 
@@ -43,6 +45,26 @@ const harvestState = (openCondors, deployedPct = 0) => ({
   data: { open_condors: openCondors, deployed_buying_power_pct: deployedPct },
 });
 const fomcStatus = (isBlackout) => ({ data: { is_blackout: isBlackout } });
+
+// Regime gate response shapes. The Go side returns the full status payload —
+// preflight only cares about block_new_entries + tier (tier goes into the
+// skip reason for operator visibility).
+const regimeBlock = (tier = 'RED', score = 10) => ({
+  data: {
+    score,
+    tier,
+    sizing_multiplier: 0.0,
+    block_new_entries: true,
+  },
+});
+const regimeAllow = (tier = 'NORMAL', score = 60) => ({
+  data: {
+    score,
+    tier,
+    sizing_multiplier: 0.8,
+    block_new_entries: false,
+  },
+});
 
 // ── isEconomicBlackout ─────────────────────────────────────────────
 
@@ -99,6 +121,76 @@ test('econBlackoutSkipIfNoPositions: returns null on endpoint error (fail-open i
   assert.equal(r, null, 'should fail open — predicate then runs normally');
 });
 
+// ── isRegimeGateBlock ──────────────────────────────────────────────
+
+test('isRegimeGateBlock: returns block=true with tier when service reports block', async () => {
+  const rt = makeRuntime([['/api/v1/regime-gate/status', () => regimeBlock('RED', 12)]]);
+  const r = await isRegimeGateBlock(rt);
+  assert.equal(r.block, true);
+  assert.equal(r.tier, 'RED');
+});
+
+test('isRegimeGateBlock: returns block=false when service reports no block', async () => {
+  const rt = makeRuntime([['/api/v1/regime-gate/status', () => regimeAllow('GREEN', 80)]]);
+  const r = await isRegimeGateBlock(rt);
+  assert.equal(r.block, false);
+});
+
+test('isRegimeGateBlock: fails open on axios error (preflight fail-open layer)', async () => {
+  // Per the dual-layer fail policy: preflight fails OPEN on regime errors
+  // (let the LLM run), the rules side fails CLOSED (LLM does not open new
+  // entries when get_regime_gate_status returns an error). The combination
+  // protects against silent breakage either way.
+  const rt = makeRuntime([['/api/v1/regime-gate/status', () => { throw new Error('ECONNREFUSED'); }]]);
+  const r = await isRegimeGateBlock(rt);
+  assert.equal(r.block, false, 'preflight must fail open');
+  assert.match(r.error || '', /ECONNREFUSED/);
+});
+
+test('isRegimeGateBlock: UNKNOWN tier (Go fail-open) is treated as not-blocking', async () => {
+  // The Go service returns tier=UNKNOWN, block=false when the daily file is
+  // missing. Preflight must not skip the LLM just because regime data is
+  // absent — rules layer enforces the closed policy via get_regime_gate_status.
+  const rt = makeRuntime([['/api/v1/regime-gate/status', () => ({
+    data: { score: 0, tier: 'UNKNOWN', sizing_multiplier: 1.0, block_new_entries: false },
+  })]]);
+  const r = await isRegimeGateBlock(rt);
+  assert.equal(r.block, false);
+});
+
+// ── regimeGateBlockSkipIfNoPositions ───────────────────────────────
+
+test('regimeGateBlockSkipIfNoPositions: returns null when positions exist', async () => {
+  // Positions-existing always wins. Exit logic must run during RED tier;
+  // skipping when positions are open would orphan stop-loss management.
+  let called = false;
+  const rt = makeRuntime([
+    ['/api/v1/regime-gate/status', () => { called = true; return regimeBlock(); }],
+  ]);
+  const r = await regimeGateBlockSkipIfNoPositions(rt, 3);
+  assert.equal(r, null);
+  assert.equal(called, false, 'should not even call the endpoint when positions exist');
+});
+
+test('regimeGateBlockSkipIfNoPositions: returns skip:true when no positions and tier=RED', async () => {
+  const rt = makeRuntime([['/api/v1/regime-gate/status', () => regimeBlock('RED', 8)]]);
+  const r = await regimeGateBlockSkipIfNoPositions(rt, 0);
+  assert.equal(r.skip, true);
+  assert.match(r.reason, /RED/);
+});
+
+test('regimeGateBlockSkipIfNoPositions: returns null when no positions but block=false', async () => {
+  const rt = makeRuntime([['/api/v1/regime-gate/status', () => regimeAllow()]]);
+  const r = await regimeGateBlockSkipIfNoPositions(rt, 0);
+  assert.equal(r, null);
+});
+
+test('regimeGateBlockSkipIfNoPositions: returns null on endpoint error (fail-open)', async () => {
+  const rt = makeRuntime([['/api/v1/regime-gate/status', () => { throw new Error('boom'); }]]);
+  const r = await regimeGateBlockSkipIfNoPositions(rt, 0);
+  assert.equal(r, null);
+});
+
 // ── pennyPreflight integration ─────────────────────────────────────
 
 test('penny: blackout + no positions + no orders + candidates exist → skip (was run before)', async () => {
@@ -119,6 +211,34 @@ test('penny: blackout + open position → run (exits must happen)', async () => 
     ['/api/v1/positions?strategy=penny-momentum', () => pennyPositions([{ symbol: 'ABCD', qty: 100 }])],
     ['/api/v1/orders?status=open', () => pennyOrders([])],
     ['/api/v1/econ/blackout', () => blackoutOn('CPI release')],
+  ]);
+  const r = await resolvePreflight('penny-momentum', rt, {});
+  assert.equal(r.skip, false);
+});
+
+test('penny: regime RED + no positions + no orders + candidates exist → skip (regime fires before econ)', async () => {
+  // Regime gate is checked before econ blackout, so the reason should point
+  // to regime even if both gates would fire. Lets operators see the broader
+  // signal that's actually limiting the agent.
+  const rt = makeRuntime([
+    ['/api/v1/penny/candidates?min_score=60', () => candidates(3)],
+    ['/api/v1/positions?strategy=penny-momentum', () => pennyPositions([])],
+    ['/api/v1/orders?status=open', () => pennyOrders([])],
+    ['/api/v1/regime-gate/status', () => regimeBlock('RED', 12)],
+    ['/api/v1/econ/blackout', () => blackoutOff()],
+  ]);
+  const r = await resolvePreflight('penny-momentum', rt, {});
+  assert.equal(r.skip, true);
+  assert.match(r.reason, /regime gate RED/);
+});
+
+test('penny: regime RED + open position → run (exits must happen even at RED tier)', async () => {
+  const rt = makeRuntime([
+    ['/api/v1/penny/candidates?min_score=60', () => candidates(0)],
+    ['/api/v1/positions?strategy=penny-momentum', () => pennyPositions([{ symbol: 'ABCD', qty: 100 }])],
+    ['/api/v1/orders?status=open', () => pennyOrders([])],
+    ['/api/v1/regime-gate/status', () => regimeBlock('RED', 8)],
+    ['/api/v1/econ/blackout', () => blackoutOff()],
   ]);
   const r = await resolvePreflight('penny-momentum', rt, {});
   assert.equal(r.skip, false);

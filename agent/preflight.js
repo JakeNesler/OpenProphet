@@ -57,6 +57,53 @@ export async function econBlackoutSkipIfNoPositions(runtime, livePositionCount) 
   return null;
 }
 
+// isRegimeGateBlock queries /api/v1/regime-gate/status for the daily-computed
+// cross-agent regime tier. Returns {block, tier?, error?}. block=true means
+// tier=RED with enforcement on (scores < 20 plus ENABLE_REGIME_GATE=true).
+//
+// Fail-open at the preflight layer (per the dual-layer policy in
+// memory/architectural-patterns.md): on any error or unparseable response,
+// return block:false so the LLM beat runs. The rules side fails CLOSED —
+// agents are told not to open new entries when get_regime_gate_status
+// returns an error or tier=UNKNOWN.
+//
+// 1500ms inner timeout matches isEconomicBlackout so it doesn't consume the
+// full 2s resolvePreflight budget when stacked.
+export async function isRegimeGateBlock(runtime) {
+  if (!runtime || !runtime.goAxios) {
+    return { block: false, error: 'no runtime' };
+  }
+  try {
+    const resp = await runtime.goAxios.get('/api/v1/regime-gate/status', { timeout: 1500 });
+    const body = resp?.data || {};
+    if (body.block_new_entries === true) {
+      return { block: true, tier: body.tier || 'RED' };
+    }
+    return { block: false, tier: body.tier };
+  } catch (err) {
+    return { block: false, error: err.message };
+  }
+}
+
+// regimeGateBlockSkipIfNoPositions mirrors econBlackoutSkipIfNoPositions:
+// when an agent has no positions AND the regime tier is RED with enforcement
+// on, skip the LLM beat — the LLM can't open new entries anyway and exit
+// logic has nothing to manage.
+//
+// Positions-existing always wins (early return without hitting the
+// endpoint). Endpoint errors fail open (null).
+export async function regimeGateBlockSkipIfNoPositions(runtime, livePositionCount) {
+  if (livePositionCount > 0) return null;
+  const regime = await isRegimeGateBlock(runtime);
+  if (regime.block) {
+    return {
+      skip: true,
+      reason: `regime gate ${regime.tier || 'RED'}: new entries blocked (no positions to manage)`,
+    };
+  }
+  return null;
+}
+
 // PennyProphet predicate. Skips the LLM beat when there are no candidates
 // above the composite-score threshold AND no penny-tagged positions to manage
 // AND no open broker orders pending fill.
@@ -109,10 +156,17 @@ async function pennyPreflight(runtime, agentConfig) {
     };
   }
 
+  // Regime gate: tier=RED with enforcement on blocks new entries; with no
+  // open positions/orders, no exit logic to run either — skip the beat.
+  // Checked before econ so a RED tier reports correctly even if a blackout
+  // window overlaps.
+  const liveCount = positions.length + openOrders.length;
+  const regimeSkip = await regimeGateBlockSkipIfNoPositions(runtime, liveCount);
+  if (regimeSkip) return regimeSkip;
+
   // Econ-blackout gate: if there's nothing to manage (no positions, no orders
   // in flight) AND we're inside a US-release blackout window, skip the beat.
   // The LLM can't open new entries anyway during blackout.
-  const liveCount = positions.length + openOrders.length;
   const econSkip = await econBlackoutSkipIfNoPositions(runtime, liveCount);
   if (econSkip) return econSkip;
 
@@ -189,6 +243,8 @@ async function prophetPreflight(runtime, agentConfig) {
   const positionsResp = await goAxios.get('/api/v1/positions?strategy=v2-options');
   const positionCount = (typeof positionsResp.data?.count === 'number') ? positionsResp.data.count : -1;
   if (positionCount === 0) {
+    const regimeSkip = await regimeGateBlockSkipIfNoPositions(runtime, 0);
+    if (regimeSkip) return regimeSkip;
     const econSkip = await econBlackoutSkipIfNoPositions(runtime, 0);
     if (econSkip) return econSkip;
   }
@@ -271,6 +327,10 @@ async function trendPreflight(runtime, agentConfig) {
     };
   }
 
+  // Regime gate (no positions branch — positions>0 already returned above).
+  const regimeSkip = await regimeGateBlockSkipIfNoPositions(runtime, 0);
+  if (regimeSkip) return regimeSkip;
+
   // Econ blackout (no positions branch — positions>0 already returned above).
   const econSkip = await econBlackoutSkipIfNoPositions(runtime, 0);
   if (econSkip) return econSkip;
@@ -327,6 +387,13 @@ async function harvestPreflight(runtime, agentConfig) {
   if (fomc.is_blackout) {
     return { skip: true, reason: 'no open condors and FOMC blackout' };
   }
+
+  // Regime gate (RED tier blocks new condor entries). Mirrors the V2/penny/trend
+  // pattern; only the block flag is honored here — Harvest does not consume the
+  // sizing multiplier (its premium-collection sizing is already small per trade,
+  // per the Item 2 plan revision).
+  const regimeSkip = await regimeGateBlockSkipIfNoPositions(runtime, 0);
+  if (regimeSkip) return regimeSkip;
 
   // Shared US-release blackout (CPI, NFP, PCE, PPI, core retail). The 24h
   // pre-FOMC ban above remains as a Harvest-specific strategy guardrail.
