@@ -333,6 +333,50 @@ func TestGuard_PennyCapCapFailsClosedOnFetchError(t *testing.T) {
 
 // ── Sector aggregation (Item 1: cross-agent sector & beta-bucket cap) ──
 
+func TestGuard_BucketFor_CoversMegaCaps(t *testing.T) {
+	// The cross-agent sector cap is only useful if common underlyings actually
+	// resolve to their real bucket — leaving most equities in OTHER would make
+	// the OTHER cap bind on unrelated trades. Sample a representative slice of
+	// the universe Prophet, PennyProphet, and TrendProphet might touch.
+	cases := []struct {
+		symbol string
+		want   SectorBucket
+	}{
+		// Tech (XLK / SMH / SOXX consolidation)
+		{"AAPL", "TECH"}, {"MSFT", "TECH"}, {"NVDA", "TECH"}, {"AMD", "TECH"},
+		{"AVGO", "TECH"}, {"ORCL", "TECH"}, {"CRM", "TECH"}, {"ADBE", "TECH"},
+		{"PLTR", "TECH"}, {"MSTR", "TECH"}, {"SMCI", "TECH"}, {"ASML", "TECH"},
+		// Communications
+		{"GOOG", "COMMUNICATIONS"}, {"GOOGL", "COMMUNICATIONS"},
+		{"META", "COMMUNICATIONS"}, {"NFLX", "COMMUNICATIONS"},
+		// Consumer discretionary
+		{"AMZN", "CONSUMER_DISCRETIONARY"}, {"TSLA", "CONSUMER_DISCRETIONARY"},
+		{"HD", "CONSUMER_DISCRETIONARY"}, {"BKNG", "CONSUMER_DISCRETIONARY"},
+		// Financials
+		{"JPM", "FINANCIALS"}, {"BAC", "FINANCIALS"}, {"GS", "FINANCIALS"},
+		{"V", "FINANCIALS"}, {"COIN", "FINANCIALS"},
+		// Healthcare
+		{"UNH", "HEALTHCARE"}, {"LLY", "HEALTHCARE"}, {"JNJ", "HEALTHCARE"},
+		// Energy
+		{"XOM", "ENERGY"}, {"CVX", "ENERGY"},
+		// Staples / Industrials / Utilities / Materials
+		{"WMT", "STAPLES"}, {"COST", "STAPLES"},
+		{"CAT", "INDUSTRIALS"}, {"BA", "INDUSTRIALS"},
+		{"NEE", "UTILITIES"},
+		{"LIN", "MATERIALS"},
+		// Index ETFs (direct via etfToBucket)
+		{"SPY", "INDEX_BETA"}, {"QQQ", "INDEX_BETA"}, {"IWM", "INDEX_BETA"},
+		// Truly unmapped → OTHER
+		{"FOOBAR_UNKNOWN", "OTHER"},
+	}
+	g := NewTradeGuard(&stubLister{}, nil, defaultConfig())
+	for _, tc := range cases {
+		if got := g.bucketFor(tc.symbol); got != tc.want {
+			t.Errorf("bucketFor(%q) = %q, want %q", tc.symbol, got, tc.want)
+		}
+	}
+}
+
 func TestGuard_SectorCap_BlocksOverConcentration(t *testing.T) {
 	// Existing TECH exposure (NVDA + AMD both map to SMH → TECH) at $18K.
 	// Portfolio $100K, TECH cap 20% = $20K. A new $3K NVDA buy pushes TECH to

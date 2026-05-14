@@ -61,6 +61,65 @@ type SectorBucket string
 
 const SectorBucketOther SectorBucket = "OTHER"
 
+// tickerBucket directly maps common large-cap equities to their sector bucket.
+// Without this map, only the four tickers in sectorETFMap (NVDA/AMD/TSLA/MSTR)
+// would resolve to anything other than OTHER, which would make the OTHER cap
+// bind on normal trading. The map is curated, not exhaustive — names absent
+// here still fall through to sectorETFMap and ultimately OTHER. Add entries
+// as the universe of traded names grows; the map is read-only at runtime.
+var tickerBucket = map[string]SectorBucket{
+	// TECH (semis + software + hardware + crypto-adjacent infrastructure)
+	"AAPL": "TECH", "MSFT": "TECH", "AVGO": "TECH", "ORCL": "TECH",
+	"CRM": "TECH", "ADBE": "TECH", "NOW": "TECH", "INTU": "TECH",
+	"IBM": "TECH", "CSCO": "TECH", "PANW": "TECH", "CRWD": "TECH",
+	"SNOW": "TECH", "NET": "TECH", "DDOG": "TECH", "MDB": "TECH",
+	"INTC": "TECH", "QCOM": "TECH", "TXN": "TECH", "AMAT": "TECH",
+	"MU": "TECH", "LRCX": "TECH", "KLAC": "TECH", "ASML": "TECH",
+	"MRVL": "TECH", "ON": "TECH", "TSM": "TECH", "ARM": "TECH",
+	"SMCI": "TECH", "PLTR": "TECH", "SHOP": "TECH", "ZS": "TECH",
+	"OKTA": "TECH",
+	// COMMUNICATIONS
+	"GOOG": "COMMUNICATIONS", "GOOGL": "COMMUNICATIONS",
+	"META": "COMMUNICATIONS", "NFLX": "COMMUNICATIONS",
+	"DIS": "COMMUNICATIONS", "CMCSA": "COMMUNICATIONS",
+	"TMUS": "COMMUNICATIONS", "T": "COMMUNICATIONS", "VZ": "COMMUNICATIONS",
+	"ROKU": "COMMUNICATIONS", "SPOT": "COMMUNICATIONS",
+	// CONSUMER_DISCRETIONARY
+	"AMZN": "CONSUMER_DISCRETIONARY", "HD": "CONSUMER_DISCRETIONARY",
+	"MCD": "CONSUMER_DISCRETIONARY", "NKE": "CONSUMER_DISCRETIONARY",
+	"SBUX": "CONSUMER_DISCRETIONARY", "LOW": "CONSUMER_DISCRETIONARY",
+	"TGT": "CONSUMER_DISCRETIONARY", "BKNG": "CONSUMER_DISCRETIONARY",
+	"ABNB": "CONSUMER_DISCRETIONARY", "UBER": "CONSUMER_DISCRETIONARY",
+	// FINANCIALS
+	"JPM": "FINANCIALS", "BAC": "FINANCIALS", "WFC": "FINANCIALS",
+	"GS": "FINANCIALS", "MS": "FINANCIALS", "C": "FINANCIALS",
+	"V": "FINANCIALS", "MA": "FINANCIALS", "AXP": "FINANCIALS",
+	"BLK": "FINANCIALS", "SCHW": "FINANCIALS", "PYPL": "FINANCIALS",
+	"COIN": "FINANCIALS",
+	// HEALTHCARE
+	"UNH": "HEALTHCARE", "LLY": "HEALTHCARE", "JNJ": "HEALTHCARE",
+	"PFE": "HEALTHCARE", "MRK": "HEALTHCARE", "ABBV": "HEALTHCARE",
+	"TMO": "HEALTHCARE", "ABT": "HEALTHCARE", "DHR": "HEALTHCARE",
+	"BMY": "HEALTHCARE", "AMGN": "HEALTHCARE", "GILD": "HEALTHCARE",
+	// ENERGY
+	"XOM": "ENERGY", "CVX": "ENERGY", "COP": "ENERGY", "EOG": "ENERGY",
+	"SLB": "ENERGY", "MPC": "ENERGY", "PSX": "ENERGY", "OXY": "ENERGY",
+	// STAPLES
+	"WMT": "STAPLES", "PG": "STAPLES", "COST": "STAPLES", "KO": "STAPLES",
+	"PEP": "STAPLES", "MDLZ": "STAPLES", "CL": "STAPLES",
+	// INDUSTRIALS
+	"BA": "INDUSTRIALS", "CAT": "INDUSTRIALS", "HON": "INDUSTRIALS",
+	"GE": "INDUSTRIALS", "UPS": "INDUSTRIALS", "RTX": "INDUSTRIALS",
+	"LMT": "INDUSTRIALS", "DE": "INDUSTRIALS",
+	// UTILITIES
+	"NEE": "UTILITIES", "DUK": "UTILITIES", "SO": "UTILITIES",
+	// MATERIALS
+	"LIN": "MATERIALS", "APD": "MATERIALS", "SHW": "MATERIALS",
+	"FCX": "MATERIALS",
+	// REAL_ESTATE
+	"PLD": "REAL_ESTATE", "AMT": "REAL_ESTATE", "EQIX": "REAL_ESTATE",
+}
+
 // etfToBucket consolidates sector / index ETFs into coarse exposure buckets.
 // A symbol that maps to one of these ETFs via sectorETFMap inherits the bucket;
 // a symbol that IS one of these ETFs uses its direct bucket.
@@ -407,10 +466,14 @@ func (g *TradeGuard) checkPennyCapCap(acct *interfaces.Account, acctErr error, a
 
 // bucketFor returns the sector bucket for a symbol. Lookup order:
 //  1. etfToBucket directly (the symbol IS a sector/index ETF).
-//  2. sectorETFMap → etfToBucket (the symbol is an equity mapped to an ETF).
-//  3. SectorBucketOther otherwise.
+//  2. tickerBucket (the symbol is a curated large-cap equity).
+//  3. sectorETFMap → etfToBucket (the symbol is an equity mapped to an ETF).
+//  4. SectorBucketOther otherwise.
 func (g *TradeGuard) bucketFor(symbol string) SectorBucket {
 	if b, ok := etfToBucket[symbol]; ok {
+		return b
+	}
+	if b, ok := tickerBucket[symbol]; ok {
 		return b
 	}
 	if etf, ok := sectorETFMap[symbol]; ok {

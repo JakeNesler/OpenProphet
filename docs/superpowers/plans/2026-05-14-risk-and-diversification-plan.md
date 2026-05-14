@@ -348,4 +348,30 @@ When you start the next session, decide:
 
 ---
 
+## Plan revisions (2026-05-14, post-Item-1 implementation)
+
+Concerns surfaced while implementing Item 1. Tracked here for Items 2 and 3 to consume.
+
+### Resolved in Item 1's commit
+- **Symbol→bucket coverage was too narrow.** Original plan assumed reusing `sectorETFMap` (only 4 entries: NVDA/AMD/TSLA/MSTR). Without expansion, every other equity Prophet trades would have fallen to OTHER bucket and bound on the OTHER cap. Resolved by adding a curated `tickerBucket` map in `services/trade_guard.go` covering ~80 large-cap names across TECH, COMMUNICATIONS, CONSUMER_DISCRETIONARY, FINANCIALS, HEALTHCARE, ENERGY, STAPLES, INDUSTRIALS, UTILITIES, MATERIALS, REAL_ESTATE. Lookup order is now etfToBucket → tickerBucket → sectorETFMap → OTHER.
+- **Plan function signature for `checkSectorCap` adapted.** Plan specified `(agent, symbol, additionalDollars, portfolioValue)`. As implemented it is `(acct, acctErr, symbol, additionalDollars)` to share the lazy account fetch with daily-loss/penny-cap checks and to keep fail-closed semantics on fetch errors (matches existing penny-cap policy). The `agent` parameter wasn't used — the cap is agent-agnostic.
+- **Harvest options contribution generalized.** Plan called for a `ShortPutDeltaProxy` config field. As implemented this is the `OptionsExposureProvider` interface — Harvest's delta math lives in HarvestService (future work), TradeGuard just sums the bucket exposures the provider returns. More flexible (covers short calls, future strategies) and keeps delta logic out of the guard.
+
+### Deferred to follow-up commits
+1. **MCP tool to read guard status.** TRADING_RULES updates reference `mcp__prophet__get_guard_status` aspirationally — only the HTTP endpoint exists today. Agents currently learn about bucket exposure only via the rejection error. A small MCP tool wrapping `/api/v1/guard/status` is the natural follow-up. Same gap will exist for Item 2's regime gate.
+2. **Wire HarvestService into `OptionsExposureProvider`.** The interface exists and is exercised by a unit test. HarvestService still needs an `BucketExposureDollars()` method that sums its short-put book using `notional × delta_proxy` for the INDEX_BETA bucket. Plan recommends 0.30 delta default — that lives in HarvestService config when added.
+
+### Open for Item 2
+3. **No MCP tool contract specified.** Item 2 says "expose a tool `get_regime_gate_status` to all agents" but doesn't give the JSON schema, registration site, or whether the tool is read-only. Spec it before implementing. Recommended schema: `{score, tier, sizing_multiplier, block_new_entries, is_stale, components}`.
+4. **No observation-period for the regime gate.** Item 1 has a flag-gated rollout (`EnableSectorAggregation` defaults off, observe Status() output for two weeks, then enable). Item 2 goes straight from "no agent reads regime" to "all four agents multiply sizing." Mirror Item 1's pattern: ship the score-computation + service first, log "tier_would_be" for two weeks, then flip the sizing-multiplier consumption on.
+5. **"A-grade setups only" in DEFENSIVE tier is undefined.** TRADING_RULES files don't define grades. Either define A/B/C grading in the rules files as part of Item 2, or drop the entry filter and keep DEFENSIVE as a pure sizing multiplier (0.5×) with no quality gate.
+
+### Open for Item 3
+6. **Threshold inconsistency for the RED tier.** Item 2 defines RED as score < 20. Item 3 says Reverberate blocks entries at score < 15. Pick one or document the override explicitly in TRADING_RULES_REVERBERATE.md.
+7. **MA200 distance wording.** Body of Item 3 says "price ≤ MA200 ± 5%". The struct field defaults (`MinDistFromMA200Pct: -0.05`, `MaxDistFromMA200Pct: 0.05`) clarify it's "within ±5% of MA200, either side". Update the spec body to match.
+8. **"Max 1 per sector" depends on Item 1's tickerBucket coverage.** With the expanded map shipped in Item 1's commit, SPX top 100 names mostly resolve correctly — but the map is still curated, not exhaustive. Item 3 should add a sanity check at universe-refresh time that flags any SPX-100 name resolving to OTHER, so the curated map stays current as constituents change. Also consider falling back to FMP's `/profile` `sector` field at runtime for unmapped names.
+
+### Cross-cutting
+9. **No integration testing plan for Item 2's Python→JSON→Go→MCP→agent chain.** Unit tests are specced for the Go service. An end-to-end smoke test that writes a fixture `regime_gate.json`, starts the service, has an agent read it via the MCP tool, and verifies the sizing multiplier propagates — should be added to Item 2's test plan.
+
 *End of plan.*
