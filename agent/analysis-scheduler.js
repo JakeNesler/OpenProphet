@@ -737,7 +737,7 @@ If significance score >= 7: write the file, then output: SCAN_ALERT: <your alert
     this.emit('scheduler_job_start', { job: 'daily_briefing', date });
 
     const hasFmp = !!process.env.FMP_API_KEY;
-    const fmpNote = hasFmp ? '' : '\nNote: FMP_API_KEY not set — FTD check, economic calendar, and earnings calendar will be skipped.';
+    const fmpNote = hasFmp ? '' : '\nNote: FMP_API_KEY not set — FTD check, economic calendar, earnings calendar, and analyst actions will be skipped.';
 
     const prompt = `You are the Prophet Pre-Market Analysis Agent. Today is ${date}. Your job is to run the daily pre-market briefing pipeline and save the results.${fmpNote}
 
@@ -746,7 +746,8 @@ Call these MCP tools in this exact order:
 ${hasFmp ? `2. run_ftd_check — detects Follow-Through Day signals (requires FMP API).
 3. run_economic_calendar — fetches this week's tier-1 macro events (FOMC, CPI, NFP, GDP).
 4. run_earnings_calendar — fetches key earnings announcements for this week.
-5. get_marketwatch_all — fetches all MarketWatch feeds (top stories, realtime headlines, bulletins, market pulse). Scan for any market-moving news: earnings results or misses (including private companies), executive commentary, sector contagion, macro surprises, or geopolitical events. Extract up to 7 headlines that a trader must know about today.` : `2. (Skipping FTD, economic calendar, and earnings calendar — FMP_API_KEY not set)
+5. run_analyst_actions — fetches the last 24h of analyst rating changes and price-target updates across Prophet's liquid optionable universe (~50 names). Tier-1 banks (Goldman, Morgan Stanley, JPM, BofA, Citi, Wells Fargo) and large PT moves rank highest.
+6. get_marketwatch_all — fetches all MarketWatch feeds (top stories, realtime headlines, bulletins, market pulse). Scan for any market-moving news: earnings results or misses (including private companies), executive commentary, sector contagion, macro surprises, or geopolitical events. Extract up to 7 headlines that a trader must know about today.` : `2. (Skipping FTD, economic calendar, earnings calendar, and analyst actions — FMP_API_KEY not set)
 3. get_marketwatch_all — fetches all MarketWatch feeds. Scan for market-moving headlines and extract up to 7 that a trader must know about today.`}
 
 After all tools have returned, use the Write tool to save the briefing to exactly this path:
@@ -762,12 +763,13 @@ The JSON must be exactly this structure (fill all values from tool results):
   "ftd_status": "<active_ftd|rally_attempt|no_signal|correction — from run_ftd_check, or null if skipped>",
   "tier1_macro_events": [<objects from run_economic_calendar with date, event, impact fields — empty array if skipped or none>],
   "key_earnings_this_week": [<objects from run_earnings_calendar with date, ticker, timing fields — empty array if skipped or none>],
+  "analyst_actions": [<top-ranked objects from run_analyst_actions — pass through the JSON array as-is (up to 15 events). Each event: {ticker, type ("pt_change"|"rating_change"), firm, action, from, to, date}. Empty array if skipped or none.>],
   "market_headlines": [<up to 7 objects from get_marketwatch_all that represent market-moving news — each object: {"headline": "<title>", "source": "<publication>", "impact": "<1 sentence: what moves and which direction>", "sectors_affected": ["<sector1>", ...]}. Include earnings misses/beats, executive statements, sector contagion, macro shocks, and geopolitical news. Empty array only if no significant news found.>],
   "exposure_ceiling_pct": <integer 0-100 — your recommended max exposure: 100 if BULLISH, 60 if NEUTRAL, 20 if BEARISH; reduce further if active_ftd, tier-1 event today, or major negative market_headlines>,
-  "summary": "<2-3 sentences describing today's market setup, key risks from headlines, and any sector-specific warnings>"
+  "summary": "<2-3 sentences describing today's market setup, key risks from headlines, notable analyst actions on Prophet's universe, and any sector-specific warnings>"
 }
 
-Use null for any field where the corresponding tool failed. Write only the JSON — no markdown, no explanation.`;
+Use null for any field where the corresponding tool failed. Use [] for analyst_actions if the tool was skipped or returned empty. Write only the JSON — no markdown, no explanation.`;
 
     await this._runOneshotOpencode(prompt, 'daily_briefing', 10 * 60 * 1000);
     this._log(`Daily briefing complete → data/reports/daily_brief_${dateSlug}.json`, 'success');

@@ -1,0 +1,69 @@
+# Static liquid optionable universe for Prophet's catalyst surveillance.
+# Used by analyst-actions and catalyst-news skills as the stable floor;
+# FMP top-volume top-up adds ~10-15 transient names per day.
+#
+# Curation rules:
+#   - Mega caps and high-volume mid caps with deep options liquidity
+#   - Tight option bid-ask (<10% of mid) on monthlies
+#   - Names Prophet plausibly trades given its rules
+#
+# Refresh cadence: review every 6-12 months; prune delisted/illiquid, add new leaders.
+
+# Index ETFs
+SPY
+QQQ
+IWM
+DIA
+
+# Mega-cap tech
+AAPL
+MSFT
+GOOG
+GOOGL
+AMZN
+NVDA
+META
+TSLA
+AVGO
+AMD
+ORCL
+NFLX
+ADBE
+CRM
+
+# Financials
+JPM
+BAC
+GS
+MS
+V
+MA
+
+# Healthcare
+LLY
+UNH
+JNJ
+ABBV
+
+# Energy
+XOM
+CVX
+
+# Other mega-caps
+WMT
+COST
+HD
+PG
+DIS
+
+# Crypto-correlated (Prophet's active set)
+MSTR
+COIN
+MARA
+
+# High-volume active
+PLTR
+INTC
+MU
+QCOM
+BA
