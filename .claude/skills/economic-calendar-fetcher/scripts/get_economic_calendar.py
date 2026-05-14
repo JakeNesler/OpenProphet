@@ -12,17 +12,36 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Optional
+
+
+def _load_dotenv_from_ancestors(key: str) -> Optional[str]:
+    """Walk up from this script's directory looking for a .env file and return key's value."""
+    for d in (Path(__file__).resolve(), *Path(__file__).resolve().parents):
+        env_path = d / ".env" if d.is_dir() else d.parent / ".env"
+        if env_path.is_file():
+            try:
+                for line in env_path.read_text(encoding="utf-8").splitlines():
+                    line = line.strip()
+                    if not line or line.startswith("#") or "=" not in line:
+                        continue
+                    k, _, v = line.partition("=")
+                    if k.strip() == key:
+                        return v.strip().strip('"').strip("'")
+            except OSError:
+                pass
+    return None
 
 
 def get_api_key() -> Optional[str]:
     """
-    Get FMP API key from environment variable.
+    Get FMP API key from environment variable, falling back to a project .env file.
 
     Returns:
         API key string or None if not found
     """
-    api_key = os.environ.get("FMP_API_KEY")
+    api_key = os.environ.get("FMP_API_KEY") or _load_dotenv_from_ancestors("FMP_API_KEY")
     if not api_key:
         print("Warning: FMP_API_KEY environment variable not set", file=sys.stderr)
     return api_key

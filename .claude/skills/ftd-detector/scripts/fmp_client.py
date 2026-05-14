@@ -15,6 +15,7 @@ Features:
 import os
 import sys
 import time
+from pathlib import Path
 from typing import Optional
 
 try:
@@ -22,6 +23,28 @@ try:
 except ImportError:
     print("ERROR: requests library not found. Install with: pip install requests", file=sys.stderr)
     sys.exit(1)
+
+
+def _load_dotenv_from_ancestors(key: str) -> Optional[str]:
+    """Walk up from this script's directory looking for a .env file and return key's value.
+
+    Lets the skill work when the user has FMP_API_KEY in a project-root .env
+    but hasn't exported it to the shell environment.
+    """
+    for d in (Path(__file__).resolve(), *Path(__file__).resolve().parents):
+        env_path = d / ".env" if d.is_dir() else d.parent / ".env"
+        if env_path.is_file():
+            try:
+                for line in env_path.read_text(encoding="utf-8").splitlines():
+                    line = line.strip()
+                    if not line or line.startswith("#") or "=" not in line:
+                        continue
+                    k, _, v = line.partition("=")
+                    if k.strip() == key:
+                        return v.strip().strip('"').strip("'")
+            except OSError:
+                pass
+    return None
 
 
 # --- FMP endpoint fallback: stable (new users) -> v3 (legacy users) ---
@@ -70,11 +93,15 @@ class FMPClient:
     _ENDPOINT_FAILURE_THRESHOLD = 3  # disable endpoint after N consecutive failures
 
     def __init__(self, api_key: Optional[str] = None):
-        self.api_key = api_key or os.getenv("FMP_API_KEY")
+        self.api_key = (
+            api_key
+            or os.getenv("FMP_API_KEY")
+            or _load_dotenv_from_ancestors("FMP_API_KEY")
+        )
         if not self.api_key:
             raise ValueError(
-                "FMP API key required. Set FMP_API_KEY environment variable "
-                "or pass api_key parameter."
+                "FMP API key required. Set FMP_API_KEY environment variable, "
+                "add it to a project .env file, or pass api_key parameter."
             )
         self.session = requests.Session()
         self.session.headers.update({"apikey": self.api_key})
