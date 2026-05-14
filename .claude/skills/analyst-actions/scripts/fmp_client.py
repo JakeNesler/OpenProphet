@@ -1,0 +1,143 @@
+#!/usr/bin/env python3
+"""
+FMP API client for analyst-actions and catalyst-news skills.
+
+Extends the project's standard FMP client pattern with endpoints used here:
+  - company screener (universe top-up)
+  - grades-historical (analyst rating changes)
+  - price-target-news (PT changes)
+  - news/stock (ticker-filtered news)
+
+Stable endpoint preferred; v3 fallback for legacy plans. Rate limited to
+respect Starter-tier quotas.
+"""
+
+import os
+import sys
+import time
+from typing import Optional
+
+try:
+    import requests
+except ImportError:
+    print("ERROR: requests library not found. Install with: pip install requests", file=sys.stderr)
+    sys.exit(1)
+
+
+class FMPClient:
+    RATE_LIMIT_DELAY = 0.3
+    MAX_RETRIES = 1
+
+    STABLE_BASE = "https://financialmodelingprep.com/stable"
+    V3_BASE = "https://financialmodelingprep.com/api/v3"
+
+    def __init__(self, api_key: Optional[str] = None):
+        self.api_key = api_key or os.getenv("FMP_API_KEY")
+        if not self.api_key:
+            raise ValueError(
+                "FMP API key required. Set FMP_API_KEY environment variable "
+                "or pass api_key parameter."
+            )
+        self.session = requests.Session()
+        self.session.headers.update({"apikey": self.api_key})
+        self.last_call_time = 0.0
+        self.rate_limit_reached = False
+        self.api_calls_made = 0
+
+    def _get(self, url: str, params: Optional[dict] = None, quiet: bool = False, retry: int = 0):
+        if self.rate_limit_reached:
+            return None
+        if params is None:
+            params = {}
+
+        elapsed = time.time() - self.last_call_time
+        if elapsed < self.RATE_LIMIT_DELAY:
+            time.sleep(self.RATE_LIMIT_DELAY - elapsed)
+
+        try:
+            resp = self.session.get(url, params=params, timeout=30)
+            self.last_call_time = time.time()
+            self.api_calls_made += 1
+
+            if resp.status_code == 200:
+                return resp.json()
+            if resp.status_code == 429:
+                if retry < self.MAX_RETRIES:
+                    print("WARNING: FMP rate limit hit. Waiting 60s...", file=sys.stderr)
+                    time.sleep(60)
+                    return self._get(url, params, quiet=quiet, retry=retry + 1)
+                self.rate_limit_reached = True
+                return None
+            if not quiet:
+                print(
+                    f"ERROR: FMP request failed: {resp.status_code} - {resp.text[:200]}",
+                    file=sys.stderr,
+                )
+            return None
+        except requests.exceptions.RequestException as e:
+            print(f"ERROR: FMP request exception: {e}", file=sys.stderr)
+            return None
+
+    def _try_stable_then_v3(self, stable_path: str, v3_path: str, params: dict):
+        data = self._get(f"{self.STABLE_BASE}/{stable_path}", params, quiet=True)
+        if data is not None:
+            return data
+        return self._get(f"{self.V3_BASE}/{v3_path}", params)
+
+    def screen_liquid_universe(
+        self,
+        market_cap_min: int = 5_000_000_000,
+        price_min: float = 20.0,
+        volume_min: int = 5_000_000,
+        limit: int = 50,
+    ) -> Optional[list[dict]]:
+        """Return actively-traded US stocks above the given filters.
+
+        Used to build the dynamic top-up portion of Prophet's catalyst universe.
+        """
+        params = {
+            "marketCapMoreThan": market_cap_min,
+            "priceMoreThan": price_min,
+            "volumeMoreThan": volume_min,
+            "isActivelyTrading": "true",
+            "country": "US",
+            "limit": limit,
+        }
+        data = self._try_stable_then_v3("company-screener", "stock-screener", params)
+        if isinstance(data, list):
+            return data
+        return None
+
+    def get_grades_historical(self, symbol: str, limit: int = 20) -> Optional[list[dict]]:
+        """Recent analyst rating changes for a single symbol."""
+        params = {"symbol": symbol, "limit": limit}
+        data = self._try_stable_then_v3(
+            "grades-historical", f"historical-rating/{symbol}", params
+        )
+        if isinstance(data, list):
+            return data
+        return None
+
+    def get_price_target_news(self, symbol: str, limit: int = 20) -> Optional[list[dict]]:
+        """Recent price-target updates from analyst firms for a single symbol."""
+        params = {"symbol": symbol, "limit": limit}
+        data = self._try_stable_then_v3(
+            "price-target-news", f"price-target/{symbol}", params
+        )
+        if isinstance(data, list):
+            return data
+        return None
+
+    def get_stock_news(self, symbols: list[str], limit: int = 50) -> Optional[list[dict]]:
+        """Ticker-filtered news. FMP accepts comma-separated symbols."""
+        params = {"symbols": ",".join(symbols), "limit": limit}
+        data = self._try_stable_then_v3("news/stock", "stock_news", params)
+        if isinstance(data, list):
+            return data
+        return None
+
+    def get_api_stats(self) -> dict:
+        return {
+            "api_calls_made": self.api_calls_made,
+            "rate_limit_reached": self.rate_limit_reached,
+        }

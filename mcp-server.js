@@ -1271,6 +1271,16 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         inputSchema: { type: 'object', properties: {} },
       },
       {
+        name: 'run_analyst_actions',
+        description: 'Fetch ranked analyst rating changes and price-target updates (last 24h) for Prophet liquid optionable universe (~50 names: static floor + FMP top-volume top-up). Tier-1 firm actions and large PT moves rank highest. Synchronous, ~30 seconds. Requires FMP_API_KEY env var. Returns JSON array of up to 15 events.',
+        inputSchema: { type: 'object', properties: {} },
+      },
+      {
+        name: 'run_catalyst_news',
+        description: 'Fetch ticker-filtered catalyst news (last 24h) for Prophet liquid optionable universe. Narrow scope: only M&A activity and earnings whispers (preannouncements, guidance moves, profit warnings, beat/miss). Returns up to 3 events, deduped by (ticker, event_type). Synchronous, ~15 seconds. Requires FMP_API_KEY env var.',
+        inputSchema: { type: 'object', properties: {} },
+      },
+      {
         name: 'read_latest_report',
         description: "Read the most recently generated analysis report from data/reports/. Use after background screeners finish, or to load the daily briefing and weekly regime report at the start of each pre-market beat. Use type='market_alert' to read the latest intra-day breaking news alert written by the mid-session scanner.",
         inputSchema: {
@@ -2799,6 +2809,36 @@ Worst Trade: ${stats.worst_result_pct.toFixed(1)}% ($${stats.worst_result_dollar
 
         if (result.error) return { content: [{ type: 'text', text: `Error: ${result.error.message}` }], isError: true };
         return { content: [{ type: 'text', text: result.stdout || result.stderr || 'No earnings found.' }] };
+      }
+
+      case 'run_analyst_actions': {
+        const fmpKey = process.env.FMP_API_KEY;
+        if (!fmpKey) return { content: [{ type: 'text', text: 'Error: FMP_API_KEY environment variable not set.' }], isError: true };
+
+        const result = spawnSync(PYTHON_BIN, [
+          path.join(process.cwd(), '.claude/skills/analyst-actions/scripts/fetch_analyst_actions.py'),
+          '--top-up', '15',
+          '--lookback-hours', '24',
+          '--limit', '15',
+        ], { timeout: 120000, encoding: 'utf-8', env: { ...process.env, FMP_API_KEY: fmpKey } });
+
+        if (result.error) return { content: [{ type: 'text', text: `Error: ${result.error.message}` }], isError: true };
+        return { content: [{ type: 'text', text: result.stdout || result.stderr || '[]' }] };
+      }
+
+      case 'run_catalyst_news': {
+        const fmpKey = process.env.FMP_API_KEY;
+        if (!fmpKey) return { content: [{ type: 'text', text: 'Error: FMP_API_KEY environment variable not set.' }], isError: true };
+
+        const result = spawnSync(PYTHON_BIN, [
+          path.join(process.cwd(), '.claude/skills/catalyst-news/scripts/fetch_catalyst_news.py'),
+          '--top-up', '15',
+          '--lookback-hours', '24',
+          '--limit', '3',
+        ], { timeout: 60000, encoding: 'utf-8', env: { ...process.env, FMP_API_KEY: fmpKey } });
+
+        if (result.error) return { content: [{ type: 'text', text: `Error: ${result.error.message}` }], isError: true };
+        return { content: [{ type: 'text', text: result.stdout || result.stderr || '[]' }] };
       }
 
       case 'read_latest_report': {

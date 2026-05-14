@@ -214,9 +214,17 @@ class FMPClient:
         if cache_key in self.cache:
             return self.cache[cache_key]
 
-        url = f"{self.BASE_URL}/earning_calendar"
         params = {"from": from_date, "to": to_date}
-        data = self._rate_limited_get(url, params)
+        # Stable first (post-Aug-2025 accounts), v3 fallback (legacy).
+        candidates = [
+            ("https://financialmodelingprep.com/stable/earnings-calendar", True),
+            (f"{self.BASE_URL}/earning_calendar", False),
+        ]
+        data = None
+        for url, quiet in candidates:
+            data = self._rate_limited_get(url, params, quiet=quiet)
+            if data:
+                break
         if data:
             self.cache[cache_key] = data
         return data
@@ -231,8 +239,13 @@ class FMPClient:
             Dict mapping symbol -> profile dict (with marketCap, sector, etc.)
         """
         results = {}
+
+        # Try v3 batch first (legacy, faster); fall back to stable per-symbol.
         batch_size = 100
+        v3_batch_works = True
         for i in range(0, len(symbols), batch_size):
+            if not v3_batch_works:
+                break
             batch = symbols[i : i + batch_size]
             batch_str = ",".join(batch)
 
@@ -243,11 +256,35 @@ class FMPClient:
                 continue
 
             url = f"{self.BASE_URL}/profile/{batch_str}"
-            data = self._rate_limited_get(url)
+            data = self._rate_limited_get(url, quiet=True)
             if data:
                 self.cache[cache_key] = data
                 for profile in data:
                     results[profile["symbol"]] = profile
+            else:
+                v3_batch_works = False
+                break
+
+        if v3_batch_works and len(results) >= len(symbols) * 0.5:
+            return results
+
+        # Stable per-symbol fallback for post-Aug-2025 accounts.
+        stable_url = "https://financialmodelingprep.com/stable/profile"
+        for symbol in symbols:
+            if symbol in results:
+                continue
+            cache_key = f"profile_stable_{symbol}"
+            if cache_key in self.cache:
+                cached = self.cache[cache_key]
+                if cached:
+                    results[symbol] = cached
+                continue
+            data = self._rate_limited_get(stable_url, {"symbol": symbol}, quiet=True)
+            if data and isinstance(data, list) and data:
+                self.cache[cache_key] = data[0]
+                results[symbol] = data[0]
+            else:
+                self.cache[cache_key] = None
         return results
 
     def get_historical_prices(self, symbol: str, days: int = 90) -> Optional[dict]:
