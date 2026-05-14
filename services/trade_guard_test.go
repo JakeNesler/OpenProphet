@@ -14,6 +14,14 @@ type stubLister struct {
 	positions []*ManagedPosition
 }
 
+type stubOptionsProvider struct {
+	exposure map[SectorBucket]float64
+}
+
+func (s *stubOptionsProvider) BucketExposureDollars() map[SectorBucket]float64 {
+	return s.exposure
+}
+
 func (s *stubLister) ListManagedPositions(_ string) []*ManagedPosition {
 	return s.positions
 }
@@ -77,6 +85,21 @@ func defaultConfig() TradeGuardConfig {
 		PennyMaxCapitalPct:      0.20,
 		PennyMaxPositionDollars: 500,
 	}
+}
+
+func sectorConfig() TradeGuardConfig {
+	cfg := defaultConfig()
+	cfg.EnableSectorAggregation = true
+	cfg.SectorMaxExposurePct = map[string]float64{
+		"TECH":       0.20,
+		"INDEX_BETA": 0.25,
+		"ENERGY":     0.15,
+		"FINANCIALS": 0.15,
+		"HEALTHCARE": 0.15,
+		"OTHER":      0.15,
+	}
+	cfg.DefaultSectorMaxPct = 0.15
+	return cfg
 }
 
 // --- tests ---
@@ -305,6 +328,134 @@ func TestGuard_PennyCapCapFailsClosedOnFetchError(t *testing.T) {
 	err := g.CheckBuy(context.Background(), AgentPenny, "ABCD", 100)
 	if err == nil {
 		t.Fatal("expected error: penny capital-cap check must fail-closed on fetch error")
+	}
+}
+
+// ── Sector aggregation (Item 1: cross-agent sector & beta-bucket cap) ──
+
+func TestGuard_SectorCap_BlocksOverConcentration(t *testing.T) {
+	// Existing TECH exposure (NVDA + AMD both map to SMH → TECH) at $18K.
+	// Portfolio $100K, TECH cap 20% = $20K. A new $3K NVDA buy pushes TECH to
+	// $21K → must block.
+	lister := &stubLister{
+		positions: []*ManagedPosition{
+			managedPos("NVDA", AgentMain, "ACTIVE", 10000),
+			managedPos("AMD", AgentMain, "ACTIVE", 8000),
+		},
+	}
+	g := NewTradeGuard(lister, &stubTrading{portfolio: 100000, lastEquity: 100000}, sectorConfig())
+	err := g.CheckBuy(context.Background(), AgentMain, "NVDA", 3000)
+	if err == nil {
+		t.Fatal("expected error: TECH sector cap exceeded")
+	}
+}
+
+func TestGuard_SectorCap_AllowsUnderCap(t *testing.T) {
+	// Same TECH positions as the over-concentration test ($18K of $20K cap), but
+	// the new buy is small enough to stay under the $20K cap.
+	lister := &stubLister{
+		positions: []*ManagedPosition{
+			managedPos("NVDA", AgentMain, "ACTIVE", 10000),
+			managedPos("AMD", AgentMain, "ACTIVE", 8000),
+		},
+	}
+	g := NewTradeGuard(lister, &stubTrading{portfolio: 100000, lastEquity: 100000}, sectorConfig())
+	if err := g.CheckBuy(context.Background(), AgentMain, "NVDA", 1500); err != nil {
+		t.Fatalf("unexpected error under sector cap: %v", err)
+	}
+}
+
+func TestGuard_SectorCap_DisabledWhenFlagOff(t *testing.T) {
+	// Same over-cap setup as TestGuard_SectorCap_BlocksOverConcentration, but
+	// EnableSectorAggregation defaults to false → check must be bypassed.
+	cfg := sectorConfig()
+	cfg.EnableSectorAggregation = false
+	lister := &stubLister{
+		positions: []*ManagedPosition{
+			managedPos("NVDA", AgentMain, "ACTIVE", 10000),
+			managedPos("AMD", AgentMain, "ACTIVE", 8000),
+		},
+	}
+	g := NewTradeGuard(lister, &stubTrading{portfolio: 100000, lastEquity: 100000}, cfg)
+	if err := g.CheckBuy(context.Background(), AgentMain, "NVDA", 3000); err != nil {
+		t.Fatalf("flag-off should bypass sector cap, got: %v", err)
+	}
+}
+
+func TestGuard_SectorCap_DefaultBucketForUnmappedSymbol(t *testing.T) {
+	// A symbol absent from etfToBucket and sectorETFMap (e.g. "FOOBAR") must
+	// fall to the OTHER bucket and inherit DefaultSectorMaxPct when OTHER is
+	// not explicitly set in SectorMaxExposurePct.
+	cfg := sectorConfig()
+	delete(cfg.SectorMaxExposurePct, "OTHER") // force fallback path
+	cfg.DefaultSectorMaxPct = 0.15            // $15K cap on $100K portfolio
+	lister := &stubLister{
+		positions: []*ManagedPosition{
+			managedPos("FOOBAR", AgentMain, "ACTIVE", 14000),
+		},
+	}
+	g := NewTradeGuard(lister, &stubTrading{portfolio: 100000, lastEquity: 100000}, cfg)
+	if err := g.CheckBuy(context.Background(), AgentMain, "FOOBAR", 2000); err == nil {
+		t.Fatal("expected error: OTHER bucket exceeds DefaultSectorMaxPct")
+	}
+}
+
+func TestGuard_SectorCap_FailsClosedOnFetchError(t *testing.T) {
+	// Mirrors the penny-cap fail-closed policy: a transient API failure must
+	// NOT silently let a buy bypass the concentration limit.
+	cfg := sectorConfig()
+	cfg.MaxDailyLossPct = 0 // disable daily-loss path so it doesn't short-circuit
+	stub := &stubTrading{getAcctErr: errors.New("alpaca timeout")}
+	g := NewTradeGuard(&stubLister{}, stub, cfg)
+	err := g.CheckBuy(context.Background(), AgentMain, "NVDA", 1000)
+	if err == nil {
+		t.Fatal("expected error: sector-cap check must fail-closed on fetch error")
+	}
+}
+
+func TestGuard_SectorCap_IncludesOptionsProviderContribution(t *testing.T) {
+	// A registered OptionsExposureProvider (Harvest, in production) contributes
+	// $15K to INDEX_BETA. Cap = 25% × $100K = $25K. A new $11K SPY buy pushes
+	// total to $26K and must be blocked.
+	g := NewTradeGuard(&stubLister{}, &stubTrading{portfolio: 100000, lastEquity: 100000}, sectorConfig())
+	g.SetOptionsExposureProvider(&stubOptionsProvider{
+		exposure: map[SectorBucket]float64{"INDEX_BETA": 15000},
+	})
+	if err := g.CheckBuy(context.Background(), AgentMain, "SPY", 11000); err == nil {
+		t.Fatal("expected error: options-provider exposure must count toward INDEX_BETA cap")
+	}
+}
+
+func TestGuard_Status_ReportsSectorExposure(t *testing.T) {
+	// Two managed positions (NVDA → TECH via SMH, XLF → FINANCIALS direct) and
+	// an options-provider INDEX_BETA contribution must all appear in Status().
+	// SectorMaxByBucket reflects per-bucket caps × portfolio value.
+	lister := &stubLister{
+		positions: []*ManagedPosition{
+			managedPos("NVDA", AgentMain, "ACTIVE", 10000),
+			managedPos("XLF", AgentMain, "ACTIVE", 5000),
+		},
+	}
+	g := NewTradeGuard(lister, &stubTrading{portfolio: 100000, lastEquity: 100000}, sectorConfig())
+	g.SetOptionsExposureProvider(&stubOptionsProvider{
+		exposure: map[SectorBucket]float64{"INDEX_BETA": 7500},
+	})
+	status := g.Status(context.Background())
+
+	if got := status.SectorExposure["TECH"]; got != 10000 {
+		t.Errorf("TECH exposure: want $10000, got $%.2f", got)
+	}
+	if got := status.SectorExposure["FINANCIALS"]; got != 5000 {
+		t.Errorf("FINANCIALS exposure: want $5000, got $%.2f", got)
+	}
+	if got := status.SectorExposure["INDEX_BETA"]; got != 7500 {
+		t.Errorf("INDEX_BETA exposure: want $7500, got $%.2f", got)
+	}
+	if got := status.SectorMaxByBucket["TECH"]; got != 20000 {
+		t.Errorf("TECH cap: want $20000, got $%.2f", got)
+	}
+	if got := status.SectorMaxByBucket["INDEX_BETA"]; got != 25000 {
+		t.Errorf("INDEX_BETA cap: want $25000, got $%.2f", got)
 	}
 }
 

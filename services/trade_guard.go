@@ -38,6 +38,51 @@ type TradeGuardConfig struct {
 	// of previous session equity (e.g. 5.0 = block new entries when intraday
 	// loss reaches -5%). Zero or negative disables the check.
 	MaxDailyLossPct float64 `json:"max_daily_loss_pct"`
+
+	// EnableSectorAggregation toggles the cross-agent sector-bucket cap. Flag-gated
+	// so the guard can be deployed in observation-mode (Status() reports buckets)
+	// before enforcement begins.
+	EnableSectorAggregation bool `json:"enable_sector_aggregation"`
+
+	// SectorMaxExposurePct caps the total dollar exposure to each sector bucket
+	// as a fraction of portfolio value (e.g. {"TECH": 0.20}). Buckets not listed
+	// here fall back to DefaultSectorMaxPct.
+	SectorMaxExposurePct map[string]float64 `json:"sector_max_exposure_pct"`
+
+	// DefaultSectorMaxPct is the fallback cap for buckets without an explicit
+	// entry in SectorMaxExposurePct. Zero disables the fallback (those buckets
+	// are uncapped).
+	DefaultSectorMaxPct float64 `json:"default_sector_max_pct"`
+}
+
+// SectorBucket categorizes a symbol's primary factor exposure for cross-agent
+// concentration limits.
+type SectorBucket string
+
+const SectorBucketOther SectorBucket = "OTHER"
+
+// etfToBucket consolidates sector / index ETFs into coarse exposure buckets.
+// A symbol that maps to one of these ETFs via sectorETFMap inherits the bucket;
+// a symbol that IS one of these ETFs uses its direct bucket.
+var etfToBucket = map[string]SectorBucket{
+	"XLK":  "TECH",
+	"SMH":  "TECH",
+	"SOXX": "TECH",
+	"XLF":  "FINANCIALS",
+	"XLE":  "ENERGY",
+	"XLV":  "HEALTHCARE",
+	"XLY":  "CONSUMER_DISCRETIONARY",
+	"XLP":  "STAPLES",
+	"XLI":  "INDUSTRIALS",
+	"XLU":  "UTILITIES",
+	"XLB":  "MATERIALS",
+	"XLRE": "REAL_ESTATE",
+	"XLC":  "COMMUNICATIONS",
+	"SPY":  "INDEX_BETA",
+	"QQQ":  "INDEX_BETA",
+	"IWM":  "INDEX_BETA",
+	"VTI":  "INDEX_BETA",
+	"DIA":  "INDEX_BETA",
 }
 
 // positionLister is the subset of PositionManager needed by the guard.
@@ -45,10 +90,24 @@ type positionLister interface {
 	ListManagedPositions(status string) []*ManagedPosition
 }
 
+// OptionsExposureProvider supplies delta-adjusted options exposure by sector
+// bucket so that options-only services (e.g. Harvest) can contribute to the
+// cross-agent sector concentration limit without their positions appearing
+// in ManagedPositions. Implementations return notional × effective delta —
+// a short SPY put at $50K notional with 0.30 delta proxy contributes
+// {INDEX_BETA: 15000}. Returning nil is equivalent to zero exposure.
+type OptionsExposureProvider interface {
+	BucketExposureDollars() map[SectorBucket]float64
+}
+
 // TradeGuard enforces cross-agent trade rules:
 //   - Symbol non-overlap: a symbol held by one agent cannot be traded by the other.
+//   - Daily-loss circuit: intraday equity drop ≥ MaxDailyLossPct blocks new buys.
 //   - Penny per-position cap: each penny buy is capped at PennyMaxPositionDollars.
 //   - Penny portfolio cap: total penny exposure ≤ PennyMaxCapitalPct × portfolio value.
+//   - Sector concentration cap (flag-gated): aggregate dollar exposure to each
+//     SectorBucket — summed across all agents' managed positions plus any
+//     registered OptionsExposureProvider — is capped per bucket.
 //
 // Managed positions are the authoritative ownership source; raw buy/sell orders are
 // tracked in-memory and cleared on sell (lost across restarts).
@@ -56,6 +115,10 @@ type TradeGuard struct {
 	positions      positionLister
 	tradingService interfaces.TradingService
 	cfg            TradeGuardConfig
+
+	// optionsProvider is optional. When non-nil, its per-bucket exposure is
+	// added to the sum computed from ManagedPositions during sector-cap checks.
+	optionsProvider OptionsExposureProvider
 
 	// rawSymbols tracks symbols acquired via raw (non-managed) buy orders.
 	rawSymbols map[AgentSource]map[string]struct{}
@@ -124,6 +187,13 @@ func (g *TradeGuard) CheckBuy(ctx context.Context, agent AgentSource, symbol str
 		return fmt.Errorf("guard: %s agent holds %s — %s agent cannot open a position in the same symbol", opponent, symbol, agent)
 	}
 
+	if g.cfg.EnableSectorAggregation && allocationDollars > 0 {
+		sectorAcct, sectorErr := getAcct()
+		if err := g.checkSectorCap(sectorAcct, sectorErr, symbol, allocationDollars); err != nil {
+			return err
+		}
+	}
+
 	if agent == AgentPenny {
 		if allocationDollars > 0 && allocationDollars > g.cfg.PennyMaxPositionDollars {
 			return fmt.Errorf("guard: penny position $%.2f exceeds per-position cap of $%.2f", allocationDollars, g.cfg.PennyMaxPositionDollars)
@@ -153,6 +223,15 @@ func (g *TradeGuard) CheckSell(_ context.Context, agent AgentSource, symbol stri
 	return nil
 }
 
+// SetOptionsExposureProvider registers a provider for options-based exposure
+// (e.g. Harvest's short-put book). Pass nil to clear. Safe to call at any time;
+// the provider is read only during CheckBuy and Status().
+func (g *TradeGuard) SetOptionsExposureProvider(p OptionsExposureProvider) {
+	g.mu.Lock()
+	g.optionsProvider = p
+	g.mu.Unlock()
+}
+
 // RecordRawBuy records that an agent acquired a symbol via a raw (non-managed) order.
 func (g *TradeGuard) RecordRawBuy(agent AgentSource, symbol string) {
 	if agent == "" {
@@ -180,6 +259,16 @@ type GuardStatus struct {
 	PennySymbols    []string         `json:"penny_symbols"`
 	PennyExposure   float64          `json:"penny_exposure_dollars"`
 	PennyCapitalMax float64          `json:"penny_capital_max_dollars"`
+
+	// SectorExposure reports per-bucket dollar exposure (managed positions +
+	// any registered OptionsExposureProvider). Useful for observation-mode
+	// before EnableSectorAggregation is turned on.
+	SectorExposure map[string]float64 `json:"sector_exposure_dollars,omitempty"`
+
+	// SectorMaxByBucket reports the configured dollar cap for each bucket
+	// (portfolio value × per-bucket pct, or × DefaultSectorMaxPct). Only
+	// populated for buckets with an active cap.
+	SectorMaxByBucket map[string]float64 `json:"sector_max_by_bucket_dollars,omitempty"`
 }
 
 // Status returns a snapshot of current guard state.
@@ -191,20 +280,51 @@ func (g *TradeGuard) Status(ctx context.Context) GuardStatus {
 	pennyList := setToSlice(pennySet)
 
 	exposure := g.currentPennyExposure()
-	maxDollars := 0.0
+	portfolioValue := 0.0
 	if g.tradingService != nil {
 		if acct, err := g.tradingService.GetAccount(ctx); err == nil {
-			maxDollars = acct.PortfolioValue * g.cfg.PennyMaxCapitalPct
+			portfolioValue = acct.PortfolioValue
 		}
 	}
+	maxDollars := portfolioValue * g.cfg.PennyMaxCapitalPct
+
+	sectorExposure := make(map[string]float64)
+	for bucket, dollars := range g.currentSectorExposure() {
+		sectorExposure[string(bucket)] = dollars
+	}
+	sectorMax := g.sectorMaxByBucket(portfolioValue, sectorExposure)
 
 	return GuardStatus{
-		Config:          g.cfg,
-		MainSymbols:     mainList,
-		PennySymbols:    pennyList,
-		PennyExposure:   exposure,
-		PennyCapitalMax: maxDollars,
+		Config:            g.cfg,
+		MainSymbols:       mainList,
+		PennySymbols:      pennyList,
+		PennyExposure:     exposure,
+		PennyCapitalMax:   maxDollars,
+		SectorExposure:    sectorExposure,
+		SectorMaxByBucket: sectorMax,
 	}
+}
+
+// sectorMaxByBucket returns the dollar cap for each bucket that either has
+// observed exposure or an explicit per-bucket override. Buckets with neither
+// are omitted to keep the payload compact.
+func (g *TradeGuard) sectorMaxByBucket(portfolioValue float64, exposure map[string]float64) map[string]float64 {
+	out := make(map[string]float64)
+	if portfolioValue <= 0 {
+		return out
+	}
+	for bucket := range exposure {
+		if cap, ok := g.sectorCapFor(SectorBucket(bucket), portfolioValue); ok {
+			out[bucket] = cap
+		}
+	}
+	for bucket, pct := range g.cfg.SectorMaxExposurePct {
+		if _, alreadySet := out[bucket]; alreadySet || pct <= 0 {
+			continue
+		}
+		out[bucket] = portfolioValue * pct
+	}
+	return out
 }
 
 // --- internal helpers ---
@@ -280,6 +400,87 @@ func (g *TradeGuard) checkPennyCapCap(acct *interfaces.Account, acctErr error, a
 			"guard: penny capital cap — current $%.2f + new $%.2f exceeds %.0f%% cap ($%.2f of $%.2f portfolio)",
 			exposure, additionalDollars,
 			g.cfg.PennyMaxCapitalPct*100, maxDollars, acct.PortfolioValue,
+		)
+	}
+	return nil
+}
+
+// bucketFor returns the sector bucket for a symbol. Lookup order:
+//  1. etfToBucket directly (the symbol IS a sector/index ETF).
+//  2. sectorETFMap → etfToBucket (the symbol is an equity mapped to an ETF).
+//  3. SectorBucketOther otherwise.
+func (g *TradeGuard) bucketFor(symbol string) SectorBucket {
+	if b, ok := etfToBucket[symbol]; ok {
+		return b
+	}
+	if etf, ok := sectorETFMap[symbol]; ok {
+		if b, ok := etfToBucket[etf]; ok {
+			return b
+		}
+	}
+	return SectorBucketOther
+}
+
+// currentSectorExposure sums managed-position AllocationDollars per sector
+// bucket across all agents, plus any contribution from a registered
+// OptionsExposureProvider. Raw (non-managed) orders are intentionally not
+// counted — they have no allocation-dollar value to aggregate.
+func (g *TradeGuard) currentSectorExposure() map[SectorBucket]float64 {
+	out := make(map[SectorBucket]float64)
+	if g.positions != nil {
+		for _, p := range g.positions.ListManagedPositions("") {
+			if !isActivePosition(p) {
+				continue
+			}
+			out[g.bucketFor(p.Symbol)] += p.AllocationDollars
+		}
+	}
+	g.mu.RLock()
+	provider := g.optionsProvider
+	g.mu.RUnlock()
+	if provider != nil {
+		for bucket, dollars := range provider.BucketExposureDollars() {
+			out[bucket] += dollars
+		}
+	}
+	return out
+}
+
+// sectorCapFor returns the dollar cap for a bucket given a portfolio value.
+// Bucket-specific override wins; otherwise DefaultSectorMaxPct is used.
+// Returns ok=false when neither is configured (bucket is uncapped).
+func (g *TradeGuard) sectorCapFor(bucket SectorBucket, portfolioValue float64) (float64, bool) {
+	if pct, found := g.cfg.SectorMaxExposurePct[string(bucket)]; found && pct > 0 {
+		return portfolioValue * pct, true
+	}
+	if g.cfg.DefaultSectorMaxPct > 0 {
+		return portfolioValue * g.cfg.DefaultSectorMaxPct, true
+	}
+	return 0, false
+}
+
+// checkSectorCap enforces the cross-agent sector concentration cap.
+//   - acctErr != nil  → fail-closed (matches penny-cap policy: a flaky API
+//     call must not silently bypass a concentration limit).
+//   - acct == nil     → no-op (trading service unavailable, e.g. tests).
+//   - PortfolioValue ≤ 0 → no-op (uninitialized/new account, fail-open).
+func (g *TradeGuard) checkSectorCap(acct *interfaces.Account, acctErr error, symbol string, additionalDollars float64) error {
+	if acctErr != nil {
+		return fmt.Errorf("guard: failed to fetch account for sector cap check: %w", acctErr)
+	}
+	if acct == nil || acct.PortfolioValue <= 0 {
+		return nil
+	}
+	bucket := g.bucketFor(symbol)
+	cap, ok := g.sectorCapFor(bucket, acct.PortfolioValue)
+	if !ok {
+		return nil
+	}
+	projected := g.currentSectorExposure()[bucket] + additionalDollars
+	if projected > cap {
+		return fmt.Errorf(
+			"guard: sector cap — %s bucket would reach $%.2f including new $%.2f, exceeds $%.2f cap on $%.2f portfolio",
+			bucket, projected, additionalDollars, cap, acct.PortfolioValue,
 		)
 	}
 	return nil

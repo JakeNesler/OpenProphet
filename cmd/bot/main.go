@@ -131,6 +131,24 @@ func main() {
 	positionManager := services.NewPositionManager(tradingService, dataService, storageService)
 	positionController := controllers.NewPositionManagementController(positionManager)
 
+	// Cross-agent sector concentration caps. Values are fractions of portfolio value.
+	// Buckets not listed here fall back to cfg.SectorDefaultMaxPct.
+	sectorCaps := map[string]float64{
+		"TECH":                   0.20,
+		"INDEX_BETA":             0.25,
+		"ENERGY":                 0.15,
+		"FINANCIALS":             0.15,
+		"HEALTHCARE":             0.15,
+		"CONSUMER_DISCRETIONARY": 0.15,
+		"STAPLES":                0.15,
+		"INDUSTRIALS":            0.15,
+		"UTILITIES":              0.15,
+		"MATERIALS":              0.15,
+		"REAL_ESTATE":            0.15,
+		"COMMUNICATIONS":         0.15,
+		"OTHER":                  0.15,
+	}
+
 	// Create trade guard and wire into both controllers
 	tradeGuard := services.NewTradeGuard(
 		positionManager,
@@ -139,6 +157,9 @@ func main() {
 			PennyMaxCapitalPct:      cfg.PennyMaxCapitalPct,
 			PennyMaxPositionDollars: cfg.PennyMaxPositionDollars,
 			MaxDailyLossPct:         cfg.MaxDailyLossPct,
+			EnableSectorAggregation: cfg.EnableSectorAggregation,
+			SectorMaxExposurePct:    sectorCaps,
+			DefaultSectorMaxPct:     cfg.SectorDefaultMaxPct,
 		},
 	)
 	positionManager.SetGuard(tradeGuard)
@@ -149,6 +170,8 @@ func main() {
 		"penny_max_capital_pct":      cfg.PennyMaxCapitalPct,
 		"penny_max_position_dollars": cfg.PennyMaxPositionDollars,
 		"max_daily_loss_pct":         cfg.MaxDailyLossPct,
+		"sector_aggregation_enabled": cfg.EnableSectorAggregation,
+		"sector_default_max_pct":     cfg.SectorDefaultMaxPct,
 	}).Info("Trade guard initialized")
 
 	// Create activity logger

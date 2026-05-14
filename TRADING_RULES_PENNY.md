@@ -140,6 +140,19 @@ session-scoped, not persistent across days.
 Manual override: operator can reset mid-session via dashboard if conditions
 warrant. Manual reset logs operator identity and timestamp.
 
+## Cross-Agent Sector Cap
+
+TradeGuard now also enforces a cross-agent sector-bucket cap. A penny buy that would push the OTHER bucket (default for unmapped tickers) — or any specific bucket like TECH if the penny ticker maps there — above its cap will be rejected with `guard: sector cap — {BUCKET} bucket would reach $X ...`.
+
+This is in addition to the per-position cap and the penny capital cap. Treat the rejection like the other guard rejections:
+  - Cancel any associated bracket order intent
+  - Do not retry — pick a different candidate from a different bucket
+  - Log the rejection in your heartbeat summary
+
+Flag-gated rollout: enforcement defaults off; the failure mode above only fires once `ENABLE_SECTOR_AGGREGATION=true`. Bucket exposures are still emitted on the operator's guard-status endpoint for observation while the flag is off.
+
+---
+
 ## Glossary
 
   Composite score:        Sum of effective signal scores; max 100

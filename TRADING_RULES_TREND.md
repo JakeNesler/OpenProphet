@@ -255,6 +255,19 @@ To check this on each heartbeat, call `get_segment_pnl()` (no args needed — st
 
 ---
 
+## Cross-Agent Sector Cap
+
+TrendProphet's universe (TLT, GLD, USO, DBC, UUP, EEM) sits mostly outside the equity sector buckets, but two cross-cutting concerns apply:
+
+- **INDEX_BETA bucket:** Harvest's short-put book contributes delta-adjusted notional to INDEX_BETA. TrendProphet does not currently trade SPY/QQQ/IWM, so this rarely binds on entry, but the bucket cap is shared.
+- **OTHER bucket:** Tickers in the trend universe that don't map to a known ETF (e.g. DBC) fall to OTHER, which has a 15% default cap. With max 5 trend positions × ~3% sizing each, the trend segment is already structurally under that cap.
+
+If a buy is rejected with `guard: sector cap — {BUCKET} bucket would reach $X ...`, treat it as a hard skip for that heartbeat. Trend entries do not retry within the same beat — log the rejection in the heartbeat summary and move on.
+
+Flag-gated rollout: enforcement defaults off; the failure mode above only fires once `ENABLE_SECTOR_AGGREGATION=true`.
+
+---
+
 ## Heartbeat Schedule
 
 TrendProphet runs **once per trading day**, at **5:00 PM ET** (1 hour after market close).

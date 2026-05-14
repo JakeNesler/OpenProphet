@@ -326,6 +326,21 @@ Agents are **advisory, not required**. Use them when you want:
 
 ---
 
+## Cross-Agent Sector Cap
+
+**Rule:** Respect the TradeGuard sector-bucket cap (cross-agent).
+
+The guard sums dollar exposure to each sector bucket (TECH, INDEX_BETA, FINANCIALS, ENERGY, HEALTHCARE, etc.) **across all four agents' positions** and rejects a buy that would push any bucket above its per-bucket cap (TECH 20%, INDEX_BETA 25%, others 15% default).
+
+If you see `guard: sector cap — {BUCKET} bucket would reach $X ...`:
+- The buy was blocked because Prophet + PennyProphet + Harvest + TrendProphet combined hold too much in that bucket already. This is intentional — it is *not* a transient API error.
+- Do not retry the same trade. Pick a setup in a different bucket, or wait for an existing bucket position to close.
+- The operator can inspect live bucket exposure at `GET /api/v1/guard/status` (`sector_exposure_dollars`, `sector_max_by_bucket_dollars`). An MCP tool surfacing this to the agent directly is a planned follow-up.
+
+Flag-gated rollout: enforcement defaults off (`ENABLE_SECTOR_AGGREGATION=false`). While off, the rejection above does not fire even when a bucket is technically over; bucket exposure is still computed and emitted in the guard status payload for observation.
+
+---
+
 ## Portfolio Construction
 
 **Rule:** Maintain 50-70% cash at all times

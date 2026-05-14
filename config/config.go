@@ -28,6 +28,9 @@ type Config struct {
 	PennyMaxCapitalPct      float64 // fraction of portfolio, e.g. 0.20
 	PennyMaxPositionDollars float64 // max dollars per single penny trade, e.g. 500
 	MaxDailyLossPct         float64 // daily loss circuit breaker as positive percent, e.g. 5.0; 0 disables
+
+	EnableSectorAggregation bool    // turn on cross-agent sector concentration cap
+	SectorDefaultMaxPct     float64 // fallback cap for buckets without an explicit override
 }
 
 var AppConfig *Config
@@ -54,6 +57,11 @@ func Load() error {
 		PennyMaxCapitalPct:      parseFloat(getEnvOrDefault("PENNY_MAX_CAPITAL_PCT", "0.20")),
 		PennyMaxPositionDollars: parseFloat(getEnvOrDefault("PENNY_MAX_POSITION_DOLLARS", "500")),
 		MaxDailyLossPct:         parseFloat(getEnvOrDefault("MAX_DAILY_LOSS_PCT", "5")),
+
+		// Flag-gated rollout: defaults to false. Set ENABLE_SECTOR_AGGREGATION=true
+		// after a 2-week observation window where Status() reports real bucket exposures.
+		EnableSectorAggregation: getEnvOrDefault("ENABLE_SECTOR_AGGREGATION", "false") == "true",
+		SectorDefaultMaxPct:     parseFloat(getEnvOrDefault("SECTOR_DEFAULT_MAX_PCT", "0.15")),
 
 		OperatorEmail: os.Getenv("OPERATOR_EMAIL"),
 	}
