@@ -21,9 +21,28 @@ import json
 import os
 import sys
 from datetime import datetime
+from pathlib import Path
 from typing import Optional
 
 import requests
+
+
+def _load_dotenv_from_ancestors(key: str) -> Optional[str]:
+    """Walk up from this script's directory looking for a .env file and return key's value."""
+    for d in (Path(__file__).resolve(), *Path(__file__).resolve().parents):
+        env_path = d / ".env" if d.is_dir() else d.parent / ".env"
+        if env_path.is_file():
+            try:
+                for line in env_path.read_text(encoding="utf-8").splitlines():
+                    line = line.strip()
+                    if not line or line.startswith("#") or "=" not in line:
+                        continue
+                    k, _, v = line.partition("=")
+                    if k.strip() == key:
+                        return v.strip().strip('"').strip("'")
+            except OSError:
+                pass
+    return None
 
 
 class FMPEarningsCalendar:
@@ -310,6 +329,12 @@ def get_api_key() -> Optional[str]:
     api_key = os.environ.get("FMP_API_KEY")
     if api_key:
         print("✓ API key loaded from FMP_API_KEY environment variable", file=sys.stderr)
+        return api_key
+
+    # Method 3: Project .env file (walked up from this script)
+    api_key = _load_dotenv_from_ancestors("FMP_API_KEY")
+    if api_key:
+        print("✓ API key loaded from project .env file", file=sys.stderr)
         return api_key
 
     # Not found

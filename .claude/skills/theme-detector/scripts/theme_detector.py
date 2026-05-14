@@ -20,7 +20,26 @@ import os
 import sys
 import time
 from datetime import datetime
+from pathlib import Path
 from typing import Optional
+
+
+def _load_dotenv_from_ancestors(key: str) -> Optional[str]:
+    """Walk up from this script's directory looking for a .env file and return key's value."""
+    for d in (Path(__file__).resolve(), *Path(__file__).resolve().parents):
+        env_path = d / ".env" if d.is_dir() else d.parent / ".env"
+        if env_path.is_file():
+            try:
+                for line in env_path.read_text(encoding="utf-8").splitlines():
+                    line = line.strip()
+                    if not line or line.startswith("#") or "=" not in line:
+                        continue
+                    k, _, v = line.partition("=")
+                    if k.strip() == key:
+                        return v.strip().strip('"').strip("'")
+            except OSError:
+                pass
+    return None
 
 # Ensure scripts directory is on the path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -232,13 +251,13 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--fmp-api-key",
-        default=os.environ.get("FMP_API_KEY"),
-        help="Financial Modeling Prep API key (env: FMP_API_KEY)",
+        default=os.environ.get("FMP_API_KEY") or _load_dotenv_from_ancestors("FMP_API_KEY"),
+        help="Financial Modeling Prep API key (env: FMP_API_KEY, or project .env)",
     )
     parser.add_argument(
         "--finviz-api-key",
-        default=os.environ.get("FINVIZ_API_KEY"),
-        help="FINVIZ Elite API key (env: FINVIZ_API_KEY)",
+        default=os.environ.get("FINVIZ_API_KEY") or _load_dotenv_from_ancestors("FINVIZ_API_KEY"),
+        help="FINVIZ Elite API key (env: FINVIZ_API_KEY, or project .env)",
     )
     parser.add_argument(
         "--finviz-mode",

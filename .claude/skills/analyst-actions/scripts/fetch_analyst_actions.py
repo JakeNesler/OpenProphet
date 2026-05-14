@@ -28,7 +28,7 @@ from typing import Optional
 SCRIPTS_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPTS_DIR))
 
-from fmp_client import FMPClient  # noqa: E402
+from fmp_client import FMPClient, _load_dotenv_from_ancestors  # noqa: E402
 from universe_builder import DEFAULT_STATIC_PATH, build_universe  # noqa: E402
 
 
@@ -220,7 +220,7 @@ def main() -> int:
     parser.add_argument("--limit", type=int, default=15)
     args = parser.parse_args()
 
-    if not os.getenv("FMP_API_KEY"):
+    if not (os.getenv("FMP_API_KEY") or _load_dotenv_from_ancestors("FMP_API_KEY")):
         print("WARNING: FMP_API_KEY not set; emitting empty list", file=sys.stderr)
         json.dump([], sys.stdout)
         sys.stdout.write("\n")
