@@ -374,4 +374,72 @@ Concerns surfaced while implementing Item 1. Tracked here for Items 2 and 3 to c
 ### Cross-cutting
 9. **No integration testing plan for Item 2's Python→JSON→Go→MCP→agent chain.** Unit tests are specced for the Go service. An end-to-end smoke test that writes a fixture `regime_gate.json`, starts the service, has an agent read it via the MCP tool, and verifies the sizing multiplier propagates — should be added to Item 2's test plan.
 
+---
+
+## Implementation log (2026-05-14)
+
+### Item 1 — ✅ Complete
+Shipped in commits `066a297` (initial) + `4504e5e` (expanded bucket map and plan revisions). PR #16.
+
+### Item 2 — ✅ Complete
+Shipped across five PRs. Plan's "single commit per item" intention was preserved by squashing each follow-up into one commit; the split was driven by the natural Python/Go/JS/Markdown layer boundaries.
+
+| # | PR | What | Branch |
+|---|---|---|---|
+| 2-go | #17 | RegimeGateService + flag-gated config | `wire-regime-gate-service` |
+| 2-py | #18 | `compute_daily_regime_score.py` writer + fixture tests | `compute-daily-regime-score` |
+| 2-mcp | #19 | `get_regime_gate_status` + `get_guard_status` MCP tools (also closes the Item 1 deferred MCP gap) | `mcp-tools-regime-and-guard` |
+| 2-preflight | #20 | `regimeGateBlockSkipIfNoPositions` helper + scheduler `regime_gate_compute` job at 5:50 AM ET | `regime-gate-preflight-and-scheduler` |
+| 2-rules | #21 | Regime Gate section in all four TRADING_RULES_*.md | `regime-gate-rules-updates` |
+
+Material deviations from the original spec:
+
+- **Formula polarity correction.** Plan formula was `0.35×breadth + 0.30×macro + 0.20×(100-top_risk) + 0.15×(100-bubble)`. macro-regime-detector's `composite_score` is actually a transition-risk score (high = unstable), not a health score — so it gets the same inversion as top_risk and bubble. Implemented as `0.35×breadth + 0.30×(100-macro) + 0.20×(100-top_risk) + 0.15×(100-bubble)`.
+- **Flag-gated rollout added.** Plan went straight from "no agent reads regime" to "all four agents multiply sizing." Mirrors Item 1's pattern instead: `ENABLE_REGIME_GATE=false` default, service still loads + reports tier for observation, sizing/block stay neutral until flag flips.
+- **A-grade filter dropped.** Plan said DEFENSIVE tier permits "only A-grade setups." TRADING_RULES_* don't define grades, so DEFENSIVE is now a pure 0.5× sizing throttle with no quality gate.
+- **Dual-layer fail policy.** Preflight fails OPEN on regime errors (run the LLM); rules fail CLOSED (LLM does not open new entries when `get_regime_gate_status` returns an error or tier=UNKNOWN). Codified in `memory/architectural-patterns.md`.
+- **Harvest sizing carve-out.** Per plan revision #4, Harvest honors `block_new_entries` only and ignores `sizing_multiplier` — condor sizing is already small per trade.
+- **Upstream-skill dependency surfaced.** The four upstream skills (breadth, macro, top, bubble) are still invoked manually, not scheduled. The Python writer fail-softs to neutral 50 for absent inputs. To get useful regime data during the calibration window, the operator must run the four skills daily by hand, OR add them to `daily_briefing` (separate cross-cutting task — not part of Item 2).
+
+Item 1 deferred items resolved:
+- **MCP tool for guard status** — shipped as part of follow-up #2 (`get_guard_status`).
+- **HarvestService implementing `OptionsExposureProvider`** — still deferred; the interface exists and is unit-tested.
+
+### Item 2 prerequisites resolved for Item 3
+The two open Item 3 concerns from the post-Item-1 revisions:
+
+- **RED tier threshold:** Item 2 is the canonical source — RED = score < 20. When Item 3 ships, `TRADING_RULES_REVERBERATE.md` should explicitly inherit this rather than redefining at 15.
+- **MA200 wording:** the original "price ≤ MA200 ± 5%" should read "price within ±5% of MA200 (either side)" — the struct defaults `MinDistFromMA200Pct: -0.05` and `MaxDistFromMA200Pct: 0.05` make this clear. Update Item 3's body when implementing.
+
+---
+
+## Operational rollout — flipping the flags after calibration
+
+Both Items 1 and 2 ship with enforcement OFF. The 2-week observation window validates calibration before enforcement bites.
+
+### Pre-flip checklist for `ENABLE_SECTOR_AGGREGATION`
+
+Read `/api/v1/guard/status` daily for 2 weeks across the four agents' shared paper account. The `sector_exposure_dollars` block reports per-bucket dollar exposure regardless of flag state. Look for:
+
+1. **Caps are reachable.** If TECH never exceeds 8% of portfolio over 10+ trading days, the 20% cap does nothing — consider tightening.
+2. **Caps don't routinely bind.** If TECH is at 19% on most days, the 20% cap will reject legitimate trades the moment the flag flips. Loosen, or split TECH into sub-buckets.
+3. **OTHER bucket isn't a dumping ground.** If many of Prophet's or Penny's trades resolve to OTHER, the `tickerBucket` map in `services/trade_guard.go` needs expansion before flipping.
+4. **INDEX_BETA stays under 25%.** Harvest's contribution depends on `OptionsExposureProvider` — currently deferred, so INDEX_BETA may read low. Flag this for the deferred Harvest wiring.
+
+To flip: add `ENABLE_SECTOR_AGGREGATION=true` to `.env` and restart the Go bot. The guard rejection messages (`guard: sector cap — {BUCKET} bucket would reach $X ...`) will start firing immediately.
+
+### Pre-flip checklist for `ENABLE_REGIME_GATE`
+
+Requires the four upstream skills to be running daily (otherwise observation is meaningless — score will be a constant 50). Read `data/reports/regime_gate.json` daily for 2 weeks. Look for:
+
+1. **Tier matches operator intuition.** If the score reports GREEN on a day SPY drops 2% and VIX spikes, the formula weights are off. Adjust in `scripts/compute_daily_regime_score.py`.
+2. **Score doesn't whipsaw.** Day-to-day swings of >20 points are a sign of an upstream skill flapping or a weighting issue. Investigate before flipping.
+3. **Tier band distribution looks right.** Two weeks of mostly-NORMAL with occasional DEFENSIVE = working as intended. Two weeks of constant RED = formula is wrong or one upstream skill is broken.
+4. **Sizing math is acceptable.** Walk through `sizing_multiplier × your-current-typical-trade-size` for each tier — does the DEFENSIVE half-size make sense given your conviction patterns?
+
+To flip: add `ENABLE_REGIME_GATE=true` to `.env` and restart the Go bot. Sizing multiplier and block flag will start affecting agents on the next heartbeat.
+
+### Flip order
+Item 1's enforcement can flip first or second — the two are independent. Plan recommendation is Item 1 first (smaller behavioral surface, easier to reason about rejections) and Item 2 a few days later once Item 1's enforcement looks calibrated.
+
 *End of plan.*
