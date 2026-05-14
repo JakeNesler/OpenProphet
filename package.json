@@ -10,7 +10,7 @@
   "scripts": {
     "start": "node mcp-server.js",
     "agent": "node agent/server.js",
-    "test": "node --test agent/**/*.test.mjs"
+    "test": "node --test agent/**/*.test.mjs mcp-tools/**/*.test.mjs"
   },
   "repository": {
     "type": "git",

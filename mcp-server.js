@@ -15,6 +15,7 @@ import path from 'path';
 const PYTHON_BIN = process.platform === 'win32' ? 'python' : 'python3';
 const REPORTS_DIR = path.join(process.cwd(), 'data', 'reports');
 import { storeTrade, findSimilarTrades, getTradeStats, getEmbeddingCount } from './vectorDB.js';
+import { regimeAndGuardTools, handleRegimeAndGuardTool } from './mcp-tools/regime-and-guard.mjs';
 
 // Configuration
 const TRADING_BOT_URL = process.env.TRADING_BOT_URL || 'http://localhost:4534';
@@ -1444,6 +1445,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           properties: {},
         },
       },
+      ...regimeAndGuardTools,
     ];
 
   const tools = TOOL_ALLOWLIST.size > 0
@@ -1533,6 +1535,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   try {
     // Enforce permissions before executing any tool
     await enforcePermissions(name, args);
+
+    // Modular tool handlers — dispatch returns null when the tool isn't owned
+    // by the module, so we fall through to the switch below for everything else.
+    const regimeAndGuardResult = await handleRegimeAndGuardTool(name, args, callTradingBot);
+    if (regimeAndGuardResult) return regimeAndGuardResult;
 
     switch (name) {
       case 'get_account': {
