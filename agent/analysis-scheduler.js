@@ -35,9 +35,45 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = path.join(__dirname, '..');
 const OPENCODE_BIN = process.platform === 'win32' ? 'cmd.exe' : 'opencode';
 const OPENCODE_WIN_PREFIX = process.platform === 'win32' ? ['/c', 'opencode.cmd'] : [];
+const PYTHON_BIN = process.platform === 'win32' ? 'python' : 'python3';
 const STATE_FILE = path.join(PROJECT_ROOT, 'data', 'scheduler-state.json');
 const SANDBOXES_DIR = path.join(PROJECT_ROOT, 'data', 'sandboxes');
 const REPORTS_DIR = path.join(PROJECT_ROOT, 'data', 'reports');
+const REGIME_COMPUTE_SCRIPT = path.join(PROJECT_ROOT, 'scripts', 'compute_daily_regime_score.py');
+const REGIME_GATE_OUTPUT = path.join(REPORTS_DIR, 'regime_gate.json');
+
+// Filename-prefix → CLI flag mapping for compute_daily_regime_score.py inputs.
+// The script accepts each flag as optional and fail-softs missing inputs to a
+// neutral 50, so the scheduler just maps available files; it does not error
+// on absence.
+const REGIME_INPUT_PREFIXES = [
+  { prefix: 'breadth_', flag: '--breadth' },
+  { prefix: 'macro_regime_', flag: '--macro' },
+  { prefix: 'market_top_', flag: '--top' },
+  { prefix: 'bubble_', flag: '--bubble' },
+];
+
+/**
+ * Build the spawn argv for the daily regime-gate compute job. Pure function:
+ * given a list of filenames in `reportsDir`, picks the lexicographically
+ * latest match for each upstream skill prefix (which matches chronological
+ * order for the timestamped filenames the skills emit) and constructs the
+ * Python CLI invocation. Exported for tests.
+ */
+export function buildRegimeComputeArgv(reportsDir, scriptPath, outputPath, fileNames) {
+  const argv = [scriptPath];
+  for (const { prefix, flag } of REGIME_INPUT_PREFIXES) {
+    const matches = fileNames.filter((n) => n.startsWith(prefix) && n.endsWith('.json'));
+    if (matches.length === 0) continue;
+    // Lexicographic sort is intentional — the upstream skills' filenames embed
+    // ISO-formatted dates / timestamps, so sort order = chronological order.
+    matches.sort();
+    const latest = matches[matches.length - 1];
+    argv.push(flag, path.join(reportsDir, latest));
+  }
+  argv.push('--output', outputPath);
+  return argv;
+}
 
 export class AnalysisScheduler extends EventEmitter {
   constructor(options = {}) {
@@ -68,6 +104,7 @@ export class AnalysisScheduler extends EventEmitter {
     this._lastPennyPostmortemDate = null;
     this._lastHarvestParamReviewMonth = null;   // YYYY-MM
     this._lastTrendParamReviewQuarter = null;   // YYYY-Q
+    this._lastRegimeGateDate = null;            // YYYY-MM-DD (daily regime gate compute)
   }
 
   async start() {
@@ -103,6 +140,7 @@ export class AnalysisScheduler extends EventEmitter {
       lastPennyPostmortemDate: this._lastPennyPostmortemDate,
       lastHarvestParamReviewMonth: this._lastHarvestParamReviewMonth,
       lastTrendParamReviewQuarter: this._lastTrendParamReviewQuarter,
+      lastRegimeGateDate: this._lastRegimeGateDate,
     };
   }
 
@@ -113,6 +151,7 @@ export class AnalysisScheduler extends EventEmitter {
       'review_performance', 'postmortem', 'adapt_strategy',
       'review_performance_penny', 'postmortem_penny', 'adapt_strategy_penny',
       'harvest_parameter_review', 'trend_parameter_review',
+      'regime_gate_compute',
     ];
     if (!validJobs.includes(jobName)) {
       return { error: `Unknown job: ${jobName}. Valid: ${validJobs.join(', ')}` };
@@ -170,6 +209,10 @@ export class AnalysisScheduler extends EventEmitter {
           changeNoun: 'parameter',
           guardNote: 'If the Step 3 sample-size guard fires, exit with the INSUFFICIENT_SAMPLE block as instructed and do NOT edit any file. If Step 7 structural escalation fires, write STRUCTURAL_REVIEW_NEEDED.md and do NOT edit TRADING_RULES_HARVEST.md.',
         }));
+        await this._saveState();
+      } else if (jobName === 'regime_gate_compute') {
+        this._lastRegimeGateDate = isoDate;
+        await this._runRegimeGateCompute(isoDate);
         await this._saveState();
       } else if (jobName === 'trend_parameter_review') {
         this._lastTrendParamReviewQuarter = this._getQuarter(isoDate);
@@ -527,6 +570,7 @@ If significance score >= 7: write the file, then output: SCAN_ALERT: <your alert
       this._lastPennyPostmortemDate = s.lastPennyPostmortemDate || null;
       this._lastHarvestParamReviewMonth = s.lastHarvestParamReviewMonth || null;
       this._lastTrendParamReviewQuarter = s.lastTrendParamReviewQuarter || null;
+      this._lastRegimeGateDate = s.lastRegimeGateDate || null;
       const today = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
       const persisted = s.firedAlertFingerprints || {};
       // Only restore today's fingerprints — older dates are irrelevant
@@ -552,6 +596,7 @@ If significance score >= 7: write the file, then output: SCAN_ALERT: <your alert
         lastPennyPostmortemDate: this._lastPennyPostmortemDate,
         lastHarvestParamReviewMonth: this._lastHarvestParamReviewMonth,
         lastTrendParamReviewQuarter: this._lastTrendParamReviewQuarter,
+        lastRegimeGateDate: this._lastRegimeGateDate,
         firedAlertFingerprints,
       }, null, 2), 'utf-8');
     } catch {}
@@ -693,6 +738,14 @@ If significance score >= 7: write the file, then output: SCAN_ALERT: <your alert
     const currentQuarter = this._getQuarter(isoDate);
     const currentWeek = this._getISOWeek(isoDate);
 
+    // Daily regime-gate compute. Runs 10 min before daily_briefing so the
+    // briefing can reference a fresh regime_gate.json. The script fails
+    // soft on missing upstream inputs (writes neutral 50), so this is safe
+    // even when the four upstream skills haven't run yet.
+    if (isWeekday && hour === 5 && minute === 50 && this._lastRegimeGateDate !== isoDate) {
+      await this.triggerJob('regime_gate_compute').catch(() => {});
+    }
+
     if (isWeekday && hour === 6 && minute === 0 && this._lastDailyBriefDate !== isoDate) {
       await this.triggerJob('daily_briefing').catch(() => {});
     }
@@ -732,6 +785,46 @@ If significance score >= 7: write the file, then output: SCAN_ALERT: <your alert
   }
 
   // ── Job runners ──────────────────────────────────────────────────
+
+  // Regime gate compute job. Spawns scripts/compute_daily_regime_score.py to
+  // consolidate the four upstream regime skills' outputs into regime_gate.json
+  // — the file services/regime_gate_service.go reads. Script fail-softs on
+  // missing inputs (neutral 50), so this job is safe even on a fresh install.
+  async _runRegimeGateCompute(date) {
+    this._log(`Starting regime gate compute for ${date}...`, 'info');
+    this.emit('scheduler_job_start', { job: 'regime_gate_compute', date });
+
+    let files = [];
+    try {
+      files = await fs.readdir(REPORTS_DIR);
+    } catch (err) {
+      // Reports dir missing → no upstream inputs available. Still run the
+      // script (it will write a neutral regime_gate.json so the Go side has
+      // a file to read).
+      this._log(`reports dir unavailable (${err.code || err.message}); running with no inputs`, 'warning');
+    }
+    const argv = buildRegimeComputeArgv(REPORTS_DIR, REGIME_COMPUTE_SCRIPT, REGIME_GATE_OUTPUT, files);
+
+    await new Promise((resolve) => {
+      const child = spawn(PYTHON_BIN, argv, { stdio: ['ignore', 'pipe', 'pipe'] });
+      let stderr = '';
+      child.stderr.on('data', (chunk) => { stderr += chunk.toString(); });
+      child.on('error', (err) => {
+        this._log(`regime gate compute spawn failed: ${err.message}`, 'error');
+        resolve();
+      });
+      child.on('close', (code) => {
+        if (code === 0) {
+          this._log(`Regime gate compute complete → ${REGIME_GATE_OUTPUT}`, 'success');
+        } else {
+          this._log(`Regime gate compute exited ${code}; stderr: ${stderr.trim()}`, 'error');
+        }
+        resolve();
+      });
+    });
+
+    this.emit('scheduler_job_end', { job: 'regime_gate_compute', date, output: REGIME_GATE_OUTPUT });
+  }
 
   async _runDailyBriefing(date) {
     const dateSlug = date.replace(/-/g, '');
