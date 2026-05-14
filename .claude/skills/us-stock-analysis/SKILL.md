@@ -7,32 +7,44 @@ description: Comprehensive US stock analysis including fundamental analysis (fin
 
 ## Overview
 
-Perform comprehensive analysis of US stocks covering fundamental analysis (financials, business quality, valuation), technical analysis (indicators, trends, patterns), peer comparisons, and generate detailed investment reports. Fetch real-time market data via web search tools and apply structured analytical frameworks.
+Perform comprehensive analysis of US stocks covering fundamental analysis (financials, business quality, valuation), technical analysis (indicators, trends, patterns), peer comparisons, and generate detailed investment reports. Apply structured analytical frameworks over high-quality data — FMP API when available (preferred), WebSearch as fallback.
 
 ## Data Sources
 
-Always use web search tools to gather current market data:
+**Preferred: FMP scripts (when `FMP_API_KEY` is set).** These return structured, consistent, single-source data and replace the bulk of web searching. Always try these first — they're faster, more reliable, and produce comparable numbers across timestamps.
 
-**Primary Data to Fetch:**
-1. **Current stock price and trading data** (price, volume, 52-week range)
-2. **Financial statements** (income statement, balance sheet, cash flow)
-3. **Key metrics** (P/E, EPS, revenue, margins, debt ratios)
-4. **Analyst ratings and price targets**
-5. **Recent news and developments**
-6. **Peer/competitor data** (for comparisons)
-7. **Technical data** (moving averages, RSI, MACD when available)
+| Need | Script | Example |
+|---|---|---|
+| All fundamentals + analyst data + news for ONE ticker | `scripts/fetch_stock_snapshot.py` | `python scripts/fetch_stock_snapshot.py --ticker SE` |
+| Real technicals (MA20/50/200, RSI, MACD, ATR, 52w range) | `scripts/fetch_technicals.py` | `python scripts/fetch_technicals.py --ticker SE` |
+| Side-by-side peer multiples table | `scripts/fetch_peers.py` | `python scripts/fetch_peers.py --tickers SE,MELI,PDD,GRAB` |
 
-**Search Strategy:**
-- Use ticker symbol + specific data needed (e.g., "AAPL financial metrics 2024")
+Run from the skill directory. Each script emits a single JSON object on stdout — pipe to a file or capture inline. If `FMP_API_KEY` is not set, the script exits 1 with a clear message; fall back to WebSearch.
+
+**Recommended workflow for a comprehensive report:**
+1. Run `fetch_stock_snapshot.py --ticker <T>` → fundamentals + analyst data
+2. Run `fetch_technicals.py --ticker <T>` → real chart indicators
+3. Identify 3–5 peers, then `fetch_peers.py --tickers <T>,<P1>,<P2>,<P3>` → comparison table
+4. Use WebSearch ONLY for qualitative items the scripts don't cover: latest earnings call commentary, news narrative around the latest quarter, breaking M&A, or sentiment.
+
+**Fallback: WebSearch (when no FMP key or for qualitative narrative).**
+
+Primary data to fetch via WebSearch in fallback mode:
+1. Current stock price and trading data (price, volume, 52-week range)
+2. Financial statements (income statement, balance sheet, cash flow)
+3. Key metrics (P/E, EPS, revenue, margins, debt ratios)
+4. Analyst ratings and price targets
+5. Recent news and developments
+6. Peer/competitor data (for comparisons)
+7. Technical data (moving averages, RSI, MACD when available)
+
+Search strategy:
+- Use ticker symbol + specific data needed (e.g., "AAPL financial metrics 2026")
 - For comprehensive data: Search for earnings reports, investor presentations, or SEC filings
-- For technical data: Search for "AAPL technical analysis" or use financial data sites
+- For technical data: Be wary of stale moving averages — cross-check against current price
 - Always verify data recency (prefer data from last quarter)
 
-**Quality Sources:**
-- Yahoo Finance, Google Finance, MarketWatch, Seeking Alpha, Bloomberg, CNBC
-- Company investor relations pages
-- SEC filings (10-K, 10-Q) for detailed financials
-- TradingView, StockCharts for technical data
+Quality sources: Yahoo Finance, Google Finance, MarketWatch, Seeking Alpha, Bloomberg, CNBC, SEC filings (10-K, 10-Q), TradingView/StockCharts.
 
 ## Analysis Types
 
