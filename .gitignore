@@ -40,6 +40,11 @@ data/
 # Node
 node_modules/
 
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+
 # News summary cache
 news_summaries/*.json
 quickstart.sh
