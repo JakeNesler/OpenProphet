@@ -174,6 +174,22 @@ func main() {
 		"sector_default_max_pct":     cfg.SectorDefaultMaxPct,
 	}).Info("Trade guard initialized")
 
+	// Regime gate service. Reads the daily-computed regime_gate.json snapshot;
+	// when EnableRegimeGate is false the service still loads and reports the
+	// underlying tier (for observation), but sizing/block stay neutral. The
+	// Python writer (scripts/compute_daily_regime_score.py) is wired in a
+	// follow-up commit; until then GetStatus returns the fail-open neutral
+	// status (tier=UNKNOWN, sizing=1.0, block=false).
+	regimeGate := services.NewRegimeGateService(services.RegimeGateConfig{
+		EnableRegimeGate: cfg.EnableRegimeGate,
+		ReportPath:       cfg.RegimeReportPath,
+	})
+	regimeGateController := controllers.NewRegimeGateController(regimeGate)
+	logger.WithFields(logrus.Fields{
+		"regime_gate_enabled": cfg.EnableRegimeGate,
+		"regime_report_path":  cfg.RegimeReportPath,
+	}).Info("Regime gate service initialized")
+
 	// Create activity logger
 	activityLogDir := os.Getenv("ACTIVITY_LOG_DIR")
 	if activityLogDir == "" {
@@ -295,7 +311,7 @@ func main() {
 	logger.Debug("Intraday signal service initialized")
 
 	// Setup HTTP server
-	router := setupRouter(orderController, newsController, intelligenceController, positionController, activityController, economicFeedsController, pennyController, guardController, harvestController, trendController, segmentPnLController, ivController, intradayController)
+	router := setupRouter(orderController, newsController, intelligenceController, positionController, activityController, economicFeedsController, pennyController, guardController, harvestController, trendController, segmentPnLController, ivController, intradayController, regimeGateController)
 
 	// Start data cleanup routine
 	go startDataCleanup(ctx, storageService, cfg.DataRetentionDays, logger)
@@ -325,7 +341,7 @@ func main() {
 	}
 }
 
-func setupRouter(orderController *controllers.OrderController, newsController *controllers.NewsController, intelligenceController *controllers.IntelligenceController, positionController *controllers.PositionManagementController, activityController *controllers.ActivityController, economicFeedsController *controllers.EconomicFeedsController, pennyController *controllers.PennyController, guardController *controllers.GuardController, harvestController *controllers.HarvestController, trendController *controllers.TrendController, segmentPnLController *controllers.SegmentPnLController, ivController *controllers.IVController, intradayController *controllers.IntradayController) *gin.Engine {
+func setupRouter(orderController *controllers.OrderController, newsController *controllers.NewsController, intelligenceController *controllers.IntelligenceController, positionController *controllers.PositionManagementController, activityController *controllers.ActivityController, economicFeedsController *controllers.EconomicFeedsController, pennyController *controllers.PennyController, guardController *controllers.GuardController, harvestController *controllers.HarvestController, trendController *controllers.TrendController, segmentPnLController *controllers.SegmentPnLController, ivController *controllers.IVController, intradayController *controllers.IntradayController, regimeGateController *controllers.RegimeGateController) *gin.Engine {
 	router := gin.Default()
 	router.SetTrustedProxies([]string{"127.0.0.1"})
 
@@ -430,6 +446,10 @@ func setupRouter(orderController *controllers.OrderController, newsController *c
 
 		// Trade guard endpoint
 		api.GET("/guard/status", guardController.HandleGetStatus)
+
+		// Regime gate endpoint (Item 2). Returns the daily-computed regime
+		// status; agents consume tier/sizing_multiplier/block_new_entries.
+		api.GET("/regime-gate/status", regimeGateController.HandleGetStatus)
 
 		// Harvest premium seller endpoints
 		harvest := api.Group("/harvest")

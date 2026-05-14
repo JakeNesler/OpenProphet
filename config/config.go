@@ -31,6 +31,13 @@ type Config struct {
 
 	EnableSectorAggregation bool    // turn on cross-agent sector concentration cap
 	SectorDefaultMaxPct     float64 // fallback cap for buckets without an explicit override
+
+	// Regime gate (Item 2). Flag-gated rollout: while EnableRegimeGate is false
+	// the service still loads and reports the underlying tier (for observation
+	// in /api/v1/regime-gate/status), but sizing_multiplier and block_new_entries
+	// stay neutral so no agent behavior changes until enforcement is turned on.
+	EnableRegimeGate bool
+	RegimeReportPath string
 }
 
 var AppConfig *Config
@@ -62,6 +69,12 @@ func Load() error {
 		// after a 2-week observation window where Status() reports real bucket exposures.
 		EnableSectorAggregation: getEnvOrDefault("ENABLE_SECTOR_AGGREGATION", "false") == "true",
 		SectorDefaultMaxPct:     parseFloat(getEnvOrDefault("SECTOR_DEFAULT_MAX_PCT", "0.15")),
+
+		// Regime gate defaults: enforcement off, canonical report path. Mirrors
+		// EnableSectorAggregation — observe production output for ~2 weeks, then
+		// flip ENABLE_REGIME_GATE=true.
+		EnableRegimeGate: getEnvOrDefault("ENABLE_REGIME_GATE", "false") == "true",
+		RegimeReportPath: getEnvOrDefault("REGIME_REPORT_PATH", "./data/reports/regime_gate.json"),
 
 		OperatorEmail: os.Getenv("OPERATOR_EMAIL"),
 	}
