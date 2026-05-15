@@ -203,11 +203,13 @@ func (s *LocalStorage) GetOrder(orderID string) (*interfaces.Order, error) {
 //  2. ParseStrategyFromClientOrderID(DBOrder.ClientOrderID) — fallback for
 //     fills where the StrategyName column was never written but the broker
 //     still preserved our encoded client_order_id
-//
-// Positions held only via DBManagedPosition (PennyProphet's path today) are
-// NOT included here — that table's Strategy field uses overloaded trading-
-// style values ("DAY_TRADE" etc) rather than agent IDs. Reconciling that
-// namespace is tracked as a separate Phase 1 follow-up.
+//  3. DBManagedPosition.AgentStrategy — defense-in-depth fallback for symbols
+//     held via PlaceManagedPosition where the entry order's DBOrder row was
+//     lost or never persisted. The dedicated AgentStrategy column carries
+//     agent IDs (penny-momentum, trend, v2-options) cleanly; do NOT confuse
+//     it with DBManagedPosition.Strategy which is the trading-style label
+//     (DAY_TRADE / SWING_TRADE / LONG_TERM). Rows with an empty AgentStrategy
+//     are ignored.
 func (s *LocalStorage) GetSymbolStrategyAttribution() (map[string]string, error) {
 	var dbOrders []*models.DBOrder
 	if err := s.db.
@@ -230,6 +232,23 @@ func (s *LocalStorage) GetSymbolStrategyAttribution() (map[string]string, error)
 		if strategy != "" {
 			out[o.Symbol] = strategy
 		}
+	}
+
+	// Managed-position fallback. Orders win when present, so we only fill in
+	// symbols not yet seen. Newest row per symbol wins (most-recent buy
+	// semantics, matching the order path).
+	var dbPositions []*models.DBManagedPosition
+	if err := s.db.
+		Where("agent_strategy <> ?", "").
+		Order("created_at DESC").
+		Find(&dbPositions).Error; err != nil {
+		return nil, fmt.Errorf("query managed_positions for attribution: %w", err)
+	}
+	for _, p := range dbPositions {
+		if _, seen := out[p.Symbol]; seen {
+			continue
+		}
+		out[p.Symbol] = p.AgentStrategy
 	}
 	return out, nil
 }

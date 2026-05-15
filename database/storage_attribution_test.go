@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"prophet-trader/interfaces"
+	"prophet-trader/models"
 )
 
 func TestGetSymbolStrategyAttribution(t *testing.T) {
@@ -85,13 +86,58 @@ func TestGetSymbolStrategyAttribution(t *testing.T) {
 		t.Fatalf("save sell: %v", err)
 	}
 
+	// managed_positions fallback: a symbol with no DBOrder row at all but a
+	// managed_positions row carrying a non-empty AgentStrategy must still
+	// resolve. This is the defense-in-depth path for the III/Spark regression
+	// where the entry order failed to persist and the broker position became
+	// orphaned from its owning agent.
+	mp := &models.DBManagedPosition{
+		PositionID:    "mp-iii",
+		Symbol:        "III",
+		Side:          "buy",
+		Strategy:      "SWING_TRADE",
+		AgentStrategy: "penny-momentum",
+		Status:        "ACTIVE",
+	}
+	if err := s.SaveManagedPosition(mp); err != nil {
+		t.Fatalf("save managed position: %v", err)
+	}
+
+	// A managed_position with an empty AgentStrategy must NOT poison the map
+	// (legacy rows from before the column existed should be skipped).
+	mpLegacy := &models.DBManagedPosition{
+		PositionID:    "mp-legacy",
+		Symbol:        "IBM",
+		Side:          "buy",
+		Strategy:      "SWING_TRADE",
+		AgentStrategy: "",
+		Status:        "ACTIVE",
+	}
+	if err := s.SaveManagedPosition(mpLegacy); err != nil {
+		t.Fatalf("save legacy managed position: %v", err)
+	}
+
+	// DBOrder attribution must win over a managed_positions row for the same
+	// symbol — the order is the authoritative source when present.
+	tltMp := &models.DBManagedPosition{
+		PositionID:    "mp-tlt",
+		Symbol:        "TLT",
+		Side:          "buy",
+		Strategy:      "SWING_TRADE",
+		AgentStrategy: "should-be-overridden-by-order",
+		Status:        "ACTIVE",
+	}
+	if err := s.SaveManagedPosition(tltMp); err != nil {
+		t.Fatalf("save tlt managed position: %v", err)
+	}
+
 	got, err := s.GetSymbolStrategyAttribution()
 	if err != nil {
 		t.Fatalf("GetSymbolStrategyAttribution: %v", err)
 	}
 
 	if got["TLT"] != "v2-options" {
-		t.Errorf("TLT attribution = %q, want v2-options (most recent buy wins)", got["TLT"])
+		t.Errorf("TLT attribution = %q, want v2-options (order wins over managed_position)", got["TLT"])
 	}
 	if got["GLD"] != "trend" {
 		t.Errorf("GLD attribution = %q, want trend (parsed from client_order_id)", got["GLD"])
@@ -101,5 +147,11 @@ func TestGetSymbolStrategyAttribution(t *testing.T) {
 	}
 	if _, present := got["MSFT"]; present {
 		t.Errorf("MSFT should NOT be attributed from a sell-side order, got %q", got["MSFT"])
+	}
+	if got["III"] != "penny-momentum" {
+		t.Errorf("III attribution = %q, want penny-momentum (managed_positions fallback)", got["III"])
+	}
+	if _, present := got["IBM"]; present {
+		t.Errorf("IBM should NOT be attributed from a managed_position with empty AgentStrategy, got %q", got["IBM"])
 	}
 }

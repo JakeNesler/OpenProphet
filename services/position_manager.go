@@ -288,6 +288,22 @@ func (pm *PositionManager) placeEntryOrder(ctx context.Context, position *Manage
 		return err
 	}
 
+	// Persist the resulting DBOrder so strategy attribution
+	// (GetSymbolStrategyAttribution) can map this symbol back to the owning
+	// agent. Without this, the /positions?strategy=X filter drops the broker
+	// position and the preflight skip in agent/preflight.js sees zero
+	// positions to manage. Mirrors order_controller.go Buy/Sell.
+	order.ID = result.OrderID
+	order.Status = result.Status
+	if pm.storageService != nil {
+		if saveErr := pm.storageService.SaveOrder(order); saveErr != nil {
+			pm.logger.WithError(saveErr).WithFields(logrus.Fields{
+				"symbol":   order.Symbol,
+				"order_id": result.OrderID,
+			}).Warn("Failed to save managed-position entry order to database")
+		}
+	}
+
 	position.EntryOrderID = result.OrderID
 	position.Status = "PENDING"
 
