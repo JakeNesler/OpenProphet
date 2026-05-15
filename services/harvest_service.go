@@ -58,15 +58,79 @@ type MonthlyExpiration struct {
 	DTE            int       `json:"dte"`
 }
 
+// DefaultShortPutDeltaProxy is the multiplier applied to short-put notional
+// when contributing to the cross-agent INDEX_BETA bucket via
+// OptionsExposureProvider. Intentionally heavier than the ~0.16 raw delta of
+// typical 16-delta short put strikes — the elevated weighting is a
+// conservative beta proxy that accounts for gamma + vol expansion under
+// stress, when a quiet short put can rapidly grow into meaningful index
+// exposure. Configurable via SetShortPutDeltaProxy.
+const DefaultShortPutDeltaProxy = 0.30
+
 // HarvestService provides core harvest logic: state, FOMC, expirations.
 type HarvestService struct {
-	store     harvestStateStore
-	fomcDates []time.Time
+	store              harvestStateStore
+	fomcDates          []time.Time
+	shortPutDeltaProxy float64
 }
 
 // NewHarvestService creates a new HarvestService.
 func NewHarvestService(store harvestStateStore) *HarvestService {
-	return &HarvestService{store: store, fomcDates: fomc2026Dates}
+	return &HarvestService{
+		store:              store,
+		fomcDates:          fomc2026Dates,
+		shortPutDeltaProxy: DefaultShortPutDeltaProxy,
+	}
+}
+
+// SetShortPutDeltaProxy overrides the default beta proxy used by
+// BucketExposureDollars. Intended for calibration after observation.
+func (s *HarvestService) SetShortPutDeltaProxy(p float64) {
+	s.shortPutDeltaProxy = p
+}
+
+// BucketExposureDollars implements OptionsExposureProvider. Each open condor
+// on an INDEX_BETA underlying (SPY/QQQ/IWM/DIA/VTI) contributes
+//
+//	ShortPutStrike × Contracts × 100 × shortPutDeltaProxy
+//
+// dollars to the INDEX_BETA bucket. Non-index underlyings are skipped — a
+// configuration error worth surfacing later rather than silently
+// misattributing equity exposure to the index bucket.
+//
+// Returns nil when there are no open condors, no index condors, or the store
+// call fails. Soft-failing on store error is deliberate: TradeGuard already
+// fails closed on its own account fetch errors during sector-cap checks, so
+// a transient DB hiccup here would otherwise compound into double-blocking.
+func (s *HarvestService) BucketExposureDollars() map[SectorBucket]float64 {
+	condors, err := s.store.ListOpenHarvestCondors()
+	if err != nil || len(condors) == 0 {
+		return nil
+	}
+	var indexBeta float64
+	for _, c := range condors {
+		if !isIndexBetaUnderlying(c.Underlying) {
+			continue
+		}
+		notional := c.ShortPutStrike * float64(c.Contracts) * 100.0
+		indexBeta += notional * s.shortPutDeltaProxy
+	}
+	if indexBeta == 0 {
+		return nil
+	}
+	return map[SectorBucket]float64{"INDEX_BETA": indexBeta}
+}
+
+// isIndexBetaUnderlying reports whether the given symbol is one of Harvest's
+// supported index-ETF underlyings. Kept local to HarvestService rather than
+// pulling from TradeGuard's bucketFor so the two services don't develop a
+// circular dependency on bucket-membership semantics.
+func isIndexBetaUnderlying(symbol string) bool {
+	switch symbol {
+	case "SPY", "QQQ", "IWM", "DIA", "VTI":
+		return true
+	}
+	return false
 }
 
 // GetState returns the current Harvest portfolio state.

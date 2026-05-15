@@ -359,7 +359,7 @@ Concerns surfaced while implementing Item 1. Tracked here for Items 2 and 3 to c
 
 ### Deferred to follow-up commits
 1. **MCP tool to read guard status.** TRADING_RULES updates reference `mcp__prophet__get_guard_status` aspirationally — only the HTTP endpoint exists today. Agents currently learn about bucket exposure only via the rejection error. A small MCP tool wrapping `/api/v1/guard/status` is the natural follow-up. Same gap will exist for Item 2's regime gate.
-2. **Wire HarvestService into `OptionsExposureProvider`.** The interface exists and is exercised by a unit test. HarvestService still needs an `BucketExposureDollars()` method that sums its short-put book using `notional × delta_proxy` for the INDEX_BETA bucket. Plan recommends 0.30 delta default — that lives in HarvestService config when added.
+2. ~~**Wire HarvestService into `OptionsExposureProvider`.**~~ ✅ Shipped 2026-05-15. `HarvestService.BucketExposureDollars()` sums each open condor's `ShortPutStrike × Contracts × 100 × shortPutDeltaProxy` into the INDEX_BETA bucket. Default proxy 0.30 (configurable via `SetShortPutDeltaProxy`). Only SPY/QQQ/IWM/DIA/VTI underlyings contribute — non-index condors are skipped (surface a config-drift bug rather than misattribute equity exposure). Wired in `cmd/bot/main.go` via `tradeGuard.SetOptionsExposureProvider(harvestSvc)`. Soft-fails on store error (TradeGuard already fails closed on account-fetch errors; double-failing would over-block).
 
 ### Open for Item 2
 3. **No MCP tool contract specified.** Item 2 says "expose a tool `get_regime_gate_status` to all agents" but doesn't give the JSON schema, registration site, or whether the tool is read-only. Spec it before implementing. Recommended schema: `{score, tier, sizing_multiplier, block_new_entries, is_stale, components}`.
@@ -403,7 +403,7 @@ Material deviations from the original spec:
 
 Item 1 deferred items resolved:
 - **MCP tool for guard status** — shipped as part of follow-up #2 (`get_guard_status`).
-- **HarvestService implementing `OptionsExposureProvider`** — still deferred; the interface exists and is unit-tested.
+- **HarvestService implementing `OptionsExposureProvider`** — ✅ shipped 2026-05-15. See post-Item-1 revision #2 above for details.
 
 ### Item 2 prerequisites resolved for Item 3
 The two open Item 3 concerns from the post-Item-1 revisions:
@@ -424,7 +424,7 @@ Read `/api/v1/guard/status` daily for 2 weeks across the four agents' shared pap
 1. **Caps are reachable.** If TECH never exceeds 8% of portfolio over 10+ trading days, the 20% cap does nothing — consider tightening.
 2. **Caps don't routinely bind.** If TECH is at 19% on most days, the 20% cap will reject legitimate trades the moment the flag flips. Loosen, or split TECH into sub-buckets.
 3. **OTHER bucket isn't a dumping ground.** If many of Prophet's or Penny's trades resolve to OTHER, the `tickerBucket` map in `services/trade_guard.go` needs expansion before flipping.
-4. **INDEX_BETA stays under 25%.** Harvest's contribution depends on `OptionsExposureProvider` — currently deferred, so INDEX_BETA may read low. Flag this for the deferred Harvest wiring.
+4. **INDEX_BETA stays under 25%.** Harvest's contribution is now wired in (shipped 2026-05-15): each open condor on SPY/QQQ/IWM/DIA/VTI contributes `ShortPutStrike × Contracts × 100 × 0.30` to the INDEX_BETA bucket. Validate the 0.30 proxy against observed bucket totals during the observation window; tune via `SetShortPutDeltaProxy` if the proxy is too conservative (cap binding when real beta is low) or too loose (cap not binding when condors stack).
 
 To flip: add `ENABLE_SECTOR_AGGREGATION=true` to `.env` and restart the Go bot. The guard rejection messages (`guard: sector cap — {BUCKET} bucket would reach $X ...`) will start firing immediately.
 

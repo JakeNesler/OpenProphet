@@ -168,3 +168,89 @@ func TestCalcDeployedBuyingPower(t *testing.T) {
 		t.Errorf("expected %.2f%%, got %.2f%%", expected, pct)
 	}
 }
+
+// ── OptionsExposureProvider implementation tests ────────────────────
+
+func TestBucketExposure_NoOpenCondors_ReturnsNil(t *testing.T) {
+	svc := NewHarvestService(&stubHarvestStore{})
+	got := svc.BucketExposureDollars()
+	if got != nil {
+		t.Errorf("expected nil exposure with no condors, got %v", got)
+	}
+}
+
+func TestBucketExposure_SingleSPYCondor_ContributesIndexBeta(t *testing.T) {
+	// 5 contracts × $400 short put strike × 100 shares × 0.30 delta proxy = $60,000
+	store := &stubHarvestStore{
+		condors: []*models.DBHarvestCondor{
+			{Underlying: "SPY", ShortPutStrike: 400, Contracts: 5},
+		},
+	}
+	svc := NewHarvestService(store)
+	got := svc.BucketExposureDollars()
+	want := 60000.0
+	if got["INDEX_BETA"] != want {
+		t.Errorf("INDEX_BETA: want $%.2f, got $%.2f", want, got["INDEX_BETA"])
+	}
+}
+
+func TestBucketExposure_MultipleCondorsSum(t *testing.T) {
+	// SPY: 5 × $400 × 100 × 0.30 = $60,000
+	// QQQ: 2 × $350 × 100 × 0.30 = $21,000
+	// Total INDEX_BETA = $81,000
+	store := &stubHarvestStore{
+		condors: []*models.DBHarvestCondor{
+			{Underlying: "SPY", ShortPutStrike: 400, Contracts: 5},
+			{Underlying: "QQQ", ShortPutStrike: 350, Contracts: 2},
+		},
+	}
+	svc := NewHarvestService(store)
+	got := svc.BucketExposureDollars()
+	want := 81000.0
+	if got["INDEX_BETA"] != want {
+		t.Errorf("INDEX_BETA: want $%.2f, got $%.2f", want, got["INDEX_BETA"])
+	}
+}
+
+func TestBucketExposure_NonIndexUnderlying_Skipped(t *testing.T) {
+	// Harvest is index-only by design. An AAPL condor (configuration drift)
+	// must not contribute to INDEX_BETA — silently misattributing equity
+	// exposure to the index bucket would defeat the cap.
+	store := &stubHarvestStore{
+		condors: []*models.DBHarvestCondor{
+			{Underlying: "AAPL", ShortPutStrike: 180, Contracts: 3},
+		},
+	}
+	svc := NewHarvestService(store)
+	got := svc.BucketExposureDollars()
+	if got != nil {
+		t.Errorf("expected nil exposure for non-index underlying, got %v", got)
+	}
+}
+
+func TestBucketExposure_StoreError_ReturnsNil(t *testing.T) {
+	// Soft-fail: TradeGuard already fails closed on its own account fetch
+	// errors. Compounding here on a transient DB hiccup would over-block.
+	store := &stubHarvestStore{condorErr: fmt.Errorf("DB down")}
+	svc := NewHarvestService(store)
+	got := svc.BucketExposureDollars()
+	if got != nil {
+		t.Errorf("expected nil exposure on store error, got %v", got)
+	}
+}
+
+func TestBucketExposure_ConfigurableDeltaProxy(t *testing.T) {
+	// Override default 0.30 with 0.50: 5 × $400 × 100 × 0.50 = $100,000
+	store := &stubHarvestStore{
+		condors: []*models.DBHarvestCondor{
+			{Underlying: "SPY", ShortPutStrike: 400, Contracts: 5},
+		},
+	}
+	svc := NewHarvestService(store)
+	svc.SetShortPutDeltaProxy(0.50)
+	got := svc.BucketExposureDollars()
+	want := 100000.0
+	if got["INDEX_BETA"] != want {
+		t.Errorf("INDEX_BETA: want $%.2f, got $%.2f", want, got["INDEX_BETA"])
+	}
+}

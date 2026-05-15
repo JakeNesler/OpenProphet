@@ -287,6 +287,12 @@ func main() {
 	// Start daily IV collection goroutine for Harvest
 	go startHarvestIVCollection(ctx, harvestIVRSvc, tradingService, logger)
 
+	// Wire Harvest's short-put book into the cross-agent sector cap as an
+	// OptionsExposureProvider — each open condor on an index ETF contributes
+	// ShortPutStrike × Contracts × 100 × delta_proxy to the INDEX_BETA bucket.
+	// Until this is registered the INDEX_BETA bucket reads artificially low
+	// and the 25% cap can't fire when Harvest stacks on top of equity exposure.
+	tradeGuard.SetOptionsExposureProvider(harvestSvc)
 	logger.Debug("Harvest service initialized")
 
 	// Initialize Trend signal service (used by TrendProphet for daily-bar signals)
