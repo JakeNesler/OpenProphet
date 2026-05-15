@@ -41,6 +41,11 @@ const SANDBOXES_DIR = path.join(PROJECT_ROOT, 'data', 'sandboxes');
 const REPORTS_DIR = path.join(PROJECT_ROOT, 'data', 'reports');
 const REGIME_COMPUTE_SCRIPT = path.join(PROJECT_ROOT, 'scripts', 'compute_daily_regime_score.py');
 const REGIME_GATE_OUTPUT = path.join(REPORTS_DIR, 'regime_gate.json');
+// Upstream regime-gate skill scripts. macro_regime is a direct python spawn;
+// breadth/market_top/bubble are invoked through opencode + their SKILL.md
+// because they require an LLM in the loop (data collection, schema reshape,
+// or manual scoring inputs). See docs/superpowers/specs/2026-05-15-regime-skills-scheduler-design.md.
+const MACRO_REGIME_SCRIPT = path.join(PROJECT_ROOT, '.claude', 'skills', 'macro-regime-detector', 'scripts', 'macro_regime_detector.py');
 
 // Filename-prefix → CLI flag mapping for compute_daily_regime_score.py inputs.
 // The script accepts each flag as optional and fail-softs missing inputs to a
@@ -75,6 +80,65 @@ export function buildRegimeComputeArgv(reportsDir, scriptPath, outputPath, fileN
   return argv;
 }
 
+/**
+ * Build the spawn argv for macro_regime_skill. Pure function — exported for tests.
+ * `apiKey` may be null/undefined; in that case `--api-key` is omitted and the
+ * python script falls back to its own FMP_API_KEY env var lookup.
+ */
+export function buildMacroRegimeArgv(scriptPath, outputDir, apiKey) {
+  const argv = [scriptPath, '--output-dir', outputDir];
+  if (apiKey) argv.push('--api-key', apiKey);
+  return argv;
+}
+
+/**
+ * Build the AUTOMATED RUN appendix for breadth_skill. The breadth-chart-analyst
+ * skill's autonomous python (fetch_breadth_csv.py) emits a different schema than
+ * compute_daily_regime_score.py expects, so the LLM must reshape: run the CSV
+ * fetcher, take the uptrend-ratio current value as `current_value_percent`, and
+ * Write the result to data/reports/breadth_<dateslug>.json.
+ */
+export function buildBreadthSkillAppendix(date) {
+  const slug = date.replace(/-/g, '');
+  return `**AUTOMATED RUN**: This skill was triggered automatically by the scheduler to produce a regime-gate input. Do not run image-based analysis or generate the long-form markdown report. Instead:
+1. Run \`python .claude/skills/breadth-chart-analyst/scripts/fetch_breadth_csv.py --json\` and capture its stdout.
+2. Use the Write tool to save a JSON file at exactly this path: data/reports/breadth_${slug}.json
+3. The saved JSON MUST contain a top-level integer field \`current_value_percent\` (0-100). Use the current uptrend-ratio value from the CSV fetch output, rounded to the nearest integer. Other fields from the CSV output may be preserved alongside it for forensics, but \`current_value_percent\` is required.
+4. Do NOT prompt for user confirmation. Do NOT write any other files.`;
+}
+
+/**
+ * Build the AUTOMATED RUN appendix for market_top_skill. Tells the LLM to collect
+ * the WebSearch-sourced inputs market_top_detector.py needs (put-call, VIX-term,
+ * margin-debt-yoy) and run the script with --output-dir so it writes the canonical
+ * market_top_*.json with composite.composite_score directly.
+ */
+export function buildMarketTopSkillAppendix(date) {
+  const slug = date.replace(/-/g, '');
+  return `**AUTOMATED RUN**: This skill was triggered automatically by the scheduler to produce a regime-gate input. Do not generate the long-form markdown report. Instead:
+1. Follow the SKILL.md's data-collection steps to gather: CBOE equity put/call ratio, VIX term structure state, margin debt year-over-year change. Breadth values may be auto-fetched via the script's default behavior.
+2. Run \`python .claude/skills/market-top-detector/scripts/market_top_detector.py --output-dir data/reports --put-call <value> --vix-term <value> --margin-debt-yoy <value>\`, supplying the values collected in step 1. Include any other CLI args the SKILL.md instructs you to pass.
+3. Verify a new file appears at data/reports/market_top_${slug}.json (or data/reports/market_top_${slug}_<timestamp>.json — the script may append its own timestamp). The file MUST contain a nested integer field \`composite.composite_score\` (0-100); this is the field compute_daily_regime_score.py extracts.
+4. Do NOT prompt for user confirmation. Do NOT write any other files.`;
+}
+
+/**
+ * Build the AUTOMATED RUN appendix for bubble_skill. bubble_scorer.py is a pure
+ * scoring engine — the LLM must collect the 12 indicators from public sources,
+ * run the scorer with --scores '<json>' --output json, capture stdout, and Write
+ * the result to data/reports/bubble_<dateslug>.json.
+ */
+export function buildBubbleSkillAppendix(date) {
+  const slug = date.replace(/-/g, '');
+  return `**AUTOMATED RUN**: This skill was triggered automatically by the scheduler to produce a regime-gate input. Do not prompt for manual scoring inputs. Instead:
+1. Follow the SKILL.md's Phase 1 data-collection workflow to gather the 12 quantitative indicator values from public sources (Put/Call ratio, VIX, margin debt, breadth, IPO data, etc.).
+2. Score each indicator 0-2 per the SKILL.md guidelines and assemble the scores into a JSON object matching the format \`bubble_scorer.py\` expects.
+3. Run \`python .claude/skills/us-market-bubble-detector/scripts/bubble_scorer.py --scores '<JSON_FROM_STEP_2>' --output json\` and capture its stdout.
+4. Use the Write tool to save the captured stdout JSON at exactly this path: data/reports/bubble_${slug}.json
+5. The saved JSON MUST contain a top-level numeric field \`percentage\` (0-100); this is the field compute_daily_regime_score.py extracts. The scorer should produce it by default.
+6. Do NOT prompt for user confirmation. Do NOT write any other files.`;
+}
+
 export class AnalysisScheduler extends EventEmitter {
   constructor(options = {}) {
     super();
@@ -105,6 +169,10 @@ export class AnalysisScheduler extends EventEmitter {
     this._lastHarvestParamReviewMonth = null;   // YYYY-MM
     this._lastTrendParamReviewQuarter = null;   // YYYY-Q
     this._lastRegimeGateDate = null;            // YYYY-MM-DD (daily regime gate compute)
+    this._lastBreadthDate = null;       // YYYY-MM-DD (daily breadth-chart-analyst run)
+    this._lastMacroRegimeDate = null;   // YYYY-MM-DD (daily macro-regime-detector run)
+    this._lastMarketTopDate = null;     // YYYY-MM-DD (daily market-top-detector run)
+    this._lastBubbleDate = null;        // YYYY-MM-DD (daily us-market-bubble-detector run)
   }
 
   async start() {
@@ -141,6 +209,10 @@ export class AnalysisScheduler extends EventEmitter {
       lastHarvestParamReviewMonth: this._lastHarvestParamReviewMonth,
       lastTrendParamReviewQuarter: this._lastTrendParamReviewQuarter,
       lastRegimeGateDate: this._lastRegimeGateDate,
+      lastBreadthDate: this._lastBreadthDate,
+      lastMacroRegimeDate: this._lastMacroRegimeDate,
+      lastMarketTopDate: this._lastMarketTopDate,
+      lastBubbleDate: this._lastBubbleDate,
     };
   }
 
@@ -152,6 +224,7 @@ export class AnalysisScheduler extends EventEmitter {
       'review_performance_penny', 'postmortem_penny', 'adapt_strategy_penny',
       'harvest_parameter_review', 'trend_parameter_review',
       'regime_gate_compute',
+      'macro_regime_skill', 'breadth_skill', 'market_top_skill', 'bubble_skill',
     ];
     if (!validJobs.includes(jobName)) {
       return { error: `Unknown job: ${jobName}. Valid: ${validJobs.join(', ')}` };
@@ -214,6 +287,30 @@ export class AnalysisScheduler extends EventEmitter {
         this._lastRegimeGateDate = isoDate;
         await this._runRegimeGateCompute(isoDate);
         await this._saveState();
+      } else if (jobName === 'macro_regime_skill') {
+        // Spec: missing FMP_API_KEY skips WITHOUT advancing _lastMacroRegimeDate
+        // so the operator can fix the env var and re-trigger same-day. Other
+        // failure modes (spawn error, non-zero exit) DO advance the date to
+        // avoid thrash retry — handled inside the runner.
+        if (!process.env.FMP_API_KEY) {
+          this._log('macro_regime_skill: FMP_API_KEY not set — skipping; regime_gate_compute will fall back to neutral 50 for macro. Date not advanced so operator can re-trigger after setting key.', 'warning');
+          return { skipped: true, reason: 'FMP_API_KEY missing', job: jobName };
+        }
+        this._lastMacroRegimeDate = isoDate;
+        await this._runMacroRegimeSkill(isoDate);
+        await this._saveState();
+      } else if (jobName === 'breadth_skill') {
+        this._lastBreadthDate = isoDate;
+        await this._runBreadthSkill(isoDate);
+        await this._saveState();
+      } else if (jobName === 'market_top_skill') {
+        this._lastMarketTopDate = isoDate;
+        await this._runMarketTopSkill(isoDate);
+        await this._saveState();
+      } else if (jobName === 'bubble_skill') {
+        this._lastBubbleDate = isoDate;
+        await this._runBubbleSkill(isoDate);
+        await this._saveState();
       } else if (jobName === 'trend_parameter_review') {
         this._lastTrendParamReviewQuarter = this._getQuarter(isoDate);
         await this._runSkill('trend-parameter-review', isoDate, null, 15 * 60 * 1000, this._automatedRunAppendix({
@@ -255,6 +352,46 @@ export class AnalysisScheduler extends EventEmitter {
         await this.triggerJob('daily_briefing').catch(() => {});
       } else {
         this._log('No daily briefing for today — skipping (market closed, will run at 6 AM ET next weekday).', 'info');
+      }
+    }
+
+    // 1.4 Regime-gate upstream skills (state-based). Catches the case where the
+    // bot was offline at the 5:00 AM ET trigger. Heals up to market close (4 PM
+    // ET) so the four input JSONs are present when step 1.5 (regime_gate_compute)
+    // fires next. Sequential so the LLM-driven ones don't fight over the
+    // _activeJob mutex.
+    if (isWeekday && hour < 16) {
+      if (this._lastMacroRegimeDate !== isoDate) {
+        if (await this._isLocked(this._getLockKey('macro_regime_skill', isoDate))) {
+          this._log('macro_regime_skill already running in another process — skipping startup trigger.', 'info');
+        } else {
+          this._log('No macro_regime_skill for today — triggering now...', 'info');
+          await this.triggerJob('macro_regime_skill').catch(() => {});
+        }
+      }
+      if (this._lastBreadthDate !== isoDate) {
+        if (await this._isLocked(this._getLockKey('breadth_skill', isoDate))) {
+          this._log('breadth_skill already running in another process — skipping startup trigger.', 'info');
+        } else {
+          this._log('No breadth_skill for today — triggering now...', 'info');
+          await this.triggerJob('breadth_skill').catch(() => {});
+        }
+      }
+      if (this._lastMarketTopDate !== isoDate) {
+        if (await this._isLocked(this._getLockKey('market_top_skill', isoDate))) {
+          this._log('market_top_skill already running in another process — skipping startup trigger.', 'info');
+        } else {
+          this._log('No market_top_skill for today — triggering now...', 'info');
+          await this.triggerJob('market_top_skill').catch(() => {});
+        }
+      }
+      if (this._lastBubbleDate !== isoDate) {
+        if (await this._isLocked(this._getLockKey('bubble_skill', isoDate))) {
+          this._log('bubble_skill already running in another process — skipping startup trigger.', 'info');
+        } else {
+          this._log('No bubble_skill for today — triggering now...', 'info');
+          await this.triggerJob('bubble_skill').catch(() => {});
+        }
       }
     }
 
@@ -512,6 +649,10 @@ If significance score >= 7: write the file, then output: SCAN_ALERT: <your alert
       case 'adapt_strategy_penny': return `adapt_strategy_penny_${dateSlug}`;
       case 'harvest_parameter_review': return `harvest_parameter_review_${this._getMonth(date).replace(/[^a-z0-9]/gi, '_')}`;
       case 'trend_parameter_review':   return `trend_parameter_review_${this._getQuarter(date).replace(/[^a-z0-9]/gi, '_')}`;
+      case 'macro_regime_skill': return `macro_regime_skill_${dateSlug}`;
+      case 'breadth_skill':      return `breadth_skill_${dateSlug}`;
+      case 'market_top_skill':   return `market_top_skill_${dateSlug}`;
+      case 'bubble_skill':       return `bubble_skill_${dateSlug}`;
       default:                  return `${jobName.replace(/[^a-z0-9]/gi, '_')}_${dateSlug}`;
     }
   }
@@ -584,6 +725,10 @@ If significance score >= 7: write the file, then output: SCAN_ALERT: <your alert
       this._lastHarvestParamReviewMonth = s.lastHarvestParamReviewMonth || null;
       this._lastTrendParamReviewQuarter = s.lastTrendParamReviewQuarter || null;
       this._lastRegimeGateDate = s.lastRegimeGateDate || null;
+      this._lastBreadthDate = s.lastBreadthDate || null;
+      this._lastMacroRegimeDate = s.lastMacroRegimeDate || null;
+      this._lastMarketTopDate = s.lastMarketTopDate || null;
+      this._lastBubbleDate = s.lastBubbleDate || null;
       const today = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
       const persisted = s.firedAlertFingerprints || {};
       // Only restore today's fingerprints — older dates are irrelevant
@@ -610,6 +755,10 @@ If significance score >= 7: write the file, then output: SCAN_ALERT: <your alert
         lastHarvestParamReviewMonth: this._lastHarvestParamReviewMonth,
         lastTrendParamReviewQuarter: this._lastTrendParamReviewQuarter,
         lastRegimeGateDate: this._lastRegimeGateDate,
+        lastBreadthDate: this._lastBreadthDate,
+        lastMacroRegimeDate: this._lastMacroRegimeDate,
+        lastMarketTopDate: this._lastMarketTopDate,
+        lastBubbleDate: this._lastBubbleDate,
         firedAlertFingerprints,
       }, null, 2), 'utf-8');
     } catch {}
@@ -751,6 +900,19 @@ If significance score >= 7: write the file, then output: SCAN_ALERT: <your alert
     const currentQuarter = this._getQuarter(isoDate);
     const currentWeek = this._getISOWeek(isoDate);
 
+    // Daily upstream regime-gate skills. Run sequentially at 5:00 AM ET so the
+    // four input JSONs are present by the time regime_gate_compute fires at
+    // 5:50. macro_regime is fast (python); the other three are LLM-driven and
+    // each gets a 15-min timeout. Worst-case the chain finishes by ~5:46 —
+    // still inside the 5:50 deadline. If something stalls, regime_gate_compute
+    // fail-softs (and the 36h input-freshness window covers yesterday's file).
+    if (isWeekday && hour === 5 && minute === 0) {
+      if (this._lastMacroRegimeDate !== isoDate) await this.triggerJob('macro_regime_skill').catch(() => {});
+      if (this._lastBreadthDate !== isoDate)     await this.triggerJob('breadth_skill').catch(() => {});
+      if (this._lastMarketTopDate !== isoDate)   await this.triggerJob('market_top_skill').catch(() => {});
+      if (this._lastBubbleDate !== isoDate)      await this.triggerJob('bubble_skill').catch(() => {});
+    }
+
     // Daily regime-gate compute. Runs 10 min before daily_briefing so the
     // briefing can reference a fresh regime_gate.json. The script fails
     // soft on missing upstream inputs (writes neutral 50), so this is safe
@@ -798,6 +960,57 @@ If significance score >= 7: write the file, then output: SCAN_ALERT: <your alert
   }
 
   // ── Job runners ──────────────────────────────────────────────────
+
+  // macro_regime_skill: direct python spawn. The script fetches its own data from
+  // FMP and writes data/reports/macro_regime_<timestamp>.json. The FMP_API_KEY
+  // presence check happens in triggerJob (skips without advancing date so the
+  // operator can fix and re-trigger). On script error we log and move on —
+  // regime_gate_compute's own fail-soft + the 36h input-freshness window cover
+  // the gap.
+  async _runMacroRegimeSkill(date) {
+    this._log(`Starting macro_regime_skill for ${date}...`, 'info');
+    this.emit('scheduler_job_start', { job: 'macro_regime_skill', date });
+
+    const argv = buildMacroRegimeArgv(MACRO_REGIME_SCRIPT, REPORTS_DIR, process.env.FMP_API_KEY);
+
+    await new Promise((resolve) => {
+      const child = spawn(PYTHON_BIN, argv, { stdio: ['ignore', 'pipe', 'pipe'] });
+      let stderr = '';
+      child.stderr.on('data', (chunk) => { stderr += chunk.toString(); });
+      child.on('error', (err) => {
+        this._log(`macro_regime_skill spawn failed: ${err.message}`, 'error');
+        resolve();
+      });
+      child.on('close', (code) => {
+        if (code === 0) {
+          this._log(`macro_regime_skill complete → ${REPORTS_DIR}/macro_regime_<timestamp>.json`, 'success');
+        } else {
+          this._log(`macro_regime_skill exited ${code}; stderr: ${stderr.trim()}`, 'error');
+        }
+        resolve();
+      });
+    });
+
+    this.emit('scheduler_job_end', { job: 'macro_regime_skill', date, output: REPORTS_DIR });
+  }
+
+  // breadth_skill: LLM-driven via _runSkill so the LLM can run the CSV fetcher
+  // and reshape the output to the schema compute_daily_regime_score.py expects.
+  async _runBreadthSkill(date) {
+    await this._runSkill('breadth-chart-analyst', date, null, 15 * 60 * 1000, buildBreadthSkillAppendix(date));
+  }
+
+  // market_top_skill: LLM-driven so the LLM can WebSearch put/call, VIX-term,
+  // and margin-debt-yoy inputs that market_top_detector.py requires.
+  async _runMarketTopSkill(date) {
+    await this._runSkill('market-top-detector', date, null, 15 * 60 * 1000, buildMarketTopSkillAppendix(date));
+  }
+
+  // bubble_skill: LLM-driven so the LLM can collect the 12 indicator values
+  // and pass them as --scores '<json>' to bubble_scorer.py.
+  async _runBubbleSkill(date) {
+    await this._runSkill('us-market-bubble-detector', date, null, 15 * 60 * 1000, buildBubbleSkillAppendix(date));
+  }
 
   // Regime gate compute job. Spawns scripts/compute_daily_regime_score.py to
   // consolidate the four upstream regime skills' outputs into regime_gate.json
