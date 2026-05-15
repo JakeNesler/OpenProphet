@@ -258,6 +258,19 @@ export class AnalysisScheduler extends EventEmitter {
       }
     }
 
+    // 1.5 Regime gate compute (state-based) — catches the case where the bot
+    // was offline at the 5:50 AM ET scheduled trigger. Heals up to market close
+    // (4 PM ET) so the gate is fresh even on mid-day restarts; agents read it
+    // on every heartbeat.
+    if (isWeekday && hour < 16 && this._lastRegimeGateDate !== isoDate) {
+      if (await this._isLocked(this._getLockKey('regime_gate_compute', isoDate))) {
+        this._log('Regime gate compute already running in another process — skipping startup trigger.', 'info');
+      } else {
+        this._log('No regime gate compute for today — triggering now...', 'info');
+        await this.triggerJob('regime_gate_compute').catch(() => {});
+      }
+    }
+
     // 2. Scenario analysis (state-based)
     if (this._lastScenarioDate !== isoDate) {
       if (await this._isLocked(this._getLockKey('scenario_analysis', isoDate))) {
