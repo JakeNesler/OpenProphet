@@ -179,3 +179,101 @@ def test_invalid_json_input_uses_neutral_default(tmp_path):
     assert payload["score"] == 52
     assert payload["components"]["bubble"]["present"] is False
     assert payload["components"]["bubble"]["value"] == 50
+
+
+def _backdate(path: Path, hours: float) -> None:
+    """Set the file's mtime to `hours` in the past, leaving content intact.
+    Used to simulate an upstream skill that stopped writing — the scheduler
+    keeps re-picking this file as 'latest' because it's the only match."""
+    import os
+    import time
+    past = time.time() - hours * 3600
+    os.utime(path, (past, past))
+
+
+def test_stale_input_uses_neutral_default(tmp_path):
+    # Simulates the silent-staleness failure mode: upstream skill stopped
+    # running, scheduler keeps picking the same weeks-old file forever.
+    # The script must treat a too-old input as missing (neutral 50,
+    # present=false) so the operator gets a loud signal and downstream
+    # Go service eventually flips tier via its own stale window.
+    inputs = _make_inputs(tmp_path, breadth=70, macro=80, top=30, bubble=50)
+    # Default threshold is 36h; 40h is comfortably past it.
+    _backdate(inputs["--breadth"], hours=40)
+
+    output_path = _run_script(tmp_path, inputs)
+    payload = json.loads(output_path.read_text())
+
+    # breadth contributes 50 (neutral) instead of 70, mirroring the
+    # missing-breadth test: score drops by 0.35 * (70-50) = 7 → 52 - 7 = 45.
+    assert payload["score"] == 45
+    assert payload["components"]["breadth"]["present"] is False
+    assert payload["components"]["breadth"]["value"] == 50
+    # source still recorded — operator needs the filename to investigate.
+    assert payload["components"]["breadth"]["source"] == "breadth.json"
+    # Other components unaffected.
+    assert payload["components"]["macro"]["present"] is True
+
+
+def test_fresh_input_is_not_flagged_stale(tmp_path):
+    # Boundary check: a file written just now must not be flagged stale.
+    # Without this, a typo turning ">" into ">=" or a wrong threshold
+    # value silently neutralizes every component.
+    inputs = _make_inputs(tmp_path, breadth=70, macro=80, top=30, bubble=50)
+    # No backdating — mtime is "now".
+    output_path = _run_script(tmp_path, inputs)
+    payload = json.loads(output_path.read_text())
+
+    assert payload["score"] == 52  # same as full-inputs happy path
+    for key in ("breadth", "macro", "top_risk", "bubble"):
+        assert payload["components"][key]["present"] is True, (
+            f"{key} wrongly flagged not-present despite fresh mtime"
+        )
+
+
+def test_stale_input_warning_names_file_and_age(tmp_path):
+    # Operator's only signal is the stderr warning. It must include
+    # the filename (so they know which skill stopped) and the age
+    # (so they know how stale — distinguishes "one missed day" from
+    # "skill has been broken for a month").
+    inputs = _make_inputs(tmp_path, breadth=70, macro=80, top=30, bubble=50)
+    _backdate(inputs["--bubble"], hours=72)
+
+    output_path = tmp_path / "regime_gate.json"
+    cmd = [sys.executable, str(SCRIPT_PATH), "--output", str(output_path)]
+    for flag, path in inputs.items():
+        cmd += [flag, str(path)]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+
+    stderr = result.stderr
+    assert "bubble.json" in stderr, f"warning missing filename: {stderr!r}"
+    assert "stale" in stderr.lower(), f"warning missing 'stale' keyword: {stderr!r}"
+    # Age must appear as a number (we don't pin exact format — implementation
+    # detail — but a digit followed by 'h' or 'hour' is the minimum signal).
+    assert re.search(r"\d+(\.\d+)?\s*h", stderr), (
+        f"warning missing age in hours: {stderr!r}"
+    )
+
+
+def test_cli_flag_overrides_default_threshold(tmp_path):
+    # Operator-tunable threshold via --input-stale-after-hours. We pin the
+    # threshold to 1h and backdate breadth by 2h — under the default 36h
+    # this would be fresh, but with the override it must be flagged stale.
+    # This proves the flag actually plumbs through to _read_score rather
+    # than being silently ignored.
+    inputs = _make_inputs(tmp_path, breadth=70, macro=80, top=30, bubble=50)
+    _backdate(inputs["--breadth"], hours=2)
+
+    output_path = _run_script(
+        tmp_path, inputs, input_stale_after_hours=1
+    )
+    payload = json.loads(output_path.read_text())
+
+    # breadth neutralized → same arithmetic as the missing-breadth case.
+    assert payload["score"] == 45
+    assert payload["components"]["breadth"]["present"] is False
+    # And the converse sanity check: default threshold would NOT flag a
+    # 2h-old file (covered already by test_fresh_input_is_not_flagged_stale
+    # so we don't repeat the assertion here — this test is purely about
+    # the flag mechanism).

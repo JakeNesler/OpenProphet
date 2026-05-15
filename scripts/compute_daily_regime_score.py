@@ -13,10 +13,16 @@ plus the post-Item-1 polarity correction):
 - breadth is health (high = healthy participation)
 - macro, top, bubble are risk (high = bad), inverted in the formula
 
-Fail-soft: any input that is missing, unreadable, or malformed contributes a
-neutral 50. The components block records `present: false` for forensics.
-Operator gets the loud signal via stderr warning; downstream Go service
-keeps trading on the most recent good value.
+Fail-soft: any input that is missing, stale (mtime older than
+INPUT_STALE_AFTER_HOURS — default 36h, overridable via
+--input-stale-after-hours), unreadable, or malformed contributes a neutral
+50. The components block records `present: false` for forensics. Operator
+gets the loud signal via stderr warning; downstream Go service keeps
+trading on the most recent good value until its own STALE_AFTER_HOURS
+output window closes and it flips to tier=UNKNOWN. The stale-input check
+exists because the scheduler picks the lexicographically latest matching
+file, so a skill that stops running has its last file silently re-used
+forever without this guard.
 
 Usage (scheduler invocation):
 
@@ -37,7 +43,8 @@ from pathlib import Path
 from typing import Any
 
 NEUTRAL_VALUE = 50  # used when an input is missing / unparseable
-STALE_AFTER_HOURS = 29  # must match services/regime_gate_service_test.go convention
+STALE_AFTER_HOURS = 29  # OUTPUT freshness window. Must match services/regime_gate_service_test.go convention.
+INPUT_STALE_AFTER_HOURS = 36  # INPUT freshness window. If an upstream skill's file mtime is older than this, treat the input as missing (neutral 50). Looser than the output window so a late upstream run doesn't immediately neutralize the score, but tight enough that a skill that's been broken for >1.5 days is loudly flagged. Distinct from STALE_AFTER_HOURS, which governs how long the Go service trusts our output.
 
 # Per-source extraction paths into the upstream skills' JSON. Each entry is a
 # tuple of nested keys; a single-element tuple means a top-level field.
@@ -68,14 +75,34 @@ def _extract(data: dict, path: tuple[str, ...]) -> Any:
     return cur
 
 
-def _read_score(component: str, file_path: Path | None) -> tuple[int, str | None, bool]:
+def _read_score(
+    component: str,
+    file_path: Path | None,
+    now: datetime,
+    input_stale_after_hours: float,
+) -> tuple[int, str | None, bool]:
     """Return (value, source_basename, present). Falls back to neutral 50 with
-    `present=False` on any failure mode."""
+    `present=False` on any failure mode (missing, stale, unreadable, schema
+    mismatch, non-numeric)."""
     if file_path is None:
         return NEUTRAL_VALUE, None, False
     if not file_path.exists():
         print(
             f"warn: {component} input not found: {file_path} — using neutral {NEUTRAL_VALUE}",
+            file=sys.stderr,
+        )
+        return NEUTRAL_VALUE, file_path.name, False
+    # mtime check: catches silent-staleness where the scheduler keeps picking
+    # the same weeks-old "latest" file because the upstream skill stopped
+    # writing new ones. We compare against the caller-supplied `now` (the
+    # same reference used for as_of) so tests are deterministic.
+    mtime = datetime.fromtimestamp(file_path.stat().st_mtime, tz=timezone.utc)
+    age_hours = (now - mtime).total_seconds() / 3600
+    if age_hours > input_stale_after_hours:
+        print(
+            f"warn: {component} input stale ({age_hours:.1f}h old > "
+            f"{input_stale_after_hours}h threshold): {file_path} — "
+            f"using neutral {NEUTRAL_VALUE}",
             file=sys.stderr,
         )
         return NEUTRAL_VALUE, file_path.name, False
@@ -130,6 +157,7 @@ def build_payload(
     top_path: Path | None,
     bubble_path: Path | None,
     now: datetime | None = None,
+    input_stale_after_hours: float = INPUT_STALE_AFTER_HOURS,
 ) -> dict:
     """Read inputs, compute score, return the dict that will be written to
     regime_gate.json. Split out from main() so tests can call it directly if
@@ -144,7 +172,7 @@ def build_payload(
         ("top_risk", top_path),
         ("bubble", bubble_path),
     ):
-        value, source, present = _read_score(name, path)
+        value, source, present = _read_score(name, path, now, input_stale_after_hours)
         components[name] = {"value": value, "source": source, "present": present}
 
     score = compute_score(
@@ -177,6 +205,16 @@ def main() -> int:
                         help="path to us-market-bubble-detector JSON output")
     parser.add_argument("--output", type=Path, required=True,
                         help="path to write regime_gate.json")
+    parser.add_argument(
+        "--input-stale-after-hours",
+        type=float,
+        default=INPUT_STALE_AFTER_HOURS,
+        help=(
+            "treat an input file as missing if its mtime is older than this "
+            f"many hours (default {INPUT_STALE_AFTER_HOURS}). Distinct from "
+            "the output-side STALE_AFTER_HOURS the Go service checks."
+        ),
+    )
     args = parser.parse_args()
 
     payload = build_payload(
@@ -184,6 +222,7 @@ def main() -> int:
         macro_path=args.macro,
         top_path=args.top,
         bubble_path=args.bubble,
+        input_stale_after_hours=args.input_stale_after_hours,
     )
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(payload, indent=2))
