@@ -15,6 +15,7 @@ Features:
 import os
 import sys
 import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -61,14 +62,32 @@ def _v3_quote_url(base, symbols_str, params):
     return f"{base}/{symbols_str}", params
 
 
+def _eod_hist_url(base, symbols_str, params):
+    """stable/historical-price-eod/full?symbol=^GSPC&from=YYYY-MM-DD&to=YYYY-MM-DD
+
+    Replaces the deprecated /historical-price-full. Translates legacy
+    'timeseries=N' (N trading days) into a from/to date range with a
+    1.5x calendar buffer so we cover N trading days even with weekends.
+    """
+    params["symbol"] = symbols_str
+    if "timeseries" in params:
+        days = int(params.pop("timeseries"))
+        calendar_span = int(days * 1.5) + 30
+        to_d = datetime.now(timezone.utc).date()
+        from_d = to_d - timedelta(days=calendar_span)
+        params["from"] = from_d.isoformat()
+        params["to"] = to_d.isoformat()
+    return base, params
+
+
 def _stable_hist_url(base, symbols_str, params):
-    """stable/historical-price-full?symbol=^GSPC&timeseries=80"""
+    """stable/historical-price-full?symbol=^GSPC&timeseries=80 (legacy)"""
     params["symbol"] = symbols_str
     return base, params
 
 
 def _v3_hist_url(base, symbols_str, params):
-    """api/v3/historical-price-full/^GSPC?timeseries=80"""
+    """api/v3/historical-price-full/^GSPC?timeseries=80 (legacy)"""
     return f"{base}/{symbols_str}", params
 
 
@@ -78,6 +97,7 @@ _FMP_ENDPOINTS = {
         ("https://financialmodelingprep.com/api/v3/quote", _v3_quote_url),
     ],
     "historical": [
+        ("https://financialmodelingprep.com/stable/historical-price-eod/full", _eod_hist_url),
         ("https://financialmodelingprep.com/stable/historical-price-full", _stable_hist_url),
         ("https://financialmodelingprep.com/api/v3/historical-price-full", _v3_hist_url),
     ],
@@ -147,9 +167,17 @@ class FMPClient:
                     self.rate_limit_reached = True
                     return None
             else:
-                if not quiet:
+                # Suppress noise for tier-restricted symbols/endpoints (402/403 with
+                # subscription messaging) — caller will silently fall through.
+                body = response.text or ""
+                tier_restricted = response.status_code in (402, 403) and (
+                    "Premium" in body
+                    or "subscription" in body
+                    or "Legacy Endpoint" in body
+                )
+                if not quiet and not tier_restricted:
                     print(
-                        f"ERROR: API request failed: {response.status_code} - {response.text[:200]}",
+                        f"ERROR: API request failed: {response.status_code} - {body[:200]}",
                         file=sys.stderr,
                     )
                 return None
@@ -191,7 +219,17 @@ class FMPClient:
                     valid = False
 
             if endpoint_key == "historical":
-                if not isinstance(data, dict):
+                # New stable EOD endpoint returns a flat list of OHLCV records.
+                # Normalize into the v3-compatible {"symbol", "historical": [...]} shape.
+                if isinstance(data, list):
+                    if not data or not isinstance(data[0], dict) or "date" not in data[0]:
+                        valid = False
+                    else:
+                        max_records = params.get("timeseries")
+                        records = data[: int(max_records)] if max_records else data
+                        self._endpoint_failures[base_url] = 0
+                        return {"symbol": symbols_str, "historical": records}
+                elif not isinstance(data, dict):
                     valid = False
                 elif "historicalStockList" in data:
                     # stable batch format -> v3 single format (exact match only)
@@ -250,17 +288,29 @@ class FMPClient:
         return data
 
     def get_batch_quotes(self, symbols: list[str]) -> dict[str, dict]:
-        """Fetch quotes for a list of symbols, batching up to 5 per request"""
+        """Fetch quotes for a list of symbols.
+
+        Tries comma-separated batch first (works on legacy/premium tiers).
+        Falls back to per-symbol calls if the batch returns no rows
+        (starter-tier behavior: HTTP 200 with empty list)."""
         results = {}
-        # FMP supports comma-separated symbols in quote endpoint
         batch_size = 5
         for i in range(0, len(symbols), batch_size):
             batch = symbols[i : i + batch_size]
             batch_str = ",".join(batch)
-            quotes = self.get_quote(batch_str)
+            quotes = self.get_quote(batch_str) if len(batch) > 1 else self.get_quote(batch[0])
             if quotes:
                 for q in quotes:
-                    results[q["symbol"]] = q
+                    if "symbol" in q:
+                        results[q["symbol"]] = q
+            elif len(batch) > 1:
+                # Starter tier: comma batch returned empty — fetch per-symbol.
+                for sym in batch:
+                    single = self.get_quote(sym)
+                    if single:
+                        for q in single:
+                            if "symbol" in q:
+                                results[q["symbol"]] = q
         return results
 
     def get_batch_historical(self, symbols: list[str], days: int = 50) -> dict[str, list[dict]]:

@@ -16,6 +16,7 @@ Features:
 import os
 import sys
 import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -48,22 +49,41 @@ def _load_dotenv_from_ancestors(key: str) -> Optional[str]:
     return None
 
 
-# --- FMP endpoint fallback: stable (new users) -> v3 (legacy users) ---
+# --- FMP endpoint fallback: new stable EOD (current) -> legacy stable -> v3 ---
+
+
+def _eod_hist_url(base, symbols_str, params):
+    """stable/historical-price-eod/full?symbol=SPY&from=YYYY-MM-DD&to=YYYY-MM-DD
+
+    Replaces the deprecated /historical-price-full. Translates legacy
+    'timeseries=N' (N trading days) into a from/to date range with a
+    1.5x calendar buffer so we cover N trading days even with weekends.
+    """
+    params["symbol"] = symbols_str
+    if "timeseries" in params:
+        days = int(params.pop("timeseries"))
+        calendar_span = int(days * 1.5) + 30
+        to_d = datetime.now(timezone.utc).date()
+        from_d = to_d - timedelta(days=calendar_span)
+        params["from"] = from_d.isoformat()
+        params["to"] = to_d.isoformat()
+    return base, params
 
 
 def _stable_hist_url(base, symbols_str, params):
-    """stable/historical-price-full?symbol=SPY&timeseries=600"""
+    """stable/historical-price-full?symbol=SPY&timeseries=600 (legacy)"""
     params["symbol"] = symbols_str
     return base, params
 
 
 def _v3_hist_url(base, symbols_str, params):
-    """api/v3/historical-price-full/SPY?timeseries=600"""
+    """api/v3/historical-price-full/SPY?timeseries=600 (legacy)"""
     return f"{base}/{symbols_str}", params
 
 
 _FMP_ENDPOINTS = {
     "historical": [
+        ("https://financialmodelingprep.com/stable/historical-price-eod/full", _eod_hist_url),
         ("https://financialmodelingprep.com/stable/historical-price-full", _stable_hist_url),
         ("https://financialmodelingprep.com/api/v3/historical-price-full", _v3_hist_url),
     ],
@@ -136,9 +156,17 @@ class FMPClient:
                     self.rate_limit_reached = True
                     return None
             else:
-                if not quiet:
+                # Suppress noise for tier-restricted symbols/endpoints (402/403 with
+                # subscription messaging) — caller will silently fall through.
+                body = response.text or ""
+                tier_restricted = response.status_code in (402, 403) and (
+                    "Premium" in body
+                    or "subscription" in body
+                    or "Legacy Endpoint" in body
+                )
+                if not quiet and not tier_restricted:
                     print(
-                        f"ERROR: API request failed: {response.status_code} - {response.text[:200]}",
+                        f"ERROR: API request failed: {response.status_code} - {body[:200]}",
                         file=sys.stderr,
                     )
                 return None
@@ -165,7 +193,17 @@ class FMPClient:
 
             valid = True
             if endpoint_key == "historical":
-                if not isinstance(data, dict):
+                # New stable EOD endpoint returns a flat list of OHLCV records.
+                # Normalize into the v3-compatible {"symbol", "historical": [...]} shape.
+                if isinstance(data, list):
+                    if not data or not isinstance(data[0], dict) or "date" not in data[0]:
+                        valid = False
+                    else:
+                        max_records = params.get("timeseries")
+                        records = data[: int(max_records)] if max_records else data
+                        self._endpoint_failures[base_url] = 0
+                        return {"symbol": symbols_str, "historical": records}
+                elif not isinstance(data, dict):
                     valid = False
                 elif "historicalStockList" in data:
                     norm = symbols_str.replace("-", ".")

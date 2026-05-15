@@ -1,0 +1,281 @@
+{
+  "metadata": {
+    "generated_at": "2026-05-14 19:09:20",
+    "data_source": "FMP API",
+    "history_days": 600,
+    "api_calls": {
+      "cache_entries": 10,
+      "api_calls_made": 10,
+      "rate_limit_reached": false
+    },
+    "etfs_analyzed": [
+      "RSP",
+      "SPY",
+      "IWM",
+      "TLT",
+      "SHY",
+      "HYG",
+      "LQD",
+      "XLY",
+      "XLP"
+    ],
+    "treasury_data_available": true
+  },
+  "composite": {
+    "composite_score": 52.6,
+    "zone": "Transition Zone (Preparing)",
+    "zone_color": "orange",
+    "guidance": "Multiple indicators in transition. Begin planning portfolio adjustment.",
+    "actions": [
+      "Develop regime-change response plan",
+      "Begin gradual diversification shifts",
+      "Reduce concentrated bets",
+      "Identify new regime beneficiaries",
+      "Weekly monitoring"
+    ],
+    "signaling_components": 4,
+    "strongest_signal": {
+      "component": "yield_curve",
+      "label": "Yield Curve (10Y-2Y)",
+      "score": 80
+    },
+    "weakest_signal": {
+      "component": "equity_bond",
+      "label": "Equity-Bond (SPY/TLT)",
+      "score": 20
+    },
+    "data_quality": {
+      "available_count": 6,
+      "total_components": 6,
+      "label": "Complete (6/6 components)",
+      "missing_components": []
+    },
+    "component_scores": {
+      "concentration": {
+        "score": 34,
+        "weight": 0.25,
+        "weighted_contribution": 8.5,
+        "label": "Market Concentration (RSP/SPY)"
+      },
+      "yield_curve": {
+        "score": 80,
+        "weight": 0.2,
+        "weighted_contribution": 16.0,
+        "label": "Yield Curve (10Y-2Y)"
+      },
+      "credit_conditions": {
+        "score": 70,
+        "weight": 0.15,
+        "weighted_contribution": 10.5,
+        "label": "Credit Conditions (HYG/LQD)"
+      },
+      "size_factor": {
+        "score": 51,
+        "weight": 0.15,
+        "weighted_contribution": 7.6,
+        "label": "Size Factor (IWM/SPY)"
+      },
+      "equity_bond": {
+        "score": 20,
+        "weight": 0.15,
+        "weighted_contribution": 3.0,
+        "label": "Equity-Bond (SPY/TLT)"
+      },
+      "sector_rotation": {
+        "score": 70,
+        "weight": 0.1,
+        "weighted_contribution": 7.0,
+        "label": "Sector Rotation (XLY/XLP)"
+      }
+    }
+  },
+  "regime": {
+    "current_regime": "concentration",
+    "regime_label": "Concentration",
+    "regime_description": "Market leadership concentrated in mega-cap stocks. RSP/SPY declining, small-caps underperforming. Credit conditions stable.",
+    "confidence": "high",
+    "regime_scores": {
+      "concentration": 5,
+      "broadening": 1,
+      "contraction": 3,
+      "inflationary": 1,
+      "transitional": 0
+    },
+    "signaling_components": 4,
+    "transition_probability": {
+      "level": "high",
+      "probability_range": "70-90%",
+      "signaling_count": 4,
+      "avg_component_score": 54.2,
+      "ambiguous": false,
+      "from_regime": null,
+      "to_regime": null
+    },
+    "portfolio_posture": "Focus on mega-cap tech/growth leaders. Underweight small-caps and value.",
+    "evidence": [
+      {
+        "component": "Yield Curve (10Y-2Y)",
+        "score": 80,
+        "signal": "PROXY (SHY/TLT): flattening signal, score=80",
+        "direction": "flattening"
+      },
+      {
+        "component": "Credit Conditions (HYG/LQD)",
+        "score": 70,
+        "signal": "TRANSITION: Credit conditions easing (HYG/LQD=0.7356)",
+        "direction": "easing"
+      },
+      {
+        "component": "Sector Rotation (XLY/XLP)",
+        "score": 70,
+        "signal": "TRANSITION: Sector rotation to risk_off (XLY/XLP=1.3964)",
+        "direction": "risk_off"
+      },
+      {
+        "component": "Size Factor (IWM/SPY)",
+        "score": 51,
+        "signal": "SHIFTING: Size factor trending toward large-cap outperformance (IWM/SPY=0.3802)",
+        "direction": "large_cap_leading"
+      }
+    ],
+    "tied_regimes": null,
+    "consistency": {
+      "concentration": "consistent",
+      "yield_curve": "neutral",
+      "credit_conditions": "consistent",
+      "size_factor": "consistent",
+      "equity_bond": "neutral",
+      "sector_rotation": "neutral"
+    }
+  },
+  "components": {
+    "concentration": {
+      "score": 34,
+      "signal": "MINOR SHIFT: RSP/SPY ratio showing slight change (0.2722)",
+      "data_available": true,
+      "direction": "concentrating",
+      "momentum_qualifier": "N/A",
+      "current_ratio": 0.2722,
+      "current_date": "2026-05-14",
+      "sma_6m": 0.2861,
+      "sma_12m": 0.2862,
+      "roc_3m": -8.9,
+      "roc_12m": -9.06,
+      "percentile": 0.0,
+      "crossover": {
+        "type": "converging",
+        "bars_ago": null,
+        "gap_pct": -0.037
+      },
+      "monthly_points": 30
+    },
+    "yield_curve": {
+      "score": 80,
+      "signal": "PROXY (SHY/TLT): flattening signal, score=80",
+      "data_available": true,
+      "data_source": "shy_tlt_proxy",
+      "direction": "flattening",
+      "curve_state": "proxy_only",
+      "steepening_type": null,
+      "current_spread": null,
+      "current_10y": null,
+      "current_2y": null,
+      "current_date": "2026-05-14",
+      "proxy_ratio": 0.9675,
+      "sma_6m": 0.9503,
+      "sma_12m": 0.9431,
+      "roc_3m": 5.64,
+      "roc_12m": 1.0,
+      "percentile": 96.7,
+      "crossover": {
+        "type": "golden_cross",
+        "bars_ago": 1,
+        "gap_pct": 0.77
+      },
+      "monthly_points": 30
+    },
+    "credit_conditions": {
+      "score": 70,
+      "signal": "TRANSITION: Credit conditions easing (HYG/LQD=0.7356)",
+      "data_available": true,
+      "direction": "easing",
+      "momentum_qualifier": "confirmed",
+      "current_ratio": 0.7356,
+      "current_date": "2026-05-14",
+      "sma_6m": 0.732,
+      "sma_12m": 0.7317,
+      "roc_3m": 1.77,
+      "roc_12m": -0.37,
+      "percentile": 73.3,
+      "crossover": {
+        "type": "golden_cross",
+        "bars_ago": 0,
+        "gap_pct": 0.051
+      },
+      "monthly_points": 30
+    },
+    "size_factor": {
+      "score": 51,
+      "signal": "SHIFTING: Size factor trending toward large-cap outperformance (IWM/SPY=0.3802)",
+      "data_available": true,
+      "direction": "large_cap_leading",
+      "momentum_qualifier": "reversing",
+      "current_ratio": 0.3802,
+      "current_date": "2026-05-14",
+      "sma_6m": 0.3776,
+      "sma_12m": 0.3679,
+      "roc_3m": -0.23,
+      "roc_12m": 9.27,
+      "percentile": 50.0,
+      "crossover": {
+        "type": "golden_cross",
+        "bars_ago": 5,
+        "gap_pct": 2.638
+      },
+      "monthly_points": 30
+    },
+    "equity_bond": {
+      "score": 20,
+      "signal": "STABLE: Equity-bond stable, near-zero correlation (transitional) (SPY/TLT=8.8103)",
+      "data_available": true,
+      "direction": "risk_on",
+      "momentum_qualifier": "N/A",
+      "correlation_regime": "near_zero",
+      "current_ratio": 8.8103,
+      "current_date": "2026-05-14",
+      "sma_6m": 8.0041,
+      "sma_12m": 7.6942,
+      "roc_3m": 16.64,
+      "roc_12m": 28.97,
+      "percentile": 96.7,
+      "correlation_6m": 0.17,
+      "correlation_12m": 0.253,
+      "crossover": {
+        "type": "none",
+        "bars_ago": null,
+        "gap_pct": 4.028
+      },
+      "monthly_points": 30
+    },
+    "sector_rotation": {
+      "score": 70,
+      "signal": "TRANSITION: Sector rotation to risk_off (XLY/XLP=1.3964)",
+      "data_available": true,
+      "direction": "risk_off",
+      "momentum_qualifier": "fading",
+      "current_ratio": 1.3964,
+      "current_date": "2026-05-14",
+      "sma_6m": 1.4027,
+      "sma_12m": 1.431,
+      "roc_3m": 7.56,
+      "roc_12m": 8.2,
+      "percentile": 66.7,
+      "crossover": {
+        "type": "death_cross",
+        "bars_ago": 1,
+        "gap_pct": -1.977
+      },
+      "monthly_points": 30
+    }
+  }
+}
