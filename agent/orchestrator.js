@@ -323,6 +323,11 @@ export class AgentOrchestrator extends EventEmitter {
   triggerEmergencyHeartbeat(reason) {
     for (const [, runtime] of this.runtimes) {
       if (!runtime.harness.state.running || runtime.harness.state.paused) continue;
+      // TrendProphet is a price-only, daily-bar, fixed-window agent — its rules
+      // have no provision to act on intraday news. Waking it just burns tokens
+      // on an out-of-window exit.
+      const resolvedAgent = getResolvedAgentForSandbox(runtime.sandboxId);
+      if (resolvedAgent?.id === 'trend-prophet') continue;
       runtime.harness.emergencyWake(reason);
     }
   }
