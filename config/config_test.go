@@ -42,6 +42,46 @@ func TestLoad_RegimeGate_DefaultsWhenEnvUnset(t *testing.T) {
 	}
 }
 
+// Accept the .env.example / README convention (ALPACA_PUBLIC_KEY,
+// ALPACA_ENDPOINT) as fallbacks for the Go-canonical names (ALPACA_API_KEY,
+// ALPACA_BASE_URL). Mirrors the dual-name behavior in agent/config-store.js so
+// `go run ./cmd/bot/main.go` works against the same .env that the Node side
+// already accepts.
+func TestLoad_AlpacaKeys_FallbackToPublicKeyAndEndpoint(t *testing.T) {
+	t.Setenv("OPERATOR_EMAIL", "test@example.com")
+	t.Setenv("ALPACA_API_KEY", "")
+	t.Setenv("ALPACA_BASE_URL", "")
+	t.Setenv("ALPACA_PUBLIC_KEY", "pk-fallback")
+	t.Setenv("ALPACA_ENDPOINT", "https://example.alpaca.test")
+	if err := Load(); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if AppConfig.AlpacaAPIKey != "pk-fallback" {
+		t.Errorf("AlpacaAPIKey fallback: want %q, got %q", "pk-fallback", AppConfig.AlpacaAPIKey)
+	}
+	if AppConfig.AlpacaBaseURL != "https://example.alpaca.test" {
+		t.Errorf("AlpacaBaseURL fallback: want %q, got %q", "https://example.alpaca.test", AppConfig.AlpacaBaseURL)
+	}
+}
+
+// When both the canonical and legacy names are set, the canonical Go name wins.
+func TestLoad_AlpacaKeys_CanonicalNamePreferredOverFallback(t *testing.T) {
+	t.Setenv("OPERATOR_EMAIL", "test@example.com")
+	t.Setenv("ALPACA_API_KEY", "pk-canonical")
+	t.Setenv("ALPACA_PUBLIC_KEY", "pk-legacy")
+	t.Setenv("ALPACA_BASE_URL", "https://canonical.alpaca.test")
+	t.Setenv("ALPACA_ENDPOINT", "https://legacy.alpaca.test")
+	if err := Load(); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if AppConfig.AlpacaAPIKey != "pk-canonical" {
+		t.Errorf("AlpacaAPIKey: canonical should win, got %q", AppConfig.AlpacaAPIKey)
+	}
+	if AppConfig.AlpacaBaseURL != "https://canonical.alpaca.test" {
+		t.Errorf("AlpacaBaseURL: canonical should win, got %q", AppConfig.AlpacaBaseURL)
+	}
+}
+
 func TestLoad_RegimeGate_HonorsEnvOverrides(t *testing.T) {
 	t.Setenv("OPERATOR_EMAIL", "test@example.com")
 	t.Setenv("ENABLE_REGIME_GATE", "true")

@@ -41,7 +41,7 @@ func main() {
 
 	// Validate required configuration
 	if cfg.AlpacaAPIKey == "" || cfg.AlpacaSecretKey == "" {
-		logger.Fatal("Alpaca API credentials not configured. Please set ALPACA_API_KEY and ALPACA_SECRET_KEY")
+		logger.Fatal("Alpaca API credentials not configured. Please set ALPACA_API_KEY (or ALPACA_PUBLIC_KEY) and ALPACA_SECRET_KEY")
 	}
 
 	// Initialize services

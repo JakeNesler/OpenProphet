@@ -47,9 +47,11 @@ func Load() error {
 	_ = godotenv.Load()
 
 	AppConfig = &Config{
-		AlpacaAPIKey:      os.Getenv("ALPACA_API_KEY"),
+		// Accept ALPACA_API_KEY (Go convention) or ALPACA_PUBLIC_KEY (.env.example /
+		// README / Node side). Same dual-name fallback as agent/config-store.js.
+		AlpacaAPIKey:      firstEnvOrDefault("", "ALPACA_API_KEY", "ALPACA_PUBLIC_KEY"),
 		AlpacaSecretKey:   os.Getenv("ALPACA_SECRET_KEY"),
-		AlpacaBaseURL:     getEnvOrDefault("ALPACA_BASE_URL", "https://paper-api.alpaca.markets"),
+		AlpacaBaseURL:     firstEnvOrDefault("https://paper-api.alpaca.markets", "ALPACA_BASE_URL", "ALPACA_ENDPOINT"),
 		AlpacaPaper:       getEnvOrDefault("ALPACA_PAPER", "true") == "true",
 		ClaudeAPIKey:      os.Getenv("CLAUDE_API_KEY"),
 		XAIAPIKey:         os.Getenv("XAI_API_KEY"),
@@ -100,6 +102,17 @@ func resolveAIProvider(explicit, claudeKey, xaiKey string) string {
 func getEnvOrDefault(key, defaultValue string) string {
 	if value := os.Getenv(key); value != "" {
 		return value
+	}
+	return defaultValue
+}
+
+// firstEnvOrDefault returns the first non-empty value among the named env vars,
+// falling back to defaultValue if all are empty. Used to accept legacy aliases.
+func firstEnvOrDefault(defaultValue string, keys ...string) string {
+	for _, k := range keys {
+		if v := os.Getenv(k); v != "" {
+			return v
+		}
 	}
 	return defaultValue
 }
