@@ -15,7 +15,7 @@ const DEFAULT_HEARTBEAT = {
   midday: 600,
   market_close: 120,
   after_hours: 1800,
-  closed: 14400,
+  closed: 28800,
 };
 
 export const HEARTBEAT_PROFILES = {
@@ -27,12 +27,12 @@ export const HEARTBEAT_PROFILES = {
   passive: {
     label: 'Passive Monitoring',
     description: 'Low-frequency check-ins, hands-off approach',
-    phases: { pre_market: 1800, market_open: 600, midday: 900, market_close: 600, after_hours: 3600, closed: 7200 },
+    phases: { pre_market: 1800, market_open: 600, midday: 900, market_close: 600, after_hours: 3600, closed: 28800 },
   },
   long_horizon: {
     label: 'Long Horizon',
     description: 'Weekly/monthly style check-ins for position management',
-    phases: { pre_market: 7200, market_open: 3600, midday: 3600, market_close: 3600, after_hours: 7200, closed: 14400 },
+    phases: { pre_market: 7200, market_open: 3600, midday: 3600, market_close: 3600, after_hours: 7200, closed: 28800 },
   },
   earnings_season: {
     label: 'Earnings Season',
@@ -42,7 +42,7 @@ export const HEARTBEAT_PROFILES = {
   overnight: {
     label: 'Overnight Hold',
     description: 'Set and forget with minimal overnight checks',
-    phases: { pre_market: 900, market_open: 120, midday: 300, market_close: 120, after_hours: 7200, closed: 10800 },
+    phases: { pre_market: 900, market_open: 120, midday: 300, market_close: 120, after_hours: 7200, closed: 28800 },
   },
   scalp: {
     label: 'Scalp Mode',
@@ -52,12 +52,12 @@ export const HEARTBEAT_PROFILES = {
   penny_stock: {
     label: 'Penny Stock',
     description: 'Active intraday monitoring for fast-moving penny stocks — closes all day-trades by market close',
-    phases: { pre_market: 180, market_open: 60, midday: 90, market_close: 60, after_hours: 1800, closed: 3600 },
+    phases: { pre_market: 180, market_open: 60, midday: 90, market_close: 60, after_hours: 1800, closed: 28800 },
   },
   harvest: {
     label: 'Harvest (Theta)',
     description: 'Low-frequency check-ins for mechanical theta-harvesting — iron condor entries and exits do not require rapid response',
-    phases: { pre_market: 3600, market_open: 900, midday: 900, market_close: 900, after_hours: 7200, closed: 14400 },
+    phases: { pre_market: 3600, market_open: 900, midday: 900, market_close: 900, after_hours: 7200, closed: 28800 },
   },
 };
 
@@ -171,7 +171,7 @@ Read your Strategy Rules section carefully — it contains your complete heartbe
         midday: 900,
         market_close: 900,
         after_hours: 7200,
-        closed: 14400,
+        closed: 28800,
       },
       createdAt: new Date().toISOString(),
     },
@@ -188,7 +188,7 @@ Read your Strategy Rules section carefully — it contains your complete heartbe
         midday: 180,
         market_close: 60,
         after_hours: 3600,
-        closed: 10800,
+        closed: 28800,
       },
       customSystemPrompt: `You are PennyProphet, an autonomous AI penny stock trading agent. You run on a heartbeat loop — each time you wake up, you assess penny stock signals, manage positions, and decide what to do.
 
@@ -483,7 +483,16 @@ function migrateLegacyConfig(config, rawSchemaVersion = 0) {
       if (sandbox?.heartbeat?.closed === 3600) sandbox.heartbeat.closed = 14400;
     }
   }
-  config.schemaVersion = 3;
+  // v3 → v4: bump default `closed` heartbeat from 14400s to 28800s so equity
+  // agents skip the overnight window (8 PM ET → 4 AM ET) entirely. Only
+  // matches the OLD default — user customizations stay untouched.
+  if (rawSchemaVersion < 4) {
+    if (config.heartbeat?.closed === 14400) config.heartbeat.closed = 28800;
+    for (const sandbox of Object.values(config.sandboxes || {})) {
+      if (sandbox?.heartbeat?.closed === 14400) sandbox.heartbeat.closed = 28800;
+    }
+  }
+  config.schemaVersion = 4;
   if (!config.sandboxes) config.sandboxes = {};
 
   for (const account of config.accounts || []) {

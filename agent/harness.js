@@ -23,7 +23,7 @@ export const PHASE_DEFAULTS = {
   midday:       { seconds: 600,  label: 'Midday',        range: [630, 900]  },
   market_close: { seconds: 120,  label: 'Market Close',  range: [900, 960]  },
   after_hours:  { seconds: 1800, label: 'After Hours',   range: [960, 1200] },
-  closed:       { seconds: 14400, label: 'Markets Closed', range: null },
+  closed:       { seconds: 28800, label: 'Markets Closed', range: null },
 };
 
 export function getCurrentPhase() {

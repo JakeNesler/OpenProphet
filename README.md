@@ -802,7 +802,7 @@ All runtime config is stored in `data/agent-config.json`. The dashboard provides
     "midday": 600,
     "market_close": 120,
     "after_hours": 1800,
-    "closed": 3600
+    "closed": 28800
   },
 
   "permissions": {

@@ -1,6 +1,6 @@
 {
   "date": "2026-05-15",
-  "session_start": "2026-05-15T08:18:02.5570625-05:00",
+  "session_start": "2026-05-15T11:44:50.7633637-05:00",
   "session_end": "0001-01-01T00:00:00Z",
   "summary": {
     "total_trades": 0,
@@ -12,7 +12,7 @@
     "total_pnl_percent": 0,
     "largest_win": 0,
     "largest_loss": 0,
-    "starting_capital": 105313.39,
+    "starting_capital": 102540.74,
     "ending_capital": 0,
     "capital_deployed": 0,
     "active_positions": 0,
