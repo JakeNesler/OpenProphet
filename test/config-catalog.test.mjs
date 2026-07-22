@@ -146,13 +146,78 @@ test('loading an existing installation backfills missing built-ins without overw
     assert.equal(config.agents[0].id, 'default');
     assert.equal(config.agents[1].id, 'conservative');
     assert.equal(config.agents[1].name, 'My Custom Guardian', 'existing user customization on a built-in id is preserved');
-    assert.equal(config.agents[1].strategyId, null, 'user override of a built-in field is not clobbered');
+    assert.equal(config.agents[1].strategyId, 'capital-preservation', 'a built-in agent with no strategyId is re-paired from its built-in default');
 
     assert.equal(config.strategies[0].id, 'default');
     assert.equal(config.strategies[0].name, 'Legacy Aggressive Options', 'existing user customization on a built-in strategy id is preserved');
 
     assert.deepEqual(config.agents.slice(2).map(a => a.id), NEW_AGENT_IDS, 'new built-ins appended in catalog order after preserved entries');
     assert.deepEqual(config.strategies.slice(1).map(s => s.id), NEW_STRATEGY_IDS, 'new built-in strategies appended in catalog order after preserved entries');
+  } finally {
+    await cleanup();
+  }
+});
+
+test('upgrade re-pairs built-in agents missing a strategyId while preserving customizations, custom agents, order, and mode-neutrality', async () => {
+  const { store, configPath, cleanup } = await freshStore('backfill');
+  try {
+    const legacy = {
+      schemaVersion: 1,
+      activeAccountId: null,
+      activeSandboxId: null,
+      activeAgentId: 'default',
+      activeModel: 'test/model',
+      accounts: [],
+      sandboxes: {},
+      agents: [
+        { id: 'default', name: 'Prophet', strategyId: 'default', model: 'test/model', createdAt: '2020-01-01T00:00:00.000Z' },
+        // Guardian upgraded in before pairing existed: strategyId key absent entirely.
+        { id: 'conservative', name: 'My Custom Guardian', customSystemPrompt: 'user prompt', model: 'test/model', createdAt: '2020-01-01T00:00:00.000Z' },
+        { id: 'momentum', name: 'Surge', strategyId: null, model: 'test/model', createdAt: '2020-01-01T00:00:00.000Z' },
+        { id: 'mean-reversion', name: 'Pendulum', strategyId: '   ', model: 'test/model', createdAt: '2020-01-01T00:00:00.000Z' },
+        { id: 'macro-rotation', name: 'Compass', strategyId: 'user-picked-strategy', model: 'test/model', createdAt: '2020-01-01T00:00:00.000Z' },
+        { id: 'my-scalper', name: 'My Scalper', strategyId: null, model: 'test/model', createdAt: '2020-01-01T00:00:00.000Z' },
+      ],
+    };
+    await fs.mkdir(path.dirname(configPath), { recursive: true });
+    await fs.writeFile(configPath, JSON.stringify(legacy));
+
+    const config = await store.loadConfig();
+    const byId = Object.fromEntries(config.agents.map(a => [a.id, a]));
+
+    // 1. missing/null/blank strategyId on a built-in is backfilled from its default pairing
+    assert.equal(byId.conservative.strategyId, 'capital-preservation', 'absent strategyId backfilled');
+    assert.equal(byId.momentum.strategyId, 'equity-momentum', 'null strategyId backfilled');
+    assert.equal(byId['mean-reversion'].strategyId, 'etf-mean-reversion', 'blank strategyId backfilled');
+
+    // 2. an explicit, non-empty custom strategyId on a built-in is untouched
+    assert.equal(byId['macro-rotation'].strategyId, 'user-picked-strategy', 'explicit customization preserved');
+
+    // 3. custom agents and existing order are untouched
+    assert.equal(byId['my-scalper'].strategyId, null, 'custom agent with no strategyId left as-is');
+    assert.equal(byId['my-scalper'].name, 'My Scalper', 'custom agent fields untouched');
+    assert.equal(byId.conservative.name, 'My Custom Guardian', 'preserved customization on backfilled built-in');
+    assert.deepEqual(
+      config.agents.slice(0, 6).map(a => a.id),
+      ['default', 'conservative', 'momentum', 'mean-reversion', 'macro-rotation', 'my-scalper'],
+      'existing entries keep their original order',
+    );
+    assert.deepEqual(
+      config.agents.slice(6).map(a => a.id),
+      ['trend-follower', 'catalyst', 'long-vol'],
+      'still-missing built-ins appended in catalog order',
+    );
+
+    // 4. backfill introduces no execution-mode text
+    for (const strategy of config.strategies) {
+      for (const [label, text] of [[`${strategy.id}:name`, strategy.name], [`${strategy.id}:rules`, strategy.customRules]]) {
+        if (!text) continue;
+        const lower = String(text).toLowerCase();
+        for (const term of FORBIDDEN_MODE_TERMS) {
+          assert.ok(!lower.includes(term), `${label} must not mention "${term}"`);
+        }
+      }
+    }
   } finally {
     await cleanup();
   }
