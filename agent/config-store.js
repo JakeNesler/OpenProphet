@@ -686,6 +686,22 @@ function mergeBuiltinCatalog(existing, builtins) {
   return missing.length > 0 ? [...list, ...missing] : list;
 }
 
+function isBlankStrategyId(value) {
+  return value === undefined || value === null || (typeof value === 'string' && value.trim() === '');
+}
+
+// Backfills a built-in agent's missing strategy pairing from its current default definition,
+// so a persona that upgraded in without a strategyId gets re-paired; custom agents, explicit
+// strategyId customizations, and order are left untouched.
+function backfillBuiltinAgentPairings(agents, builtinAgents) {
+  const defaultsById = new Map(builtinAgents.map(agent => [agent.id, agent]));
+  return agents.map(agent => {
+    const builtin = defaultsById.get(agent.id);
+    if (!builtin || !isBlankStrategyId(agent.strategyId)) return agent;
+    return { ...agent, strategyId: builtin.strategyId };
+  });
+}
+
 function mergeSandbox(sandbox, fallback = {}) {
   return {
     ...sandbox,
@@ -717,7 +733,7 @@ function normalizeConfig(raw = {}) {
     plugins: mergePlugins(raw.plugins || {}),
     accounts: raw.accounts || [],
     sandboxes: raw.sandboxes || {},
-    agents: mergeBuiltinCatalog(raw.agents, defaults.agents),
+    agents: backfillBuiltinAgentPairings(mergeBuiltinCatalog(raw.agents, defaults.agents), defaults.agents),
     strategies: mergeBuiltinCatalog(raw.strategies, defaults.strategies),
     models: raw.models || defaults.models,
   };
