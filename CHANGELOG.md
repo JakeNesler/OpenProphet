@@ -1,5 +1,15 @@
 # Changelog
 
+## v2.0.3
+
+- Adds eight built-in agent personas with eight paired strategy templates.
+- Keeps built-in persona and strategy text execution-mode neutral: the catalog defines research,
+  entry, exit, sizing, and risk rules without recommending an account or execution mode.
+- Backfills a missing built-in strategy pairing during upgrades while preserving explicit strategy
+  choices, custom agents, custom fields, and existing order.
+- Restores the canonical signed appliance launcher and installer sources required by the release
+  workflow.
+
 ## v2.0.2
 
 A security, reliability, and agentic-capability overhaul of the autonomous trading harness.
