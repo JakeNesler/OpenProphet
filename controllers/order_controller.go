@@ -2,6 +2,8 @@ package controllers
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"math"
 	"prophet-trader/interfaces"
 	"strconv"
@@ -10,6 +12,15 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/sirupsen/logrus"
 )
+
+func newClientOrderID() (string, error) {
+	bytes := make([]byte, 16)
+	if _, err := rand.Read(bytes); err != nil {
+		return "", err
+	}
+
+	return "op-" + hex.EncodeToString(bytes), nil
+}
 
 // OrderController handles trading operations
 type OrderController struct {
@@ -36,6 +47,59 @@ func NewOrderController(
 		storageService: storage,
 		logger:         logger,
 	}
+}
+
+// ReconcileOpenOrders repairs local orders whose submission result was ambiguous.
+func (oc *OrderController) ReconcileOpenOrders(ctx context.Context) (reconciled int, skipped int) {
+	if oc.tradingService == nil {
+		oc.logger.Warn("Reconcile: trading service unavailable, skipping")
+		return 0, 0
+	}
+
+	orders, err := oc.storageService.GetOrdersNeedingReconciliation()
+	if err != nil {
+		oc.logger.WithError(err).Error("Reconcile: failed to load orders needing reconciliation")
+		return 0, 0
+	}
+
+	for _, order := range orders {
+		broker, err := oc.tradingService.GetOrderByClientOrderID(ctx, order.ClientOrderID)
+		if err != nil {
+			oc.logger.WithError(err).WithField("client_order_id", order.ClientOrderID).
+				Info("Reconcile: order not confirmed at broker, leaving as-is")
+			skipped++
+			continue
+		}
+		if broker == nil {
+			oc.logger.WithField("client_order_id", order.ClientOrderID).
+				Info("Reconcile: broker returned no order, leaving as-is")
+			skipped++
+			continue
+		}
+
+		order.ID = broker.ID
+		order.Status = broker.Status
+		order.FilledQty = broker.FilledQty
+		order.FilledAvgPrice = broker.FilledAvgPrice
+		order.FilledAt = broker.FilledAt
+		order.CanceledAt = broker.CanceledAt
+		if err := oc.storageService.SaveOrder(order); err != nil {
+			oc.logger.WithError(err).WithField("client_order_id", order.ClientOrderID).
+				Warn("Reconcile: failed to save confirmed broker order")
+			skipped++
+			continue
+		}
+
+		reconciled++
+	}
+
+	oc.logger.WithFields(logrus.Fields{
+		"reconciled": reconciled,
+		"skipped":    skipped,
+		"total":      len(orders),
+	}).Info("Reconcile: startup order reconciliation complete")
+
+	return reconciled, skipped
 }
 
 // BuyRequest represents a buy order request
@@ -74,30 +138,44 @@ func (oc *OrderController) Buy(ctx context.Context, req BuyRequest) (*interfaces
 		"type":   req.Type,
 	}).Info("Processing buy order")
 
+	clientOrderID, err := newClientOrderID()
+	if err != nil {
+		return nil, err
+	}
+
 	order := &interfaces.Order{
-		Symbol:      req.Symbol,
-		Qty:         req.Qty,
-		Side:        "buy",
-		Type:        req.Type,
-		TimeInForce: req.TimeInForce,
-		LimitPrice:  req.LimitPrice,
-		StopPrice:   req.StopPrice,
-		Status:      "pending",
-		SubmittedAt: time.Now(),
+		ClientOrderID: clientOrderID,
+		Symbol:        req.Symbol,
+		Qty:           req.Qty,
+		Side:          "buy",
+		Type:          req.Type,
+		TimeInForce:   req.TimeInForce,
+		LimitPrice:    req.LimitPrice,
+		StopPrice:     req.StopPrice,
+		Status:        "pending",
+		SubmittedAt:   time.Now(),
+	}
+
+	if err := oc.storageService.SaveOrder(order); err != nil {
+		oc.logger.WithError(err).Error("Failed to persist buy order intent")
+		return nil, err
 	}
 
 	// Place the order
 	result, err := oc.tradingService.PlaceOrder(ctx, order)
 	if err != nil {
+		order.Status = "submit_failed"
+		if saveErr := oc.storageService.SaveOrder(order); saveErr != nil {
+			oc.logger.WithError(saveErr).Warn("Failed to record buy order submission failure")
+		}
 		oc.logger.WithError(err).Error("Failed to place buy order")
 		return nil, err
 	}
 
-	// Save order to database
 	order.ID = result.OrderID
 	order.Status = result.Status
 	if err := oc.storageService.SaveOrder(order); err != nil {
-		oc.logger.WithError(err).Warn("Failed to save order to database")
+		oc.logger.WithError(err).Warn("Failed to update buy order after submission")
 	}
 
 	oc.logger.WithField("orderID", result.OrderID).Info("Buy order placed successfully")
@@ -120,30 +198,44 @@ func (oc *OrderController) Sell(ctx context.Context, req SellRequest) (*interfac
 		"type":   req.Type,
 	}).Info("Processing sell order")
 
+	clientOrderID, err := newClientOrderID()
+	if err != nil {
+		return nil, err
+	}
+
 	order := &interfaces.Order{
-		Symbol:      req.Symbol,
-		Qty:         req.Qty,
-		Side:        "sell",
-		Type:        req.Type,
-		TimeInForce: req.TimeInForce,
-		LimitPrice:  req.LimitPrice,
-		StopPrice:   req.StopPrice,
-		Status:      "pending",
-		SubmittedAt: time.Now(),
+		ClientOrderID: clientOrderID,
+		Symbol:        req.Symbol,
+		Qty:           req.Qty,
+		Side:          "sell",
+		Type:          req.Type,
+		TimeInForce:   req.TimeInForce,
+		LimitPrice:    req.LimitPrice,
+		StopPrice:     req.StopPrice,
+		Status:        "pending",
+		SubmittedAt:   time.Now(),
+	}
+
+	if err := oc.storageService.SaveOrder(order); err != nil {
+		oc.logger.WithError(err).Error("Failed to persist sell order intent")
+		return nil, err
 	}
 
 	// Place the order
 	result, err := oc.tradingService.PlaceOrder(ctx, order)
 	if err != nil {
+		order.Status = "submit_failed"
+		if saveErr := oc.storageService.SaveOrder(order); saveErr != nil {
+			oc.logger.WithError(saveErr).Warn("Failed to record sell order submission failure")
+		}
 		oc.logger.WithError(err).Error("Failed to place sell order")
 		return nil, err
 	}
 
-	// Save order to database
 	order.ID = result.OrderID
 	order.Status = result.Status
 	if err := oc.storageService.SaveOrder(order); err != nil {
-		oc.logger.WithError(err).Warn("Failed to save order to database")
+		oc.logger.WithError(err).Warn("Failed to update sell order after submission")
 	}
 
 	oc.logger.WithField("orderID", result.OrderID).Info("Sell order placed successfully")
@@ -409,15 +501,40 @@ func (oc *OrderController) PlaceOptionsOrder(c *gin.Context) {
 		}
 	}
 
+	clientOrderID, err := newClientOrderID()
+	if err != nil {
+		oc.logger.WithError(err).Error("Failed to generate options client order ID")
+		c.JSON(500, gin.H{"error": err.Error()})
+		return
+	}
+
 	order := &interfaces.OptionsOrder{
+		ClientOrderID:  clientOrderID,
+		Symbol:         req.Symbol,
+		Underlying:     req.Underlying,
+		Qty:            req.Qty,
+		Side:           req.Side,
+		PositionIntent: req.PositionIntent,
+		Type:           req.Type,
+		TimeInForce:    req.TimeInForce,
+		LimitPrice:     req.LimitPrice,
+	}
+	intent := &interfaces.Order{
+		ClientOrderID: clientOrderID,
 		Symbol:        req.Symbol,
-		Underlying:    req.Underlying,
 		Qty:           req.Qty,
 		Side:          req.Side,
-		PositionIntent: req.PositionIntent,
 		Type:          req.Type,
 		TimeInForce:   req.TimeInForce,
 		LimitPrice:    req.LimitPrice,
+		Status:        "pending",
+		SubmittedAt:   time.Now(),
+	}
+
+	if err := oc.storageService.SaveOrder(intent); err != nil {
+		oc.logger.WithError(err).Error("Failed to persist options order intent")
+		c.JSON(500, gin.H{"error": err.Error()})
+		return
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -425,9 +542,18 @@ func (oc *OrderController) PlaceOptionsOrder(c *gin.Context) {
 
 	result, err := oc.tradingService.PlaceOptionsOrder(ctx, order)
 	if err != nil {
+		intent.Status = "submit_failed"
+		if saveErr := oc.storageService.SaveOrder(intent); saveErr != nil {
+			oc.logger.WithError(saveErr).Warn("Failed to record options order submission failure")
+		}
 		oc.logger.WithError(err).Error("Failed to place options order")
 		c.JSON(500, gin.H{"error": err.Error()})
 		return
+	}
+	intent.ID = result.OrderID
+	intent.Status = result.Status
+	if err := oc.storageService.SaveOrder(intent); err != nil {
+		oc.logger.WithError(err).Warn("Failed to update options order after submission")
 	}
 
 	c.JSON(200, result)

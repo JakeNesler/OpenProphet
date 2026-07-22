@@ -41,3 +41,20 @@ node_modules/
 # News summary cache
 news_summaries/*.json
 quickstart.sh
+
+# OpenProphet paid content & diagnostics
+setup-macos.sh
+setup-linux.sh
+start_agent.sh
+diagnostics.sh
+QUICK-START.txt
+.openprophet-diagnostics.log
+# OpenProphet paid content & diagnostics
+diagnostics/
+
+# Local-only mission scratch (prompts, review diffs) — never track/push
+.mission/
+
+# Runtime output (agent-generated journals/decisions — not release material)
+activity_logs/
+decisive_actions/

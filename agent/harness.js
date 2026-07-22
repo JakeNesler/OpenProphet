@@ -4,6 +4,8 @@ import { spawn, execSync } from 'child_process';
 import { EventEmitter } from 'events';
 import fs from 'fs/promises';
 import path from 'path';
+import { renderToolMenu } from './tool-catalog.js';
+import { DEFAULT_AGENT_MODEL, DEFAULT_MAX_TOOL_ROUNDS, BEAT_TIMEOUT_MS, SIGKILL_GRACE_MS, BEAT_BACKOFF } from './defaults.js';
 
 // Default max tool rounds; overridden by permissions config at runtime
 
@@ -56,7 +58,16 @@ export async function buildSystemPrompt(agentConfig, options = {}) {
   // Layer 1: Agent Identity (custom or default)
   const identity = (agentConfig.systemPromptTemplate === 'custom' && agentConfig.customSystemPrompt)
     ? agentConfig.customSystemPrompt
-    : `You are ${agentConfig.name || 'Prophet'}, an autonomous AI trading agent. You run on a heartbeat loop — each time you wake up, you assess the market, manage positions, and decide what to do.\n\n${agentConfig.description || 'You are a disciplined trading agent'}\n\nYou are running autonomously — no human is approving your actions in real-time.`;
+    : `You are ${agentConfig.name || 'Prophet'}, an autonomous AI trading agent operating a real brokerage account with no human approving your actions in real time. You wake on a heartbeat, read the market, manage your open positions, and place trades yourself.
+
+${agentConfig.description || 'You are a disciplined trading agent.'}
+
+Your mandate, in strict priority order:
+1. Preserve capital. A trade you don't take can't lose money — avoiding ruin comes before any gain.
+2. Trade only with an edge: a specific, falsifiable thesis backed by current data and how your own past setups actually resolved.
+3. Compound consistently. Many small, disciplined wins beat rare large gambles.
+
+You are evidence-based, risk-first, and decisive. You do not trade out of boredom, revenge, or FOMO, and you never invent facts you haven't verified with a tool.`;
 
   // Layer 2: Strategy Rules
   const rulesBlock = tradingRules
@@ -66,43 +77,40 @@ export async function buildSystemPrompt(agentConfig, options = {}) {
   // Layer 3: System Instructions (tools, heartbeat, operational)
   const systemInstructions = `## Available Tools
 
-**Trading**: get_account, get_positions, get_orders, place_buy_order, place_sell_order, place_managed_position, get_managed_positions, close_managed_position, cancel_order
-**Options**: place_options_order, get_options_positions, get_options_position, get_options_chain
-**Market Data**: get_quote, get_latest_bar, get_historical_bars, analyze_stocks
-**News**: get_news, search_news, get_market_news, get_quick_market_intelligence, get_cleaned_news, get_marketwatch_topstories
-**Agent Config**: update_agent_prompt, update_strategy_rules, get_agent_config, set_heartbeat, update_permissions, set_session_mode, create_agent, create_strategy, assign_agent_to_sandbox
-**Heartbeat**: get_heartbeat_profiles, apply_heartbeat_profile, get_heartbeat_phases, update_heartbeat_phase
-**Logging**: log_decision, log_activity, get_activity_log
-**Trade History**: find_similar_setups, store_trade_setup, get_trade_stats
-**Utility**: get_datetime, wait
+${renderToolMenu()}
 
-## Heartbeat Behavior
+Call a tool for every fact. Never assume your balance, buying power, positions, prices, or the news from memory — if you haven't checked it this heartbeat, you don't know it.
 
-Each heartbeat you should:
-1. Check time and market status
-2. Review account and positions
-3. Decide and act based on phase:
-   - Pre-market: Gather intelligence, plan
-   - Market open: Execute, monitor
-   - Midday: Monitor positions, check stops
-   - Market close: Review, decide holds
-   - After hours: Review, log activity
-4. Follow your strategy rules
-5. Summarize what you did
+## Your Heartbeat Loop
+Each time you wake, work this loop in order and stop once you've acted or confirmed there's nothing to do:
+1. ORIENT — get_datetime; note the market phase and your current heartbeat interval.
+2. ASSESS — get_account and get_positions. Know your cash, buying power, open risk, and P&L before deciding anything.
+3. MANAGE FIRST — tend open positions before hunting new ones: check stops and targets, exit any thesis that has broken, take profits per your rules.
+4. GATHER — only if capital is free to deploy, pull the specific intelligence your decision needs (news, quotes, technicals). Don't over-research.
+5. RECALL — before opening any NEW position, call find_similar_setups with your thesis and weigh how similar past setups actually resolved.
+6. DECIDE & ACT — place an order only if you have a stated edge AND the guardrails allow it. Use a limit price and always pass a \`thesis\` argument. Otherwise do nothing and say so.
+7. RECORD — log_decision with the reasoning behind every trade; when a position closes, call store_trade_setup with the realized result so your memory compounds.
 
-Heartbeat control:
-- apply_heartbeat_profile: "active" | "passive" | "long_horizon" | "earnings_season" | "overnight" | "scalp"
-- set_heartbeat: override interval in seconds
-- Phases (ET): pre_market 4-9:30am, market_open 9:30-10:30am, midday 10:30am-3pm, market_close 3-4pm, after_hours 4-8pm
+## Phase Playbook (ET)
+- Pre-market (4–9:30): gather intelligence, build a watchlist and theses. Don't chase thin pre-market prints.
+- Market open (9:30–10:30): execute planned entries into real liquidity; monitor closely.
+- Midday (10:30–3): manage positions, tighten stops, avoid low-conviction churn.
+- Market close (3–4): decide what to hold overnight vs. flatten, and act before the bell.
+- After hours (4–8) / Closed: review, log, and plan. No impulsive after-hours trades.
+Tune cadence with apply_heartbeat_profile ("active" | "passive" | "long_horizon" | "earnings_season" | "overnight" | "scalp") or set_heartbeat (seconds) — speed up when volatile, slow down when quiet.
 
-## Operational Rules
-- Be decisive. Analyze and act.
-- Don't waste heartbeats on excessive analysis.
-- If nothing to do, say so briefly.
-- Always log trade reasoning with log_decision.
-- NEVER ask the user questions. You are autonomous.
-- If you need information, use your tools.
-- Each heartbeat is independent - gather data, decide, act, summarize.`;
+## Risk Discipline (non-negotiable)
+- Your Strategy Rules above and the per-heartbeat GUARDRAILS are HARD limits. Never work around them.
+- Always use limit orders; never market into a position you can't price.
+- Size for survival: respect max-position and max-deployed limits and keep dry powder.
+- Every open position needs a pre-defined exit (stop and target). Cut losers at your stop without negotiation.
+- One clear thesis per trade. If you can't state it in a sentence, don't take it.
+
+## Operating Rules
+- You are autonomous: NEVER ask the user a question or wait for approval — use your tools and act.
+- Be decisive and brief. Don't burn heartbeats on analysis paralysis; if nothing meets your criteria, say "no action" and why in a line or two.
+- Each heartbeat is independent — re-establish state from tools; don't rely on stale assumptions.
+- Report what you did (or deliberately didn't) and why, concisely.`;
 
   return `${identity}\n\n${rulesBlock}\n\n${systemInstructions}`;
 }
@@ -215,6 +223,7 @@ export class AgentHarness {
     this._interrupted = false;
     this._beatTimeout = null;
     this._sessionEpoch = 0;
+    this._consecutiveErrors = 0;
   }
 
   _resolveSandbox() {
@@ -298,7 +307,7 @@ export class AgentHarness {
     if (!this._agentConfig) throw new Error(`Agent not found for sandbox ${this._sandboxConfig.id}`);
 
     const account = this._resolveAccount();
-    const model = this._agentConfig.model || this._sandboxConfig.agent?.model || 'anthropic/claude-sonnet-4-6';
+    const model = this._agentConfig.model || this._sandboxConfig.agent?.model || DEFAULT_AGENT_MODEL;
 
     this.state.activeAgentId = this._agentConfig.id;
     this.state.activeAccountId = account?.id || this._sandboxConfig.accountId || null;
@@ -486,16 +495,7 @@ The user/operator is sending you a direct message. Read it carefully and respond
 
 ## Your Available Tools (DO NOT call get_agent_config to discover these)
 
-**Trading**: get_account, get_positions, get_orders, place_buy_order, place_sell_order, place_managed_position, get_managed_positions, close_managed_position, cancel_order
-**Options**: place_options_order, get_options_positions, get_options_position, get_options_chain
-**Market Data**: get_quote, get_latest_bar, get_historical_bars, analyze_stocks
-**News**: get_news, search_news, get_market_news, get_quick_market_intelligence, get_cleaned_news, get_marketwatch_topstories, get_marketwatch_realtime
-**Intelligence**: aggregate_and_summarize_news, list_news_summaries, get_news_summary
-**Agent Config**: update_agent_prompt, update_strategy_rules, get_agent_config, set_heartbeat, update_permissions, set_session_mode, create_agent, create_strategy, assign_agent_to_sandbox
-**Heartbeat**: get_heartbeat_profiles, apply_heartbeat_profile, get_heartbeat_phases, update_heartbeat_phase
-**Logging**: log_decision, log_activity, get_activity_log
-**Trade History**: find_similar_setups, store_trade_setup, get_trade_stats
-**Utility**: get_datetime, wait
+${renderToolMenu()}
 
 ## Instructions
 - If the user asks to create a new agent: use create_agent to create it, then optionally create_strategy for its rules, then assign_agent_to_sandbox to activate it.
@@ -528,6 +528,17 @@ ${userBlock}`;
   }
 
   _getHeartbeatSeconds() {
+    const base = this._baseHeartbeatSeconds();
+    // Exponential backoff after repeated beat failures: slow the loop so a broken
+    // dependency (auth, broker, opencode) isn't hammered. Caps at 16x / 1 hour.
+    if (this._consecutiveErrors >= BEAT_BACKOFF.threshold) {
+      const factor = Math.min(2 ** (this._consecutiveErrors - 2), BEAT_BACKOFF.factor);
+      return Math.min(base * factor, BEAT_BACKOFF.capSeconds);
+    }
+    return base;
+  }
+
+  _baseHeartbeatSeconds() {
     if (this.state.heartbeatOverride) {
       const override = this.state.heartbeatOverride;
       if (override.oneTime) this.state.heartbeatOverride = null;
@@ -613,9 +624,15 @@ ${userBlock}`;
         { role: 'assistant', kind: 'heartbeat', beat: beatNum, phase, toolCalls: result.toolCalls || 0, content: result.text || '' },
       ]);
 
+      this._consecutiveErrors = 0; // clean beat clears any backoff
+
     } catch (err) {
       this.state.stats.errors++;
+      this._consecutiveErrors++;
       this.state.emit('agent_log', { message: `Beat #${beatNum} error: ${err.message}`, level: 'error' });
+      if (this._consecutiveErrors >= BEAT_BACKOFF.threshold) {
+        this.state.emit('agent_log', { message: `${this._consecutiveErrors} consecutive beat failures — backing off the next heartbeat.`, level: 'warning' });
+      }
       console.error(`Beat #${beatNum} error:`, err);
     }
 
@@ -641,7 +658,7 @@ ${userBlock}`;
 
       // Check max tool rounds from permissions
       const perms = this._resolvePermissions();
-      const maxToolRounds = perms.maxToolRoundsPerBeat || 25;
+      const maxToolRounds = perms.maxToolRoundsPerBeat || DEFAULT_MAX_TOOL_ROUNDS;
 
       const args = [
         'run',
@@ -783,8 +800,15 @@ ${userBlock}`;
         if (proc && !proc.killed) {
           this.state.emit('agent_log', { message: 'Beat timed out (5 min max), killing process.', level: 'warning' });
           proc.kill('SIGTERM');
+          // Escalate to SIGKILL if the process ignores SIGTERM (otherwise the beat hangs forever).
+          setTimeout(() => {
+            if (proc && !proc.killed) {
+              this.state.emit('agent_log', { message: 'Process ignored SIGTERM after timeout — sending SIGKILL.', level: 'error' });
+              proc.kill('SIGKILL');
+            }
+          }, SIGKILL_GRACE_MS);
         }
-      }, 300000);
+      }, BEAT_TIMEOUT_MS);
     });
   }
 

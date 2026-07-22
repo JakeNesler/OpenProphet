@@ -1,0 +1,45 @@
+# openprophet-agent — the self-hosted OSS trading agent (this repo): Node dashboard +
+# Go trading backend + a per-heartbeat `opencode` subprocess. DISTINCT from the commercial
+# `openprophet` SaaS (api+datastream+router). LAN-only by design — it drives a brokerage
+# account and must never be internet-public. Stateful SINGLETON: local SQLite + JSON config
+# on a PVC, replicas pinned to 1 (two replicas would double-trade). No leaderboard component.
+#
+# Render (when/if pushed):
+#   idpctl render --env dev --root ~/idp -f deploy.yaml --image ghcr.io/jakenesler/openprophet-agent:<tag>
+app: openprophet-agent
+
+runtime:
+  image: ghcr.io/jakenesler/openprophet-agent   # immutable tag supplied by `idpctl render --image`
+  port: 3737                                     # the dashboard (Express); Go backend stays internal on 4534
+
+routes:
+  - host: openprophet-agent.local               # dev => MetalLB LAN LoadBalancer, no Cloudflare (LAN only)
+    public: true
+
+sizing:
+  profile: minimal
+  replicas: 1                                    # MUST stay 1 — a trading agent is a singleton; 2 => double orders
+  autoscale:
+    enabled: false
+
+volumes:
+  - name: data
+    type: pvc
+    claim: openprophet-agent-data
+    mountPath: /app/data                         # SQLite DBs + agent-config.json persist here
+
+env:
+  ALPACA_ENDPOINT: https://paper-api.alpaca.markets   # paper by default; the app never auto-switches to live
+
+secrets:
+  - ANTHROPIC_API_KEY      # opencode auth for the heartbeat LLM subprocess (env-key mode, no interactive login)
+  - ALPACA_PUBLIC_KEY      # auto-imported as the initial paper account on first boot
+  - ALPACA_SECRET_KEY
+  - GEMINI_API_KEY         # optional — AI news cleaning
+  - AGENT_AUTH_TOKEN       # dashboard bearer auth (LAN hardening)
+  - TRADING_BOT_TOKEN      # Go API bearer (else auto-minted at boot)
+
+logging:
+  enabled: true
+metrics:
+  enabled: false
