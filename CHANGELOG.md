@@ -1,8 +1,9 @@
 # Changelog
 
-## v2.0.0
+## v2.0.2
 
 A security, reliability, and agentic-capability overhaul of the autonomous trading harness.
+(Released as v2.0.2 — v2.0.0/v2.0.1 were consumed by earlier appliance-packaging tags.)
 Paper trading only — options trading carries significant risk of loss.
 
 ### Security
