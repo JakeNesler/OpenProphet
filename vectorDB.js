@@ -1,7 +1,6 @@
 // vectorDB.js - Vector similarity search for trading decisions
 import Database from 'better-sqlite3';
 import * as sqliteVec from 'sqlite-vec';
-import { pipeline } from '@xenova/transformers';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -14,6 +13,10 @@ let embedder = null;
 async function getEmbedder() {
   if (!embedder) {
     console.log('🔄 Loading local embedding model (first run may take 30s)...');
+    // Lazy-load the heavy ML stack (@xenova/transformers → sharp/onnx) only when an
+    // embedding is actually needed, so DB/stats paths (getTradeStats, getEmbeddingCount)
+    // and module import don't pull it in.
+    const { pipeline } = await import('@xenova/transformers');
     embedder = await pipeline('feature-extraction', 'Xenova/all-MiniLM-L6-v2');
     console.log('✅ Embedding model loaded');
   }
@@ -229,6 +232,7 @@ export function getTradeStats(filters = {}) {
     const query = getDb().prepare(`
       SELECT
         COUNT(*) as count,
+        SUM(CASE WHEN result_pct IS NOT NULL THEN 1 ELSE 0 END) as resolved,
         SUM(CASE WHEN result_pct > 0 THEN 1 ELSE 0 END) as winners,
         SUM(CASE WHEN result_pct < 0 THEN 1 ELSE 0 END) as losers,
         AVG(result_pct) as avg_result_pct,
@@ -243,11 +247,16 @@ export function getTradeStats(filters = {}) {
 
     const stats = query.get(...params);
 
+    // win_rate is computed over RESOLVED trades only (result_pct IS NOT NULL) so that
+    // pending setups auto-captured at entry don't deflate the rate.
+    const resolved = stats.resolved || 0;
     return {
       count: stats.count || 0,
+      resolved,
+      pending: (stats.count || 0) - resolved,
       winners: stats.winners || 0,
       losers: stats.losers || 0,
-      win_rate: stats.count > 0 ? (stats.winners / stats.count) * 100 : 0,
+      win_rate: resolved > 0 ? (stats.winners / resolved) * 100 : 0,
       avg_result_pct: stats.avg_result_pct || 0,
       avg_result_dollars: stats.avg_result_dollars || 0,
       best_result_pct: stats.best_pct || 0,

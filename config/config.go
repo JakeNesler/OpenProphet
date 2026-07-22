@@ -14,6 +14,9 @@ type Config struct {
 	GeminiAPIKey      string
 	DatabasePath      string
 	ServerPort        string
+	ServerHost        string
+	AuthToken         string
+	AllowedOrigins    string
 	EnableLogging     bool
 	LogLevel          string
 	DataRetentionDays int
@@ -33,6 +36,9 @@ func Load() error {
 		GeminiAPIKey:      os.Getenv("GEMINI_API_KEY"),
 		DatabasePath:      getEnvOrDefault("DATABASE_PATH", "./data/prophet_trader.db"),
 		ServerPort:        getEnvOrDefault("PORT", getEnvOrDefault("SERVER_PORT", "4534")),
+		ServerHost:        getEnvOrDefault("SERVER_HOST", "127.0.0.1"),
+		AuthToken:         getEnvOrDefault("TRADING_BOT_TOKEN", ""),
+		AllowedOrigins:    getEnvOrDefault("CORS_ALLOWED_ORIGINS", ""),
 		EnableLogging:     getEnvOrDefault("ENABLE_LOGGING", "true") == "true",
 		LogLevel:          getEnvOrDefault("LOG_LEVEL", "info"),
 		DataRetentionDays: 90,

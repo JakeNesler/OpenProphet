@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"log"
+	"net/url"
 	"os"
 	"os/signal"
 	"prophet-trader/config"
@@ -10,6 +11,7 @@ import (
 	"prophet-trader/database"
 	"prophet-trader/interfaces"
 	"prophet-trader/services"
+	"strings"
 	"syscall"
 	"time"
 
@@ -106,6 +108,21 @@ func main() {
 		logger.Warn("Trading service unavailable - API credentials may be invalid")
 	}
 
+	if tradingService != nil {
+		// Run reconciliation in the background: the Alpaca SDK lookup ignores the context,
+		// so a slow/hung broker call must never block startup or serving. It only repairs
+		// local records; trading resumes on the agent heartbeat regardless.
+		go func() {
+			reconcileCtx, reconcileCancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer reconcileCancel()
+			reconciled, skipped := orderController.ReconcileOpenOrders(reconcileCtx)
+			logger.WithFields(logrus.Fields{
+				"reconciled": reconciled,
+				"skipped":    skipped,
+			}).Info("Startup order reconciliation complete")
+		}()
+	}
+
 	// Start background tasks
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -153,8 +170,8 @@ func main() {
 	}()
 
 	// Start HTTP server
-	logger.WithField("port", cfg.ServerPort).Info("Starting HTTP server...")
-	if err := router.Run(":" + cfg.ServerPort); err != nil {
+	logger.WithFields(logrus.Fields{"host": cfg.ServerHost, "port": cfg.ServerPort}).Info("Starting HTTP server...")
+	if err := router.Run(cfg.ServerHost + ":" + cfg.ServerPort); err != nil {
 		logger.Fatal("Failed to start server:", err)
 	}
 }
@@ -164,7 +181,10 @@ func setupRouter(orderController *controllers.OrderController, newsController *c
 
 	// Enable CORS
 	router.Use(func(c *gin.Context) {
-		c.Writer.Header().Set("Access-Control-Allow-Origin", "*")
+		if isAllowedOrigin(c.GetHeader("Origin"), config.AppConfig.AllowedOrigins) {
+			c.Writer.Header().Set("Access-Control-Allow-Origin", c.GetHeader("Origin"))
+			c.Writer.Header().Set("Vary", "Origin")
+		}
 		c.Writer.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
 		c.Writer.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
 		if c.Request.Method == "OPTIONS" {
@@ -181,6 +201,13 @@ func setupRouter(orderController *controllers.OrderController, newsController *c
 
 	// Trading endpoints
 	api := router.Group("/api/v1")
+	api.Use(func(c *gin.Context) {
+		if config.AppConfig.AuthToken == "" || c.GetHeader("Authorization") == "Bearer "+config.AppConfig.AuthToken {
+			c.Next()
+			return
+		}
+		c.AbortWithStatus(401)
+	})
 	{
 		// Order endpoints
 		api.POST("/orders/buy", orderController.HandleBuy)
@@ -249,6 +276,27 @@ func setupRouter(orderController *controllers.OrderController, newsController *c
 	router.Static("/dashboard", "./web")
 
 	return router
+}
+
+func isAllowedOrigin(origin, allowedOrigins string) bool {
+	if origin == "" {
+		return false
+	}
+
+	if allowedOrigins != "" {
+		for _, allowedOrigin := range strings.Split(allowedOrigins, ",") {
+			if origin == strings.TrimSpace(allowedOrigin) {
+				return true
+			}
+		}
+		return false
+	}
+
+	parsedOrigin, err := url.Parse(origin)
+	if err != nil {
+		return false
+	}
+	return parsedOrigin.Scheme == "http" && (parsedOrigin.Hostname() == "localhost" || parsedOrigin.Hostname() == "127.0.0.1")
 }
 
 // Background task to clean up old data

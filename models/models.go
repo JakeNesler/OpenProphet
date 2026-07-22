@@ -9,7 +9,8 @@ import (
 // DBOrder represents an order in the database
 type DBOrder struct {
 	gorm.Model
-	OrderID        string `gorm:"uniqueIndex"`
+	OrderID        string  `gorm:"index"`
+	ClientOrderID  *string `gorm:"uniqueIndex"` // pointer so empty stays NULL — many NULLs allowed, only non-empty ids dedupe
 	Symbol         string `gorm:"index"`
 	Qty            float64
 	Side           string

@@ -1,0 +1,14 @@
+.git
+node_modules
+prophet_bot
+data
+.mission
+.dist
+diagnostics
+activity_logs
+decisive_actions
+*.log
+.env
+.env.example
+.claude
+test

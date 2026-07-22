@@ -1,6 +1,7 @@
 package database
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -11,6 +12,7 @@ import (
 	"github.com/sirupsen/logrus"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 	"gorm.io/gorm/logger"
 )
 
@@ -47,6 +49,14 @@ func NewLocalStorage(dbPath string) (*LocalStorage, error) {
 		&models.DBManagedPosition{},
 	); err != nil {
 		return nil, fmt.Errorf("failed to migrate database: %w", err)
+	}
+	if db.Migrator().HasIndex(&models.DBOrder{}, "idx_orders_order_id") {
+		if err := db.Migrator().DropIndex(&models.DBOrder{}, "idx_orders_order_id"); err != nil {
+			return nil, fmt.Errorf("failed to migrate order ID index: %w", err)
+		}
+		if err := db.Migrator().CreateIndex(&models.DBOrder{}, "OrderID"); err != nil {
+			return nil, fmt.Errorf("failed to migrate order ID index: %w", err)
+		}
 	}
 
 	logger := logrus.New()
@@ -124,9 +134,26 @@ func (s *LocalStorage) GetBars(symbol string, start, end time.Time) ([]*interfac
 }
 
 // SaveOrder saves an order to the database
+// clientOrderIDPtr returns nil for an empty client order id so it is stored as SQL NULL
+// (SQLite allows many NULLs under a unique index; only non-empty ids must be unique).
+func clientOrderIDPtr(s string) *string {
+	if s == "" {
+		return nil
+	}
+	return &s
+}
+
+func derefStr(p *string) string {
+	if p == nil {
+		return ""
+	}
+	return *p
+}
+
 func (s *LocalStorage) SaveOrder(order *interfaces.Order) error {
 	dbOrder := &models.DBOrder{
 		OrderID:        order.ID,
+		ClientOrderID:  clientOrderIDPtr(order.ClientOrderID),
 		Symbol:         order.Symbol,
 		Qty:            order.Qty,
 		Side:           order.Side,
@@ -142,7 +169,28 @@ func (s *LocalStorage) SaveOrder(order *interfaces.Order) error {
 		CanceledAt:     order.CanceledAt,
 	}
 
-	result := s.db.Save(dbOrder)
+	query := s.db
+	if order.ClientOrderID != "" {
+		query = query.Clauses(clause.OnConflict{
+			Columns: []clause.Column{{Name: "client_order_id"}},
+			DoUpdates: clause.AssignmentColumns([]string{
+				"order_id", "symbol", "qty", "side", "type", "time_in_force",
+				"limit_price", "stop_price", "status", "filled_qty", "filled_avg_price",
+				"submitted_at", "filled_at", "canceled_at",
+			}),
+		})
+	} else if order.ID != "" {
+		var existing models.DBOrder
+		if err := s.db.Where("order_id = ?", order.ID).First(&existing).Error; err != nil {
+			if !errors.Is(err, gorm.ErrRecordNotFound) {
+				return fmt.Errorf("failed to find existing order: %w", err)
+			}
+		} else {
+			dbOrder.ID = existing.ID
+		}
+	}
+
+	result := query.Save(dbOrder)
 	if result.Error != nil {
 		return fmt.Errorf("failed to save order: %w", result.Error)
 	}
@@ -161,6 +209,7 @@ func (s *LocalStorage) GetOrder(orderID string) (*interfaces.Order, error) {
 
 	return &interfaces.Order{
 		ID:             dbOrder.OrderID,
+		ClientOrderID:  derefStr(dbOrder.ClientOrderID),
 		Symbol:         dbOrder.Symbol,
 		Qty:            dbOrder.Qty,
 		Side:           dbOrder.Side,
@@ -195,6 +244,42 @@ func (s *LocalStorage) GetOrders(status string) ([]*interfaces.Order, error) {
 	for i, dbOrder := range dbOrders {
 		orders[i] = &interfaces.Order{
 			ID:             dbOrder.OrderID,
+			ClientOrderID:  derefStr(dbOrder.ClientOrderID),
+			Symbol:         dbOrder.Symbol,
+			Qty:            dbOrder.Qty,
+			Side:           dbOrder.Side,
+			Type:           dbOrder.Type,
+			TimeInForce:    dbOrder.TimeInForce,
+			LimitPrice:     dbOrder.LimitPrice,
+			StopPrice:      dbOrder.StopPrice,
+			Status:         dbOrder.Status,
+			FilledQty:      dbOrder.FilledQty,
+			FilledAvgPrice: dbOrder.FilledAvgPrice,
+			SubmittedAt:    dbOrder.SubmittedAt,
+			FilledAt:       dbOrder.FilledAt,
+			CanceledAt:     dbOrder.CanceledAt,
+		}
+	}
+
+	return orders, nil
+}
+
+// GetOrdersNeedingReconciliation retrieves submitted orders whose broker result is unknown.
+func (s *LocalStorage) GetOrdersNeedingReconciliation() ([]*interfaces.Order, error) {
+	var dbOrders []*models.DBOrder
+
+	result := s.db.Where("status IN ? AND client_order_id IS NOT NULL", []string{"pending", "submit_failed"}).
+		Order("submitted_at DESC").
+		Find(&dbOrders)
+	if result.Error != nil {
+		return nil, fmt.Errorf("failed to get orders needing reconciliation: %w", result.Error)
+	}
+
+	orders := make([]*interfaces.Order, len(dbOrders))
+	for i, dbOrder := range dbOrders {
+		orders[i] = &interfaces.Order{
+			ID:             dbOrder.OrderID,
+			ClientOrderID:  derefStr(dbOrder.ClientOrderID),
 			Symbol:         dbOrder.Symbol,
 			Qty:            dbOrder.Qty,
 			Side:           dbOrder.Side,

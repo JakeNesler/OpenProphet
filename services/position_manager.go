@@ -2,6 +2,8 @@ package services
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -13,6 +15,15 @@ import (
 
 	"github.com/sirupsen/logrus"
 )
+
+func newClientOrderID() (string, error) {
+	bytes := make([]byte, 16)
+	if _, err := rand.Read(bytes); err != nil {
+		return "", err
+	}
+
+	return "op-" + hex.EncodeToString(bytes), nil
+}
 
 // ManagedPosition represents a position with automated risk management
 type ManagedPosition struct {
@@ -242,23 +253,45 @@ func (pm *PositionManager) placeEntryOrder(ctx context.Context, position *Manage
 		orderType = "limit"
 	}
 
+	clientOrderID, err := newClientOrderID()
+	if err != nil {
+		pm.logger.WithError(err).Warn("Failed to generate client order id; placing order without one")
+		clientOrderID = ""
+	}
+
 	order := &interfaces.Order{
-		Symbol:      position.Symbol,
-		Qty:         position.Quantity,
-		Side:        position.Side,
-		Type:        orderType,
-		TimeInForce: "gtc",
-		Status:      "pending",
-		SubmittedAt: time.Now(),
+		ClientOrderID: clientOrderID,
+		Symbol:        position.Symbol,
+		Qty:           position.Quantity,
+		Side:          position.Side,
+		Type:          orderType,
+		TimeInForce:   "gtc",
+		Status:        "pending",
+		SubmittedAt:   time.Now(),
 	}
 
 	if orderType == "limit" {
 		order.LimitPrice = &position.EntryPrice
 	}
 
+	if err := pm.storageService.SaveOrder(order); err != nil {
+		pm.logger.WithError(err).Error("Failed to persist managed position entry order intent")
+		return err
+	}
+
 	result, err := pm.tradingService.PlaceOrder(ctx, order)
 	if err != nil {
+		order.Status = "submit_failed"
+		if saveErr := pm.storageService.SaveOrder(order); saveErr != nil {
+			pm.logger.WithError(saveErr).Warn("Failed to record managed position entry submission failure")
+		}
 		return err
+	}
+
+	order.ID = result.OrderID
+	order.Status = result.Status
+	if err := pm.storageService.SaveOrder(order); err != nil {
+		pm.logger.WithError(err).Warn("Failed to update managed position entry order after submission")
 	}
 
 	position.EntryOrderID = result.OrderID
@@ -377,20 +410,41 @@ func (pm *PositionManager) placeStopLossOrder(ctx context.Context, position *Man
 		exitSide = "buy"
 	}
 
+	clientOrderID, err := newClientOrderID()
+	if err != nil {
+		pm.logger.WithError(err).Warn("Failed to generate client order id; placing order without one")
+		clientOrderID = ""
+	}
+
 	order := &interfaces.Order{
-		Symbol:      position.Symbol,
-		Qty:         position.RemainingQty,
-		Side:        exitSide,
-		Type:        "stop",
-		TimeInForce: "gtc",
-		StopPrice:   &position.StopLossPrice,
-		Status:      "pending",
-		SubmittedAt: time.Now(),
+		ClientOrderID: clientOrderID,
+		Symbol:        position.Symbol,
+		Qty:           position.RemainingQty,
+		Side:          exitSide,
+		Type:          "stop",
+		TimeInForce:   "gtc",
+		StopPrice:     &position.StopLossPrice,
+		Status:        "pending",
+		SubmittedAt:   time.Now(),
+	}
+
+	if err := pm.storageService.SaveOrder(order); err != nil {
+		pm.logger.WithError(err).Warn("Failed to persist stop loss order intent before submit")
 	}
 
 	result, err := pm.tradingService.PlaceOrder(ctx, order)
 	if err != nil {
+		order.Status = "submit_failed"
+		if saveErr := pm.storageService.SaveOrder(order); saveErr != nil {
+			pm.logger.WithError(saveErr).Warn("Failed to record stop loss submission failure")
+		}
 		return err
+	}
+
+	order.ID = result.OrderID
+	order.Status = result.Status
+	if err := pm.storageService.SaveOrder(order); err != nil {
+		pm.logger.WithError(err).Warn("Failed to save stop loss order")
 	}
 
 	position.StopLossOrderID = result.OrderID
@@ -410,20 +464,41 @@ func (pm *PositionManager) placeTakeProfitOrder(ctx context.Context, position *M
 		exitSide = "buy"
 	}
 
+	clientOrderID, err := newClientOrderID()
+	if err != nil {
+		pm.logger.WithError(err).Warn("Failed to generate client order id; placing order without one")
+		clientOrderID = ""
+	}
+
 	order := &interfaces.Order{
-		Symbol:      position.Symbol,
-		Qty:         position.RemainingQty,
-		Side:        exitSide,
-		Type:        "limit",
-		TimeInForce: "gtc",
-		LimitPrice:  &position.TakeProfitPrice,
-		Status:      "pending",
-		SubmittedAt: time.Now(),
+		ClientOrderID: clientOrderID,
+		Symbol:        position.Symbol,
+		Qty:           position.RemainingQty,
+		Side:          exitSide,
+		Type:          "limit",
+		TimeInForce:   "gtc",
+		LimitPrice:    &position.TakeProfitPrice,
+		Status:        "pending",
+		SubmittedAt:   time.Now(),
+	}
+
+	if err := pm.storageService.SaveOrder(order); err != nil {
+		pm.logger.WithError(err).Warn("Failed to persist take profit order intent before submit")
 	}
 
 	result, err := pm.tradingService.PlaceOrder(ctx, order)
 	if err != nil {
+		order.Status = "submit_failed"
+		if saveErr := pm.storageService.SaveOrder(order); saveErr != nil {
+			pm.logger.WithError(saveErr).Warn("Failed to record take profit submission failure")
+		}
 		return err
+	}
+
+	order.ID = result.OrderID
+	order.Status = result.Status
+	if err := pm.storageService.SaveOrder(order); err != nil {
+		pm.logger.WithError(err).Warn("Failed to save take profit order")
 	}
 
 	position.TakeProfitOrderID = result.OrderID
@@ -445,20 +520,41 @@ func (pm *PositionManager) placePartialExitOrder(ctx context.Context, position *
 
 	partialQty := position.Quantity * (position.PartialExit.Percent / 100.0)
 
+	clientOrderID, err := newClientOrderID()
+	if err != nil {
+		pm.logger.WithError(err).Warn("Failed to generate client order id; placing order without one")
+		clientOrderID = ""
+	}
+
 	order := &interfaces.Order{
-		Symbol:      position.Symbol,
-		Qty:         partialQty,
-		Side:        exitSide,
-		Type:        "limit",
-		TimeInForce: "gtc",
-		LimitPrice:  &position.PartialExit.TargetPrice,
-		Status:      "pending",
-		SubmittedAt: time.Now(),
+		ClientOrderID: clientOrderID,
+		Symbol:        position.Symbol,
+		Qty:           partialQty,
+		Side:          exitSide,
+		Type:          "limit",
+		TimeInForce:   "gtc",
+		LimitPrice:    &position.PartialExit.TargetPrice,
+		Status:        "pending",
+		SubmittedAt:   time.Now(),
+	}
+
+	if err := pm.storageService.SaveOrder(order); err != nil {
+		pm.logger.WithError(err).Warn("Failed to persist partial exit order intent before submit")
 	}
 
 	result, err := pm.tradingService.PlaceOrder(ctx, order)
 	if err != nil {
+		order.Status = "submit_failed"
+		if saveErr := pm.storageService.SaveOrder(order); saveErr != nil {
+			pm.logger.WithError(saveErr).Warn("Failed to record partial exit submission failure")
+		}
 		return err
+	}
+
+	order.ID = result.OrderID
+	order.Status = result.Status
+	if err := pm.storageService.SaveOrder(order); err != nil {
+		pm.logger.WithError(err).Warn("Failed to save partial exit order")
 	}
 
 	position.PartialExitOrders = append(position.PartialExitOrders, result.OrderID)
@@ -672,22 +768,41 @@ func (pm *PositionManager) CloseManagedPosition(ctx context.Context, positionID 
 				exitSide = "buy"
 			}
 
-			order := &interfaces.Order{
-				Symbol:      position.Symbol,
-				Qty:         position.RemainingQty,
-				Side:        exitSide,
-				Type:        "market",
-				TimeInForce: "day",
-				Status:      "pending",
-				SubmittedAt: time.Now(),
+			clientOrderID, err := newClientOrderID()
+			if err != nil {
+				pm.logger.WithError(err).Warn("Failed to generate client order id; placing exit order without one")
+				clientOrderID = ""
 			}
 
-			_, err := pm.tradingService.PlaceOrder(ctx, order)
+			order := &interfaces.Order{
+				ClientOrderID: clientOrderID,
+				Symbol:        position.Symbol,
+				Qty:           position.RemainingQty,
+				Side:          exitSide,
+				Type:          "market",
+				TimeInForce:   "day",
+				Status:        "pending",
+				SubmittedAt:   time.Now(),
+			}
+
+			if err := pm.storageService.SaveOrder(order); err != nil {
+				pm.logger.WithError(err).Warn("Failed to persist market exit order intent before submit")
+			}
+
+			result, err := pm.tradingService.PlaceOrder(ctx, order)
 			if err != nil {
-				// Log error but still close the position in our system
+				order.Status = "submit_failed"
+				if saveErr := pm.storageService.SaveOrder(order); saveErr != nil {
+					pm.logger.WithError(saveErr).Warn("Failed to record market exit submission failure")
+				}
 				pm.logger.WithError(err).Error("Failed to place exit order (market may be closed)")
 				pm.logger.Info("Closing position in database despite order error")
 			} else {
+				order.ID = result.OrderID
+				order.Status = result.Status
+				if err := pm.storageService.SaveOrder(order); err != nil {
+					pm.logger.WithError(err).Warn("Failed to save market exit order")
+				}
 				pm.logger.WithField("quantity", position.RemainingQty).Info("Placed market exit order")
 			}
 		}

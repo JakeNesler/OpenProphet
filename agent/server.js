@@ -5,13 +5,16 @@ import 'dotenv/config';
 import express from 'express';
 import http from 'http';
 import fs from 'fs/promises';
+import { existsSync, rmSync } from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { spawn, execSync } from 'child_process';
+import { randomBytes } from 'crypto';
 import axios from 'axios';
 import { AgentHarness, buildSystemPrompt } from './harness.js';
 import ChatStore from './chat-store.js';
 import AgentOrchestrator from './orchestrator.js';
+import { alpacaTradingUrl, DEFAULT_AGENT_MODEL } from './defaults.js';
 import { migrateLegacyDataForAccount } from './data-migration.js';
 import {
   loadConfig, getConfig, saveConfig,
@@ -25,13 +28,26 @@ import {
   updatePlugin, updatePluginForSandbox, getPlugin, getPluginForSandbox,
   getActiveSandbox, getSandbox, getHeartbeatForSandboxPhase, getSandboxes,
   getHeartbeatProfiles, getPhaseTimeRanges, applyHeartbeatProfile, updatePhaseTimeRange,
+  getAvailableModels,
 } from './config-store.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = path.join(__dirname, '..');
+
+// Secure-by-default: if no TRADING_BOT_TOKEN is configured, mint an ephemeral one now and
+// inject it into the environment BEFORE anything reads it, so the Go backend it spawns, this
+// server's own axios calls, and the MCP subprocess all authenticate. Without this, the
+// loopback trading API would accept unauthenticated orders from any local process. Set an
+// explicit TRADING_BOT_TOKEN in .env to use a stable, shareable token instead.
+if (!process.env.TRADING_BOT_TOKEN) {
+  process.env.TRADING_BOT_TOKEN = randomBytes(32).toString('hex');
+  console.log('[auth] No TRADING_BOT_TOKEN set — generated an ephemeral session token for the trading API.');
+}
+
 const PORT = process.env.AGENT_PORT || 3737;
 const TRADING_BOT_PORT = process.env.TRADING_BOT_PORT || '4534';
-const TRADING_BOT_URL = process.env.TRADING_BOT_URL || `http://localhost:${TRADING_BOT_PORT}`;
+const TRADING_BOT_URL = process.env.TRADING_BOT_URL || `http://127.0.0.1:${TRADING_BOT_PORT}`;
+const TRADING_BOT_TOKEN = process.env.TRADING_BOT_TOKEN || '';
 
 function getSandboxDbPathForAccount(accountId) {
   return path.join(PROJECT_ROOT, 'data', 'sandboxes', accountId, 'prophet_trader.db');
@@ -39,7 +55,12 @@ function getSandboxDbPathForAccount(accountId) {
 
 // Pooled HTTP agent for Go backend calls — reuses TCP connections
 const goHttpAgent = new http.Agent({ keepAlive: true, maxSockets: 10, keepAliveMsecs: 30000 });
-const goAxios = axios.create({ baseURL: TRADING_BOT_URL, httpAgent: goHttpAgent, timeout: 5000 });
+const goAxios = axios.create({
+  baseURL: TRADING_BOT_URL,
+  httpAgent: goHttpAgent,
+  timeout: 5000,
+  headers: TRADING_BOT_TOKEN ? { Authorization: `Bearer ${TRADING_BOT_TOKEN}` } : {},
+});
 
 const app = express();
 app.use(express.json({ limit: '1mb' }));
@@ -64,6 +85,44 @@ app.use('/api', authMiddleware);
 // Manages the Go trading bot lifecycle, supports restarting with different Alpaca keys
 let goProc = null;
 let goReady = false;
+let goRebuildAttempted = false; // guard so a broken binary rebuilds once, not in a loop
+
+// Build the Go binary if it is missing, or if `force` (e.g. the committed binary was built
+// for another OS/arch and cannot exec on this machine). Returns the binary path or throws.
+function ensureGoBinary(force = false) {
+  const binaryPath = path.join(PROJECT_ROOT, 'prophet_bot');
+  if (force || !existsSync(binaryPath)) {
+    console.log(force ? '  Rebuilding Go binary for this platform...' : '  Building Go binary...');
+    // `go build -o` refuses to overwrite an existing file it doesn't recognize as its own
+    // output (e.g. a wrong-arch or corrupt binary), so remove it first when rebuilding.
+    if (force && existsSync(binaryPath)) {
+      try { rmSync(binaryPath, { force: true }); } catch { /* fall through to build */ }
+    }
+    execSync('go build -o prophet_bot ./cmd/bot', { cwd: PROJECT_ROOT, timeout: 120000 });
+  }
+  return binaryPath;
+}
+
+// When the binary can't run (spawn error / immediate crash), rebuild it once and retry.
+function rebuildAndRestart(account, reason) {
+  if (goRebuildAttempted) {
+    console.error(`  Go backend still failing (${reason}) after a rebuild — giving up.`);
+    broadcast('agent_log', {
+      message: `Trading backend won't start (${reason}). Try: go build -o prophet_bot ./cmd/bot`,
+      level: 'error', timestamp: new Date().toISOString(),
+    });
+    return;
+  }
+  goRebuildAttempted = true;
+  try {
+    ensureGoBinary(true);
+  } catch (err) {
+    console.error('  Go rebuild failed:', err.message);
+    return;
+  }
+  const acc = getActiveAccount();
+  if (acc) startGoBackend(acc);
+}
 
 async function startGoBackend(account) {
   // Kill existing if running
@@ -74,14 +133,10 @@ async function startGoBackend(account) {
     return false;
   }
 
-  // Build binary if needed
-  const binaryPath = path.join(PROJECT_ROOT, 'prophet_bot');
+  // Ensure a runnable binary exists (build if missing).
+  let binaryPath;
   try {
-    const fs = await import('fs');
-    if (!fs.existsSync(binaryPath)) {
-      console.log('  Building Go binary...');
-      execSync('go build -o prophet_bot ./cmd/bot', { cwd: PROJECT_ROOT, timeout: 60000 });
-    }
+    binaryPath = ensureGoBinary();
   } catch (err) {
     console.error('  Failed to build Go binary:', err.message);
     return false;
@@ -91,9 +146,11 @@ async function startGoBackend(account) {
     ...process.env,
     ALPACA_API_KEY: account.publicKey,
     ALPACA_SECRET_KEY: account.secretKey,
-    ALPACA_BASE_URL: account.baseUrl || (account.paper ? 'https://paper-api.alpaca.markets' : 'https://api.alpaca.markets'),
+    ALPACA_BASE_URL: alpacaTradingUrl(account.paper, account.baseUrl),
     ALPACA_PAPER: account.paper ? 'true' : 'false',
     PORT: TRADING_BOT_PORT,
+    SERVER_HOST: '127.0.0.1',
+    TRADING_BOT_TOKEN,
     DATABASE_PATH: getSandboxDbPathForAccount(account.id),
     ACTIVITY_LOG_DIR: path.join(PROJECT_ROOT, 'data', 'sandboxes', account.id, 'activity_logs'),
     OPENPROPHET_ACCOUNT_ID: account.id,
@@ -104,12 +161,26 @@ async function startGoBackend(account) {
 
   console.log(`  Starting Go backend for account "${account.name}" (${account.paper ? 'paper' : 'live'})...`);
 
+  const spawnedAt = Date.now();
+  let earlyFailureHandled = false;
+  const handleEarlyFailure = (reason) => {
+    if (earlyFailureHandled) return;
+    earlyFailureHandled = true;
+    rebuildAndRestart(account, reason);
+  };
+
   goProc = spawn(binaryPath, [], {
     cwd: PROJECT_ROOT,
     env,
     stdio: ['ignore', 'pipe', 'pipe'],
   });
 
+  goProc.on('error', (err) => {
+    console.error(`  Go backend failed to spawn: ${err.message}`);
+    goReady = false;
+    goProc = null;
+    handleEarlyFailure(`spawn error: ${err.code || err.message}`);
+  });
   goProc.stdout.on('data', (d) => {
     const msg = d.toString().trim();
     if (msg) console.log(`  [go] ${msg}`);
@@ -124,6 +195,12 @@ async function startGoBackend(account) {
     goProc = null;
     // Auto-restart on unexpected crash (not manual stop)
     if (code !== 0 && code !== null && signal !== 'SIGTERM') {
+      // A crash within seconds of spawn usually means a stale/wrong-arch binary (e.g. the
+      // committed macOS build running on Linux) — rebuild for THIS platform, once.
+      if (Date.now() - spawnedAt < 3000) {
+        handleEarlyFailure(`crashed on start (code ${code})`);
+        return;
+      }
       console.log('  Go backend crashed — auto-restarting in 5s...');
       broadcast('agent_log', {
         message: 'Trading backend crashed — auto-restarting in 5s...',
@@ -144,6 +221,7 @@ async function startGoBackend(account) {
     try {
       await goAxios.get('/health', { timeout: 2000 });
       goReady = true;
+      goRebuildAttempted = false; // healthy now — allow a fresh rebuild if it ever breaks later
       console.log(`  Go backend ready on port ${TRADING_BOT_PORT} (account: ${account.name})`);
       broadcast('agent_log', {
         message: `Trading backend started for account "${account.name}" (${account.paper ? 'paper' : 'live'})`,
@@ -227,6 +305,8 @@ function createHarnessForActiveSandbox() {
     chatStore,
     opencodeEnv: {
       TRADING_BOT_URL,
+      TRADING_BOT_TOKEN,
+      SERVER_HOST: '127.0.0.1',
       AGENT_URL: `http://localhost:${PORT}`,
       OPENPROPHET_SANDBOX_ID: sandbox?.id || '',
       OPENPROPHET_ACCOUNT_ID: sandbox?.accountId || '',
@@ -507,7 +587,7 @@ app.post('/api/manager/message', async (req, res) => {
 
     const config = getConfig();
     const mgr = config.manager || {};
-    const model = mgr.model || config.activeModel || 'anthropic/claude-sonnet-4-6';
+    const model = mgr.model || config.activeModel || DEFAULT_AGENT_MODEL;
     const ocModel = model.includes('/') ? model : `anthropic/${model}`;
     const customPromptAddition = mgr.customPrompt ? `\n\n## Custom Instructions\n${mgr.customPrompt}` : '';
     
@@ -667,8 +747,8 @@ app.post('/api/agent/message', async (req, res) => {
 /status - Show status of all portfolios
 /portfolios - Show status of all portfolios
 
-Models: ${(config.models || []).length} available
-Providers: ${[...new Set((config.models || []).map(m => m.id.split('/')[0]))].join(', ')}
+Models: ${(getAvailableModels()).length} available
+Providers: ${[...new Set((getAvailableModels()).map(m => m.id.split('/')[0]))].join(', ')}
 
 Use /newagent to open the agent builder!`;
       return res.json({ ok: true, text: helpText });
@@ -676,7 +756,7 @@ Use /newagent to open the agent builder!`;
     
     // /newagent - open agent builder
     if (trimmed === '/newagent' || trimmed.startsWith('/newagent ')) {
-      const models = config.models || [];
+      const models = getAvailableModels();
       const strategies = config.strategies || [];
       broadcast('agent_builder', {
         mode: 'create',
@@ -693,7 +773,7 @@ Use /newagent to open the agent builder!`;
       const agentId = editMatch[1];
       const agent = getAgentById(agentId);
       if (!agent) return res.status(404).json({ error: 'Agent not found' });
-      const models = config.models || [];
+      const models = getAvailableModels();
       const strategies = config.strategies || [];
       broadcast('agent_builder', {
         mode: 'edit',
@@ -860,11 +940,11 @@ app.post('/api/sandboxes/:id/message', async (req, res) => {
     if (trimmed === '/newagent') {
       broadcast('agent_builder', {
         mode: 'create',
-        models: config.models || [],
+        models: getAvailableModels(),
         strategies: config.strategies || [],
         sandboxId,
       });
-      const providers = [...new Set((config.models || []).map(m => m.id.split('/')[0]))].join(', ');
+      const providers = [...new Set((getAvailableModels()).map(m => m.id.split('/')[0]))].join(', ');
       return res.json({ ok: true, builder: true, text: 
         'Agent Builder opened! You can also describe what you want here:\n\n' +
         '- What should it trade? (options, stocks, both)\n' +
@@ -885,7 +965,7 @@ app.post('/api/sandboxes/:id/message', async (req, res) => {
       broadcast('agent_builder', {
         mode: 'edit',
         agent,
-        models: config.models || [],
+        models: getAvailableModels(),
         strategies: config.strategies || [],
         sandboxId,
       });
@@ -934,12 +1014,12 @@ app.get('/api/sandboxes/:id/dashboard', (req, res) => {
     }
 
     const config = getConfig();
-    const providers = [...new Set((config.models || []).map(m => m.id.split('/')[0]))];
+    const providers = [...new Set((getAvailableModels()).map(m => m.id.split('/')[0]))];
 
     res.json({
       sandbox,
       agent,
-      models: config.models,
+      models: getAvailableModels(),
       providers,
       heartbeat,
       heartbeatProfiles: getHeartbeatProfiles(),
@@ -1029,11 +1109,29 @@ app.post('/api/agent/heartbeat', (req, res) => {
 });
 
 // ── Safe Config (strip secrets) ────────────────────────────────────
+// Any config key whose NAME matches this is a credential and must never reach the
+// dashboard/SSE in the clear. Denylist-by-name is defensive: a newly-added secret field
+// (e.g. a plugin token or webhook) is masked automatically instead of silently leaking.
+const SECRET_KEY_RE = /(secret|token|password|passwd|webhook|credential|privatekey|api[_-]?key|publickey)/i;
+
+function redactSecrets(value) {
+  if (Array.isArray(value)) return value.map(redactSecrets);
+  if (value && typeof value === 'object') {
+    const out = {};
+    for (const [k, v] of Object.entries(value)) {
+      if (typeof v === 'string' && v && SECRET_KEY_RE.test(k)) {
+        out[k] = v.length > 4 ? '****' + v.slice(-4) : '****';
+      } else {
+        out[k] = redactSecrets(v);
+      }
+    }
+    return out;
+  }
+  return value;
+}
+
 function safeConfig() {
-  const cfg = { ...getConfig() };
-  // Strip secret keys from accounts
-  cfg.accounts = (cfg.accounts || []).map(a => ({ ...a, secretKey: a.secretKey ? '****' + a.secretKey.slice(-4) : '****' }));
-  return cfg;
+  return redactSecrets(getConfig());
 }
 
 // ── Config CRUD ────────────────────────────────────────────────────
@@ -1095,8 +1193,7 @@ app.delete('/api/chats/:sessionId', async (req, res) => {
 // Accounts
 app.get('/api/accounts', (req, res) => {
   const config = getConfig();
-  // Don't expose secret keys to frontend
-  const safe = config.accounts.map(a => ({ ...a, secretKey: '****' + a.secretKey.slice(-4) }));
+  const safe = config.accounts.map(a => redactSecrets(a));
   res.json({ accounts: safe, activeId: config.activeAccountId });
 });
 
@@ -1219,7 +1316,8 @@ app.delete('/api/strategies/:id', async (req, res) => {
 // Model selection
 app.get('/api/models', (req, res) => {
   const config = getConfig();
-  const allModels = config.models || [];
+  // Live, auto-refreshing catalog (force a refresh with ?refresh=1).
+  const allModels = getAvailableModels({ force: req.query.refresh === '1' });
   const provider = req.query.provider;
   const models = provider ? allModels.filter(m => m.id.startsWith(provider + '/')) : allModels;
   const allProviders = [...new Set(allModels.map(m => m.id.split('/')[0]))];
@@ -1238,56 +1336,10 @@ app.post('/api/models/activate', async (req, res) => {
 
 app.post('/api/models/refresh', async (req, res) => {
   try {
-    const out = execSync('opencode models 2>&1', { encoding: 'utf-8', timeout: 10000 });
-    const lines = out.trim().split('\n').filter(l => l && l.includes('/'));
-    const models = [];
-    const seen = new Set();
-    
-    for (const line of lines) {
-      const id = line.trim();
-      if (!id || seen.has(id)) continue;
-      seen.add(id);
-      
-      let name = id;
-      let description = '';
-      
-      if (id.startsWith('anthropic/')) {
-        const model = id.replace('anthropic/', '');
-        if (model.includes('opus')) {
-          name = `Claude Opus ${model.replace(/[^\d.]/g, '')}`;
-          description = 'Anthropic Opus model';
-        } else if (model.includes('sonnet')) {
-          name = `Claude Sonnet ${model.replace(/[^\d.]/g, '')}`;
-          description = 'Anthropic Sonnet model';
-        } else if (model.includes('haiku')) {
-          name = `Claude Haiku ${model.replace(/[^\d.]/g, '')}`;
-          description = 'Anthropic Haiku model';
-        }
-      } else if (id.startsWith('openai/')) {
-        name = id.replace('openai/', '').replace(/-/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
-        description = 'OpenAI model';
-      } else if (id.startsWith('google/')) {
-        name = 'Gemini ' + id.replace('google/', '').replace(/-/g, ' ');
-        description = 'Google model';
-      } else if (id.startsWith('openrouter/')) {
-        name = id.replace('openrouter/', '').replace(/:/g, ' ').replace(/-/g, ' ');
-        description = 'OpenRouter model';
-      } else if (id.startsWith('opencode/')) {
-        name = id.replace('opencode/', '').replace(/-/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
-        description = 'OpenCode provider model';
-      } else {
-        name = id.split('/').pop().replace(/-/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
-        description = 'Available model';
-      }
-      
-      models.push({ id, name, description });
-    }
-    
-    const config = getConfig();
-    config.models = models;
-    await saveConfig();
+    // Force the live registry to re-query `opencode models` (single source of truth).
+    const models = getAvailableModels({ force: true });
     broadcast('config', safeConfig());
-    res.json({ ok: true, count: models.length });
+    res.json({ ok: true, count: models.length, models });
   } catch (err) { res.status(400).json({ error: err.message }); }
 });
 
@@ -1366,13 +1418,13 @@ app.put('/api/permissions', async (req, res) => {
 // ── Plugins ────────────────────────────────────────────────────────
 app.get('/api/plugins', (req, res) => {
   const config = getConfig();
-  res.json(config.plugins || {});
+  res.json(redactSecrets(config.plugins || {}));
 });
 
 app.get('/api/plugins/:name', (req, res) => {
   const sandboxId = req.query.sandboxId;
   const plugin = sandboxId ? getPluginForSandbox(sandboxId, req.params.name) : getPlugin(req.params.name);
-  res.json(plugin || {});
+  res.json(redactSecrets(plugin || {}));
 });
 
 app.put('/api/plugins/:name', async (req, res) => {
