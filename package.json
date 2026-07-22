@@ -1,6 +1,6 @@
 {
   "name": "openprophet",
-  "version": "2.0.2",
+  "version": "2.0.3",
   "description": "Autonomous AI trading agent with web dashboard, MCP tools, and Go trading backend",
   "main": "mcp-server.js",
   "type": "module",
