@@ -7,6 +7,7 @@ import { spawn, execSync } from 'child_process';
 import axios from 'axios';
 
 import { AgentHarness } from './harness.js';
+import { alpacaTradingUrl, portForAgent } from './defaults.js';
 import {
   getSandbox,
   getSandboxes,
@@ -45,13 +46,8 @@ export class AgentOrchestrator extends EventEmitter {
   }
 
   getSandboxPort(sandboxId) {
-    // Use hash of sandboxId to create deterministic port offset (1-10)
-    let hash = 0;
-    for (const char of String(sandboxId || 'default')) {
-      hash = (hash * 31 + char.charCodeAt(0)) % 1000;
-    }
-    const offset = (hash % 10) + 1; // Ports 4535-4544
-    return this.tradingBotBasePort + offset;
+    // Deterministic per-sandbox port via the shared, tested allocation policy.
+    return portForAgent(sandboxId, this.tradingBotBasePort);
   }
 
   getSandboxDbPath(sandboxId) {
@@ -82,9 +78,15 @@ export class AgentOrchestrator extends EventEmitter {
     if (!sandbox) throw new Error(`Sandbox not found: ${sandboxId}`);
 
     const port = this.getSandboxPort(sandboxId);
-    const tradingBotUrl = `http://localhost:${port}`;
+    const tradingBotUrl = `http://127.0.0.1:${port}`;
     const goHttpAgent = new http.Agent({ keepAlive: true, maxSockets: 10, keepAliveMsecs: 30000 });
-    const goAxios = axios.create({ baseURL: tradingBotUrl, httpAgent: goHttpAgent, timeout: 5000 });
+    const tradingBotToken = process.env.TRADING_BOT_TOKEN || '';
+    const goAxios = axios.create({
+      baseURL: tradingBotUrl,
+      httpAgent: goHttpAgent,
+      timeout: 5000,
+      headers: tradingBotToken ? { Authorization: `Bearer ${tradingBotToken}` } : {},
+    });
 
     const harness = new AgentHarness({
       sandboxId,
@@ -99,6 +101,8 @@ export class AgentOrchestrator extends EventEmitter {
       chatStore: this.chatStore,
       opencodeEnv: {
         TRADING_BOT_URL: tradingBotUrl,
+        TRADING_BOT_TOKEN: tradingBotToken,
+        SERVER_HOST: '127.0.0.1',
         AGENT_URL: this.agentUrl,
         OPENPROPHET_SANDBOX_ID: sandboxId,
         OPENPROPHET_ACCOUNT_ID: sandbox.accountId,
@@ -133,22 +137,25 @@ export class AgentOrchestrator extends EventEmitter {
     }
   }
 
-  async _ensureBinary() {
-    if (this._binaryReady) return;
+  async _ensureBinary(force = false) {
+    if (!force && this._binaryReady) return;
     const binaryPath = path.join(this.projectRoot, 'prophet_bot');
-    try {
-      await fs.access(binaryPath);
-    } catch {
+    let exists = true;
+    try { await fs.access(binaryPath); } catch { exists = false; }
+    if (force || !exists) {
+      // `go build -o` refuses to overwrite a file it doesn't recognize as its own output
+      // (a stale/wrong-arch binary), so remove it first when rebuilding.
+      if (force && exists) { try { await fs.rm(binaryPath, { force: true }); } catch { /* fall through */ } }
       execSync('go build -o prophet_bot ./cmd/bot', {
         cwd: this.projectRoot,
-        timeout: 60000,
+        timeout: 120000,
         stdio: 'pipe',
       });
     }
     this._binaryReady = true;
   }
 
-  async startGoBackend(sandboxId) {
+  async startGoBackend(sandboxId, _isRetry = false) {
     const runtime = this.ensureRuntime(sandboxId);
     const account = getAccountById(runtime.sandbox.accountId);
     if (!account) throw new Error(`Account not found for sandbox ${sandboxId}`);
@@ -161,9 +168,11 @@ export class AgentOrchestrator extends EventEmitter {
       ...process.env,
       ALPACA_API_KEY: account.publicKey,
       ALPACA_SECRET_KEY: account.secretKey,
-      ALPACA_BASE_URL: account.baseUrl || (account.paper ? 'https://paper-api.alpaca.markets' : 'https://api.alpaca.markets'),
+      ALPACA_BASE_URL: alpacaTradingUrl(account.paper, account.baseUrl),
       ALPACA_PAPER: account.paper ? 'true' : 'false',
       PORT: String(runtime.port),
+      SERVER_HOST: '127.0.0.1',
+      TRADING_BOT_TOKEN: process.env.TRADING_BOT_TOKEN || '',
       DATABASE_PATH: this.getSandboxDbPath(sandboxId),
       ACTIVITY_LOG_DIR: path.join(this.projectRoot, 'data', 'sandboxes', account.id, 'activity_logs'),
       OPENPROPHET_SANDBOX_ID: sandboxId,
@@ -225,6 +234,13 @@ export class AgentOrchestrator extends EventEmitter {
       } catch {
         // keep waiting
       }
+    }
+
+    // Didn't come up — the binary may be stale/wrong-arch for this host. Rebuild once and retry.
+    if (!_isRetry) {
+      this.emit('agent_log', { sandboxId, level: 'warning', message: `Trading backend did not become ready — rebuilding binary for this platform and retrying...` });
+      await this._ensureBinary(true);
+      return this.startGoBackend(sandboxId, true);
     }
 
     throw new Error(`Trading backend failed to start for sandbox ${sandboxId}`);

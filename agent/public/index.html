@@ -1,8 +1,10 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="dark">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <meta name="theme-color" content="#06070c">
+  <meta name="color-scheme" content="dark">
   <title>Prophet Agent</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -34,33 +36,90 @@
       --border: #d8d7d0;
       --text: #2d2d2d;
     }
+    /* ── Dark theme — "trading terminal at night" ──────────────
+       Deep neutral ink-black (not navy), a single luminous blue accent,
+       and vivid financial semantics that pop against near-black. */
     [data-theme="dark"] {
-      --paper: #1a1a2e;
-      --paper-dark: #16162a;
-      --paper-darker: #121226;
-      --ink: #e0e0e0;
-      --ink-light: #c8c8c8;
-      --ink-muted: #9a9a9a;
-      --ink-faint: #6a6a6a;
-      --accent: #5a8ac0;
-      --accent-dark: #4a7ab0;
-      --accent-light: #7aa0d0;
-      --success: #4a9a5a;
-      --success-bg: #1a2a1e;
-      --error: #d06060;
-      --error-bg: #2a1a1a;
-      --warning: #c0a050;
-      --warning-bg: #2a2418;
-      --rule: #333350;
-      --rule-light: #2a2a44;
-      --code-bg: #14142a;
-      --bg-dark: #14142a;
-      --bg-darker: #101028;
-      --bg-panel: #1e1e36;
-      --border: #333350;
-      --text: #e0e0e0;
+      --paper: #06070c;        /* app background — near-black, faint cool cast */
+      --paper-dark: #040509;   /* recessed rails: headers, input strips */
+      --paper-darker: #020305; /* deepest wells */
+      --ink: #eef0f5;          /* primary text — bright cool off-white */
+      --ink-light: #ccd0da;
+      --ink-muted: #8b91a1;
+      --ink-faint: #565c6b;
+      --accent: #6ea8ff;       /* luminous refined blue */
+      --accent-dark: #4d8ae6;
+      --accent-light: #9cc4ff;
+      --success: #34d399;      /* emerald — long / positive P&L */
+      --success-bg: #0b1f18;
+      --error: #ff6b6b;        /* coral — short / negative P&L */
+      --error-bg: #24110f;
+      --warning: #f5b13d;      /* amber — caution / paper */
+      --warning-bg: #241a0c;
+      --rule: #222736;
+      --rule-light: #171b26;
+      --code-bg: #040509;
+      --bg-dark: #040509;
+      --bg-darker: #020305;
+      --bg-panel: #0e111a;     /* raised surfaces: cards, active tabs */
+      --border: #222736;
+      --text: #eef0f5;
     }
-    [data-theme="dark"] body::before { opacity: 0.02; }
+    [data-theme="dark"] body::before { opacity: 0.025; }
+
+    /* ── Dark signature polish ──────────────────────────────────
+       Additive, dark-scoped. Gives the terminal depth, tactile
+       feedback, and a "living" pulse on open-market / running states. */
+    /* Depth: subtle top light on chrome so surfaces read as layered */
+    [data-theme="dark"] .topbar {
+      background: linear-gradient(180deg, #0a0d13, #06070c);
+      box-shadow: inset 0 1px 0 rgba(255,255,255,0.03);
+    }
+    [data-theme="dark"] .tabs { background: linear-gradient(180deg, #080a10, #04050a); }
+    [data-theme="dark"] .sidebar { background: linear-gradient(180deg, #080a10, #04050a); }
+    [data-theme="dark"] .card,
+    [data-theme="dark"] .hb-bar,
+    [data-theme="dark"] .config-card,
+    [data-theme="dark"] .trade-card {
+      background: linear-gradient(180deg, #0f121b, #0b0d14);
+      box-shadow: inset 0 1px 0 rgba(255,255,255,0.03);
+    }
+    /* Editorial accent tick under each sidebar section heading */
+    [data-theme="dark"] .section-title { position: relative; }
+    [data-theme="dark"] .section-title::after {
+      content: ''; position: absolute; left: 0; bottom: -1px;
+      width: 26px; height: 1px; background: var(--accent);
+    }
+    /* Masthead + active tab catch a faint accent glow */
+    [data-theme="dark"] .logo span { text-shadow: 0 0 20px rgba(110,168,255,0.28); }
+    [data-theme="dark"] .tab.active { text-shadow: 0 0 12px rgba(110,168,255,0.32); }
+    /* Primary actions: tactile gradient with dark ink for punch + hover glow */
+    [data-theme="dark"] .btn.primary {
+      background: linear-gradient(180deg, #7bb2ff, #5b93ea);
+      color: #071018; border-color: #5b93ea;
+      box-shadow: 0 1px 2px rgba(0,0,0,0.45);
+    }
+    [data-theme="dark"] .btn.primary:hover {
+      background: linear-gradient(180deg, #8dbdff, #6aa0f2);
+      box-shadow: 0 3px 14px -3px rgba(110,168,255,0.55);
+    }
+    [data-theme="dark"] .model-chip.active { color: #071018; }
+    /* The living pulse: open market + running agent glow */
+    [data-theme="dark"] .phase-badge.open {
+      box-shadow: 0 0 0 1px rgba(52,211,153,0.35), 0 0 18px -6px var(--success);
+    }
+    [data-theme="dark"] .status-dot.running,
+    [data-theme="dark"] .state-pill.is-running .dot,
+    [data-theme="dark"] .sandbox-tab .dot.running {
+      box-shadow: 0 0 8px var(--success);
+    }
+    [data-theme="dark"] .state-pill.is-running {
+      box-shadow: 0 0 16px -6px var(--success);
+    }
+    /* Dialog scrim: proper dark backdrop with a touch of blur */
+    [data-theme="dark"] .modal-overlay {
+      background: rgba(4,6,11,0.72); backdrop-filter: blur(3px); -webkit-backdrop-filter: blur(3px);
+    }
     /* Toast notifications */
     .toast-container { position: fixed; top: 60px; right: 16px; z-index: 10000; display: flex; flex-direction: column; gap: 8px; pointer-events: none; }
     .toast { padding: 10px 16px; border-radius: 6px; font-size: 12px; color: #fff; pointer-events: auto; animation: toastIn 0.3s ease, toastOut 0.3s ease 4.7s forwards; max-width: 340px; box-shadow: 0 4px 12px rgba(0,0,0,0.2); }
@@ -71,6 +130,13 @@
     @keyframes toastIn { from { opacity: 0; transform: translateX(40px); } to { opacity: 1; transform: translateX(0); } }
     @keyframes toastOut { from { opacity: 1; } to { opacity: 0; transform: translateY(-10px); } }
     * { margin: 0; padding: 0; box-sizing: border-box; }
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after {
+        animation-duration: 0.001ms !important; animation-iteration-count: 1 !important;
+        transition-duration: 0.001ms !important; scroll-behavior: auto !important;
+      }
+    }
+    :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
     body {
       font-family: 'Source Sans 3', Helvetica Neue, sans-serif;
       background: var(--paper);
@@ -326,13 +392,14 @@
     .btn.danger:hover { background: var(--error-bg); }
     .btn.sm { padding: 5px 10px; font-size: 12px; }
     .btn-group { display: flex; gap: 8px; flex-wrap: wrap; }
+    .btn:focus-visible, .tab:focus-visible, .spick:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
     input[type="text"], input[type="number"], input[type="password"], select, textarea {
       width: 100%; padding: 8px 12px; border: 1px solid var(--rule);
       background: var(--paper); color: var(--ink); font-family: 'Source Sans 3', sans-serif;
       font-size: 14px; transition: border-color 0.15s;
     }
-    input:focus, select:focus, textarea:focus { outline: none; border-color: var(--accent); }
+    input:focus, select:focus, textarea:focus { outline: 2px solid var(--accent); outline-offset: 1px; border-color: var(--accent); }
     textarea { font-family: 'IBM Plex Mono', monospace; font-size: 13px; resize: vertical; min-height: 120px; }
 
     label { display: block; font-size: 12px; font-weight: 600; color: var(--ink-muted); margin-bottom: 4px; text-transform: uppercase; letter-spacing: 0.5px; }
@@ -365,6 +432,7 @@
     .badge.active { border-color: var(--success); color: var(--success); background: var(--success-bg); }
     .badge.paper { border-color: var(--warning); color: var(--warning); background: var(--warning-bg); }
     .badge.live { border-color: var(--error); color: var(--error); background: var(--error-bg); }
+    .badge.assigned { border-color: var(--accent); color: var(--accent); background: rgba(61,90,128,0.08); }
 
     /* ── Trade Feed ──────────────────────── */
     .trade-card {
@@ -391,6 +459,124 @@
     }
     .modal h3 { font-family: 'Crimson Pro', serif; font-size: 20px; margin-bottom: 16px; }
     .modal-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 20px; }
+    .modal.modal-wide {
+      max-width: 660px; padding: 0; display: flex; flex-direction: column; overflow: hidden;
+    }
+    .modal.modal-wide > h3 { padding: 22px 24px 0; margin-bottom: 14px; flex-shrink: 0; }
+    .modal.modal-wide > .builder-error { margin: 0 24px 14px; flex-shrink: 0; }
+    .modal.modal-wide > .builder-steps { margin: 0 24px 0; flex-shrink: 0; }
+    .modal.modal-wide > .builder-body { flex: 1 1 auto; overflow-y: auto; padding: 20px 24px; min-height: 0; }
+    .modal.modal-wide > .builder-nav { flex-shrink: 0; margin: 0; padding: 14px 24px; border-top: 1px solid var(--rule); background: var(--paper); }
+
+    /* ── State pills (agent/sandbox run state, used across Agents/Accounts/topbar) ── */
+    .state-pill {
+      display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px 3px 8px;
+      font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.6px;
+      border: 1px solid var(--rule); border-radius: 20px; color: var(--ink-muted); background: var(--paper);
+      white-space: nowrap;
+    }
+    .state-pill .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--ink-faint); flex-shrink: 0; }
+    .state-pill.is-running { border-color: var(--success); color: var(--success); background: var(--success-bg); }
+    .state-pill.is-running .dot { background: var(--success); animation: pulse 2s ease-in-out infinite; }
+    .state-pill.is-paused { border-color: var(--warning); color: var(--warning); background: var(--warning-bg); }
+    .state-pill.is-paused .dot { background: var(--warning); }
+    .state-pill.is-stopped .dot { background: var(--ink-faint); }
+
+    /* ── Topbar control console (ties Start/Pause/Stop to the account they act on) ── */
+    .control-console {
+      display: flex; align-items: stretch; gap: 0; border: 1px solid var(--rule); border-radius: 8px;
+      overflow: hidden; background: var(--paper-dark);
+    }
+    .cc-account {
+      display: flex; flex-direction: column; justify-content: center; gap: 1px;
+      padding: 3px 12px; border-right: 1px solid var(--rule); max-width: 160px;
+    }
+    .cc-account-label { font-size: 8.5px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.8px; color: var(--ink-faint); }
+    .cc-account-name { font-size: 12px; font-weight: 700; color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .cc-actions { display: flex; align-items: center; gap: 8px; padding: 5px 10px; }
+
+    /* ── Model picker (searchable live catalog) ── */
+    .model-picker { border: 1px solid var(--rule); background: var(--paper); border-radius: 4px; overflow: hidden; }
+    .model-picker-search { padding: 8px; border-bottom: 1px solid var(--rule); background: var(--paper-dark); }
+    .model-picker-search input { margin: 0; }
+    .model-provider-chips { display: flex; gap: 6px; flex-wrap: wrap; padding: 8px; border-bottom: 1px solid var(--rule-light); }
+    .model-chip {
+      padding: 3px 11px; font-size: 11px; font-weight: 600; border: 1px solid var(--rule); border-radius: 20px;
+      background: var(--paper); color: var(--ink-muted); cursor: pointer; font-family: inherit;
+    }
+    .model-chip:hover { border-color: var(--ink-muted); }
+    .model-chip.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+    .model-list { max-height: 230px; overflow-y: auto; }
+    .model-option {
+      display: block; width: 100%; text-align: left; padding: 9px 12px; border: none;
+      border-bottom: 1px solid var(--rule-light); background: var(--paper); cursor: pointer; font-family: inherit;
+      border-left: 3px solid transparent;
+    }
+    .model-option:last-child { border-bottom: none; }
+    .model-option:hover { background: var(--paper-dark); }
+    .model-option.selected { background: rgba(61,90,128,0.08); border-left-color: var(--accent); }
+    .model-option .mo-name { font-weight: 600; font-size: 13px; color: var(--ink); display: flex; justify-content: space-between; gap: 8px; align-items: baseline; }
+    .model-option .mo-tag { font-size: 9.5px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; color: var(--accent); flex-shrink: 0; }
+    .model-option .mo-id { font-family: 'IBM Plex Mono', monospace; font-size: 10.5px; color: var(--ink-faint); margin-top: 2px; }
+    .model-option .mo-desc { font-size: 11px; color: var(--ink-muted); margin-top: 3px; line-height: 1.4; }
+    .model-empty { padding: 24px 12px; text-align: center; color: var(--ink-faint); font-size: 12px; }
+
+    /* ── Agent builder stepper ── */
+    .builder-error {
+      padding: 10px 12px; background: var(--error-bg); border: 1px solid var(--error); color: var(--error);
+      font-size: 12px; border-radius: 4px; margin-bottom: 14px; display: none;
+    }
+    .builder-steps { display: flex; gap: 2px; margin-bottom: 22px; border-bottom: 1px solid var(--rule); }
+    .builder-step-tab {
+      flex: 1; display: flex; align-items: center; justify-content: center; gap: 6px;
+      padding: 0 2px 10px; text-align: center; font-size: 10.5px; font-weight: 700; text-transform: uppercase;
+      letter-spacing: 0.4px; color: var(--ink-faint); border: none; background: none; border-bottom: 2px solid transparent;
+      cursor: pointer; font-family: inherit; transition: color 0.15s;
+    }
+    .builder-step-tab .num {
+      display: inline-flex; align-items: center; justify-content: center; width: 17px; height: 17px;
+      border-radius: 50%; border: 1px solid var(--rule); font-size: 9.5px; flex-shrink: 0; transition: all 0.15s;
+    }
+    .builder-step-tab.done { color: var(--ink-muted); }
+    .builder-step-tab.done .num { background: var(--success); border-color: var(--success); color: #fff; }
+    .builder-step-tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+    .builder-step-tab.active .num { background: var(--accent); border-color: var(--accent); color: #fff; }
+    .builder-step-label { display: inline; }
+    @media (max-width: 560px) { .builder-step-label { display: none; } }
+    .builder-panel { display: none; }
+    .builder-panel.active { display: block; animation: builderFadeIn 0.2s ease; }
+    @keyframes builderFadeIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
+    .builder-nav { display: flex; justify-content: space-between; align-items: center; margin-top: 22px; padding-top: 16px; border-top: 1px solid var(--rule); gap: 8px; }
+    .builder-nav-left { display: flex; gap: 8px; }
+    .field-error { border-color: var(--error) !important; }
+    .field-error-msg { color: var(--error); font-size: 11px; margin-top: 4px; display: none; }
+    .step-intro { font-size: 12px; color: var(--ink-muted); margin-bottom: 16px; line-height: 1.5; }
+    .scope-banner {
+      padding: 9px 12px; background: rgba(61,90,128,0.07); border: 1px solid rgba(61,90,128,0.25);
+      border-radius: 4px; font-size: 11.5px; color: var(--ink-muted); margin-bottom: 16px; line-height: 1.5;
+    }
+    .scope-banner strong { color: var(--ink); }
+
+    /* ── Risk & permissions step ── */
+    .toggle-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 16px; margin-bottom: 18px; }
+    @media (max-width: 480px) { .toggle-grid { grid-template-columns: 1fr; } }
+    .toggle-row { display: flex; align-items: center; gap: 8px; padding: 6px 0; font-size: 13px; color: var(--ink); }
+    .toggle-row input { width: auto; }
+    .risk-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    @media (max-width: 480px) { .risk-grid { grid-template-columns: 1fr; } }
+
+    /* ── Review step ── */
+    .review-summary { background: var(--code-bg); border: 1px solid var(--rule); padding: 4px 14px; border-radius: 4px; }
+    .review-row { display: flex; justify-content: space-between; align-items: baseline; padding: 9px 0; border-bottom: 1px solid var(--rule-light); gap: 12px; font-size: 13px; }
+    .review-row:last-child { border-bottom: none; }
+    .review-row .rk { color: var(--ink-muted); flex-shrink: 0; }
+    .review-row .rv { font-weight: 600; text-align: right; color: var(--ink); }
+    .review-activate {
+      display: flex; align-items: flex-start; gap: 8px; margin-top: 16px; padding: 12px;
+      background: var(--success-bg); border: 1px solid var(--success); border-radius: 4px; font-size: 13px;
+    }
+    .review-activate input { width: auto; margin-top: 2px; }
+    .review-note { margin-top: 16px; padding: 10px 12px; border: 1px solid var(--rule); border-radius: 4px; font-size: 12px; color: var(--ink-muted); background: var(--paper); }
 
     /* ── Footer Bar ─────────────────────── */
     .footer {
@@ -468,6 +654,15 @@
       
       /* Show portfolio tab on mobile instead of sidebar */
       .tab-portfolio-mobile { display: inline-flex !important; }
+
+      /* Control console mobile - allow the action buttons to wrap inside the console */
+      .cc-account { max-width: 96px; }
+      .cc-actions { flex-wrap: wrap; row-gap: 6px; }
+    }
+    @media (max-width: 480px) {
+      .cc-account { max-width: 74px; padding: 3px 7px; }
+      .cc-account-label { display: none; }
+      .cc-actions { padding: 5px 7px; gap: 6px; }
     }
     @media (min-width: 769px) {
       .tab-portfolio-mobile { display: none !important; }
@@ -487,16 +682,22 @@
       <select id="sandbox-selector" style="display:none"></select>
       <span id="sandbox-status-badge" style="display:none"></span>
       <span class="clock" id="clock"></span>
-      <span id="topbar-account-label" style="font-size:12px;color:var(--ink-muted);font-weight:500"></span>
-      <button onclick="toggleDarkMode()" style="background:none;border:1px solid var(--rule);border-radius:4px;padding:4px 8px;cursor:pointer;font-size:14px;color:var(--ink-muted)" title="Toggle dark mode" id="theme-toggle">&#9789;</button>
-      <div class="status-pill">
-        <div class="status-dot" id="status-dot"></div>
-        <span id="status-text">Stopped</span>
+      <div class="control-console" title="Start/Pause/Stop act on this account's sandbox">
+        <div class="cc-account">
+          <span class="cc-account-label">Controlling</span>
+          <span class="cc-account-name" id="topbar-account-label">--</span>
+        </div>
+        <div class="cc-actions">
+          <div class="status-pill">
+            <div class="status-dot" id="status-dot"></div>
+            <span id="status-text">Stopped</span>
+          </div>
+          <button class="btn primary sm" id="btn-start" onclick="startAgent()">Start</button>
+          <button class="btn sm" id="btn-pause" onclick="pauseAgent()" style="display:none">Pause</button>
+          <button class="btn sm" id="btn-resume" onclick="resumeAgent()" style="display:none">Resume</button>
+          <button class="btn danger sm" id="btn-stop" onclick="stopAgent()" style="display:none">Stop</button>
+        </div>
       </div>
-      <button class="btn primary sm" id="btn-start" onclick="startAgent()">Start</button>
-      <button class="btn sm" id="btn-pause" onclick="pauseAgent()" style="display:none">Pause</button>
-      <button class="btn sm" id="btn-resume" onclick="resumeAgent()" style="display:none">Resume</button>
-      <button class="btn danger sm" id="btn-stop" onclick="stopAgent()" style="display:none">Stop</button>
     </div>
   </div>
 
@@ -584,7 +785,7 @@
         <div class="section">
           <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
             <div class="section-title" style="margin:0">Agents</div>
-            <button class="btn primary sm" onclick="showModal('agent-create')">New Agent</button>
+            <button class="btn primary sm" onclick="openNewAgentModal()">New Agent</button>
           </div>
           <p style="font-size:12px;color:var(--ink-muted);margin-bottom:12px">An agent is a personality — its name, description, and model define how it thinks. Assign a strategy to give it rules to follow.</p>
           <div id="agents-list"></div>
@@ -1031,15 +1232,6 @@ function logHtml(html, level) {
 function esc(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
 function fmtTime() { return new Date().toLocaleTimeString('en-US', { hour12: false }); }
 
-// Provider/model dropdown sync for agent forms
-function updateAgentModelDropdown() {
-  const provSelect = document.getElementById('f-ag-provider');
-  const modelSelect = document.getElementById('f-ag-model');
-  if (!provSelect || !modelSelect) return;
-  const provider = provSelect.value;
-  const filtered = (config.models || []).filter(m => m.id.startsWith(provider + '/'));
-  modelSelect.innerHTML = filtered.map(m => '<option value="' + esc(m.id) + '">' + esc(m.name) + '</option>').join('');
-}
 
 // Export/import config
 function exportConfig() {
@@ -1091,19 +1283,10 @@ function showToast(message, type) {
   setTimeout(function() { toast.remove(); }, 5000);
 }
 
-// Dark mode
-function toggleDarkMode() {
-  const html = document.documentElement;
-  const isDark = html.getAttribute('data-theme') === 'dark';
-  html.setAttribute('data-theme', isDark ? '' : 'dark');
-  localStorage.setItem('theme', isDark ? 'light' : 'dark');
-  document.getElementById('theme-toggle').textContent = isDark ? '\u263D' : '\u2600';
-}
+// Dark is the only theme. Force it and clear any stale light preference.
 (function() {
-  const saved = localStorage.getItem('theme');
-  if (saved === 'dark' || (!saved && window.matchMedia('(prefers-color-scheme: dark)').matches)) {
-    document.documentElement.setAttribute('data-theme', 'dark');
-  }
+  document.documentElement.setAttribute('data-theme', 'dark');
+  try { localStorage.removeItem('theme'); } catch (e) {}
 })();
 
 function toggleMobileSidebar(sandboxId) {
@@ -1343,12 +1526,13 @@ async function startAgent() {
     const d = await r.json();
     if (!d.ok && d.error) {
       logToSandbox(sid, `<div class="log-entry error"><span class="time">${fmtTime()}</span>Start failed: ${esc(d.error)}</div>`);
+      showToast('Start failed: ' + d.error, 'error');
     } else {
       logToSandbox(sid, `<div class="log-entry success"><span class="time">${fmtTime()}</span>Agent started</div>`);
     }
     checkHealth();
     renderSandboxTabs();
-  } catch (e) { 
+  } catch (e) {
     const sid = getEffectiveSandboxId();
     if (sid) logToSandbox(sid, `<div class="log-entry error"><span class="time">${fmtTime()}</span>Start error: ${esc(e.message)}</div>`);
   }
@@ -1493,22 +1677,34 @@ async function startSandbox(id) {
   try {
     const r = await fetch('/api/sandboxes/' + encodeURIComponent(id) + '/start', { method: 'POST' });
     const d = await r.json();
-    if (!d.ok && d.error) logToSandbox(id, '<div class="log-entry error"><span class="time">' + fmtTime() + '</span>Start failed: ' + esc(d.error) + '</div>');
+    if (!d.ok && d.error) {
+      logToSandbox(id, '<div class="log-entry error"><span class="time">' + fmtTime() + '</span>Start failed: ' + esc(d.error) + '</div>');
+      showToast('Start failed: ' + d.error, 'error');
+    }
   } catch (e) {
     logToSandbox(id, '<div class="log-entry error"><span class="time">' + fmtTime() + '</span>Start error: ' + esc(e.message) + '</div>');
+    showToast('Start failed: ' + e.message, 'error');
   }
   await _refreshAfterAction(id);
 }
 
 async function stopSandbox(id) {
   _setBtnLoading(id, 'Stopping...');
-  await fetch('/api/sandboxes/' + encodeURIComponent(id) + '/stop', { method: 'POST' });
+  try {
+    const r = await fetch('/api/sandboxes/' + encodeURIComponent(id) + '/stop', { method: 'POST' });
+    const d = await r.json();
+    if (!d.ok && d.error) showToast('Stop failed: ' + d.error, 'error');
+  } catch (e) { showToast('Stop failed: ' + e.message, 'error'); }
   await _refreshAfterAction(id);
 }
 
 async function pauseSandbox(id) {
   _setBtnLoading(id, 'Pausing...');
-  await fetch('/api/sandboxes/' + encodeURIComponent(id) + '/pause', { method: 'POST' });
+  try {
+    const r = await fetch('/api/sandboxes/' + encodeURIComponent(id) + '/pause', { method: 'POST' });
+    const d = await r.json();
+    if (!d.ok && d.error) showToast('Pause failed: ' + d.error, 'error');
+  } catch (e) { showToast('Pause failed: ' + e.message, 'error'); }
   await _refreshAfterAction(id);
 }
 
@@ -1530,6 +1726,7 @@ function _setBtnLoading(sandboxId, text) {
 async function _refreshAfterAction(id) {
   await checkHealth();
   renderAccounts();
+  renderAgents();
   renderSandboxTabs();
   if (getEffectiveSandboxId() === id) refreshSandboxButtons();
 }
@@ -2126,24 +2323,47 @@ function _getStrategyUsage(strategyId) {
   return agents.filter(a => a.strategyId === strategyId).map(a => a.name);
 }
 
+// Run state (running/paused/stopped) of a sandbox, derived from the live health feed.
+function _sandboxRuntimeState(sandboxId) {
+  const runtime = (window._healthState?.sandboxes || []).find(s => s.sandboxId === sandboxId);
+  if (!runtime?.state?.running) return 'stopped';
+  return runtime.state.paused ? 'paused' : 'running';
+}
+function _stateLabel(state) { return state === 'running' ? 'Running' : state === 'paused' ? 'Paused' : 'Stopped'; }
+function _statePillHtml(state, label) {
+  return '<span class="state-pill is-' + state + '" title="' + esc(label || _stateLabel(state)) + '"><span class="dot"></span>' + esc(label || _stateLabel(state)) + '</span>';
+}
+// Primary run-control buttons for the account currently driven by this agent.
+function _agentCardControls(sandboxId, state) {
+  if (state === 'running') {
+    return '<button class="btn sm" onclick="pauseSandbox(\'' + sandboxId + '\')">Pause</button>'
+      + '<button class="btn sm danger" onclick="stopSandbox(\'' + sandboxId + '\')">Stop</button>';
+  }
+  if (state === 'paused') {
+    return '<button class="btn sm primary" onclick="resumeSandbox(\'' + sandboxId + '\')">Resume</button>'
+      + '<button class="btn sm danger" onclick="stopSandbox(\'' + sandboxId + '\')">Stop</button>';
+  }
+  return '<button class="btn sm primary" onclick="startSandbox(\'' + sandboxId + '\')">Start</button>';
+}
+
 function renderAgents() {
   const el = document.getElementById('agents-list');
   if(!config.agents?.length) { el.innerHTML = '<div class="no-data">No agents configured</div>'; return; }
   const currentSid = getEffectiveSandboxId();
   const currentAgentId = sandboxScoped.agent?.id || config.activeAgentId;
   const currentAcctName = (config.accounts || []).find(ac => 'sbx_' + ac.id === currentSid)?.name || 'current';
-  
+
   // Check for sandbox-level overrides on the currently viewed sandbox
   const sbxOverrides = sandboxScoped.sandbox?.agent || {};
   const hasPromptOverride = !!sbxOverrides.customSystemPrompt;
   const hasStrategyOverride = !!sandboxScoped.sandbox?.customStrategyRules;
-  
+
   // Show sandbox overrides banner if any
   if (hasPromptOverride || hasStrategyOverride) {
     const overrideItems = [];
     if (hasPromptOverride) overrideItems.push('Custom prompt (' + sbxOverrides.customSystemPrompt.length + ' chars)');
     if (hasStrategyOverride) overrideItems.push('Custom strategy rules');
-    
+
     el.innerHTML = '<div style="padding:12px 16px;background:rgba(74,144,226,0.08);border:1px solid rgba(74,144,226,0.25);border-radius:6px;margin-bottom:16px">'
       + '<div style="font-size:11px;font-weight:700;color:var(--accent);margin-bottom:4px">Sandbox Overrides for ' + esc(currentAcctName) + '</div>'
       + '<div style="font-size:12px;color:var(--ink-muted)">' + overrideItems.join(' | ') + '</div>'
@@ -2154,30 +2374,46 @@ function renderAgents() {
   } else {
     el.innerHTML = '';
   }
-  
+
   el.innerHTML += config.agents.map(a => {
     const active = a.id === currentAgentId;
-    const usage = _getAgentUsage(a.id);
-    const usageBadges = usage.map(n => '<span class="badge paper" style="font-size:9px;margin-left:4px">' + esc(n) + '</span>').join('');
+    const cardState = active ? _sandboxRuntimeState(currentSid) : null;
+
+    // Which accounts run this agent right now (by direct sandbox lookup, same convention as elsewhere: sbx_<accountId>)
+    const usageAccounts = (config.accounts || []).filter(acc => {
+      const sbx = (config.sandboxes || {})['sbx_' + acc.id];
+      return (sbx?.agent?.activeAgentId || 'default') === a.id;
+    });
+    const otherUsageHtml = usageAccounts.filter(acc => 'sbx_' + acc.id !== currentSid).map(acc => {
+      const sbxId = 'sbx_' + acc.id;
+      const st = _sandboxRuntimeState(sbxId);
+      const label = acc.name || (acc.paper ? 'Paper' : 'Live');
+      return _statePillHtml(st, label);
+    }).join('');
+
     const strat = (config.strategies || []).find(s => s.id === a.strategyId);
     const stratName = strat ? strat.name : 'None';
     const modelShort = (a.model || 'default').replace('anthropic/', '').replace('openai/', '').replace('google/', '');
-    
+
     // Strategy options dropdown
     const stratOptions = (config.strategies || []).map(s => {
       return '<option value="' + esc(s.id) + '"' + (s.id === a.strategyId ? ' selected' : '') + '>' + esc(s.name) + '</option>';
     }).join('');
-    
+
     // Assign buttons for unassigned accounts
     const assignBtns = (config.accounts || []).map(acc => {
       const sbxId = 'sbx_' + acc.id;
       const label = acc.name || (acc.paper ? 'Paper' : 'Live');
-      if (usage.includes(label)) return '';
+      if (usageAccounts.some(u => u.id === acc.id)) return '';
       return '<button class="btn sm" onclick="assignAgentToSandbox(\'' + a.id + '\', \'' + sbxId + '\')" style="font-size:10px">Assign to ' + esc(label) + '</button>';
     }).join('');
-    
+
     return '<div class="config-card' + (active ? ' active-card' : '') + '" style="margin-bottom:16px">'
-      + '<div class="config-card-header"><span class="config-card-title">' + esc(a.name) + '</span><div>' + (active ? '<span class="badge active">Active</span>' : '') + usageBadges + '</div></div>'
+      + '<div class="config-card-header"><span class="config-card-title">' + esc(a.name) + '</span>'
+      + '<div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">'
+      + (active ? '<span class="badge assigned">Assigned</span>' + _statePillHtml(cardState) : '')
+      + otherUsageHtml
+      + '</div></div>'
       + '<div class="config-card-desc">' + esc(a.description || '') + '</div>'
       // Pipeline display
       + '<div style="display:flex;flex-wrap:wrap;gap:8px;margin:12px 0;align-items:center">'
@@ -2187,11 +2423,22 @@ function renderAgents() {
       + '<span style="color:var(--ink-faint)">&rarr;</span>'
       + '<div style="padding:6px 10px;background:var(--bg-dark);border:1px solid var(--border);border-radius:4px;font-size:11px">'
       + '<div style="font-size:9px;text-transform:uppercase;letter-spacing:1px;color:var(--ink-faint);margin-bottom:2px">Strategy (Rules)</div>'
-      + '<select onchange="assignStrategyToAgent(this.value, \'' + a.id + '\')" style="background:transparent;border:none;color:var(--text);font-size:12px;font-weight:600;cursor:pointer;padding:0">'
-      + '<option value="">None (use defaults)</option>' + stratOptions + '</select></div>'
+      + '<div style="font-weight:600;color:var(--text)">' + esc(stratName) + '</div></div>'
       + '</div>'
-      // Identity section (collapsible)
-      + '<div style="margin-top:10px">'
+      // Primary actions: activate, or run controls for the account this agent currently drives, plus Edit
+      + '<div class="config-card-actions" style="flex-wrap:wrap;gap:6px;margin-top:10px">'
+      + (active
+          ? _agentCardControls(currentSid, cardState)
+          : '<button class="btn sm primary" onclick="activateAgent(\'' + a.id + '\')">Activate for ' + esc(currentAcctName) + '</button>')
+      + '<button class="btn sm" onclick="editAgent(\'' + a.id + '\')">Edit</button>'
+      + '</div>'
+      // Secondary controls, tucked away so the primary state + actions stay scannable
+      + '<details class="agent-more" style="margin-top:10px">'
+      + '<summary style="cursor:pointer;font-size:10.5px;font-weight:700;text-transform:uppercase;letter-spacing:0.5px;color:var(--ink-muted);padding:4px 0;list-style:none">More options</summary>'
+      + '<div style="padding-top:10px;display:flex;flex-direction:column;gap:12px">'
+      + '<div class="form-group" style="margin-bottom:0"><label>Strategy</label><select onchange="assignStrategyToAgent(this.value, \'' + a.id + '\')"><option value="">None (use defaults)</option>' + stratOptions + '</select></div>'
+      + (assignBtns ? '<div style="display:flex;gap:6px;flex-wrap:wrap">' + assignBtns + '</div>' : '')
+      + '<div>'
       + '<button class="btn sm" onclick="toggleAgentPrompt(\'' + a.id + '\')" style="font-size:10px;padding:4px 10px">Edit Identity</button>'
       + '<button class="btn sm" onclick="previewAgentPrompt(\'' + a.id + '\')" style="font-size:10px;padding:4px 10px;margin-left:4px">Preview Final Instructions</button>'
       + '<div id="agent-prompt-' + a.id + '" style="display:none;margin-top:8px">'
@@ -2201,13 +2448,8 @@ function renderAgents() {
       + '<button class="btn sm primary" onclick="saveAgentPrompt(\'' + a.id + '\')">Save</button>'
       + '<button class="btn sm" onclick="clearAgentPrompt(\'' + a.id + '\')">Reset to Default</button>'
       + '</div></div></div>'
-      // Actions
-      + '<div class="config-card-actions" style="flex-wrap:wrap;gap:6px;margin-top:10px">'
-      + (!active ? '<button class="btn sm primary" onclick="activateAgent(\'' + a.id + '\')">Use for ' + esc(currentAcctName) + '</button>' : '')
-      + assignBtns
-      + '<button class="btn sm" onclick="editAgent(\'' + a.id + '\')">Edit</button>'
-      + (a.id !== 'default' ? '<button class="btn sm danger" onclick="deleteAgent(\'' + a.id + '\')">Delete</button>' : '')
-      + '</div></div>';
+      + (a.id !== 'default' ? '<div><button class="btn sm danger" onclick="deleteAgent(\'' + a.id + '\')">Delete Agent</button></div>' : '')
+      + '</div></details></div>';
   }).join('');
 }
 
@@ -2525,27 +2767,6 @@ function showModal(type, data) {
   if(type === 'account-create') {
     modal.innerHTML = '<h3>Add Trading Account</h3><div class="form-group"><label>Account Name</label><input type="text" id="f-acc-name" placeholder="e.g. Paper Trading"></div><div class="form-row"><div class="form-group"><label>Public Key</label><input type="text" id="f-acc-pk" placeholder="AKXXXXXXXXXX"></div><div class="form-group"><label>Secret Key</label><input type="password" id="f-acc-sk" placeholder="Your secret key"></div></div><div class="form-group"><label>Base URL</label><input type="text" id="f-acc-url" placeholder="https://paper-api.alpaca.markets"><div class="form-hint">Leave blank for auto-detection based on paper/live selection</div></div><div class="form-group"><label><input type="checkbox" id="f-acc-paper" checked> Paper Trading</label></div><div class="modal-actions"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn primary" onclick="submitAccount()">Add Account</button></div>';
   }
-  else if(type === 'agent-create' || type === 'agent-edit') {
-    const a = data || { name:'', description:'', systemPromptTemplate:'default', customSystemPrompt:'', strategyId:'default', model: config.activeModel, heartbeatOverrides:{} };
-    const stratOpts = (config.strategies||[]).map(s => '<option value="'+s.id+'"'+(s.id===a.strategyId?' selected':'')+'>'+esc(s.name)+'</option>').join('');
-    const currentProvider = a.model ? a.model.split('/')[0] : 'anthropic';
-    const providers = [...new Set((config.models||[]).map(m => m.id.split('/')[0]))].sort();
-    const provOpts = providers.map(p => '<option value="'+esc(p)+'"'+(p===currentProvider?' selected':'')+'>'+esc(p)+' ('+((config.models||[]).filter(m=>m.id.startsWith(p+'/')).length)+')</option>').join('');
-    const modelOpts = (config.models||[]).filter(m => m.id.startsWith(currentProvider+'/')).map(m => '<option value="'+m.id+'"'+(m.id===a.model?' selected':'')+'>'+esc(m.name)+'</option>').join('');
-    modal.innerHTML = '<h3>' + (data?'Edit':'Create') + ' Agent</h3>'
-      + '<div class="form-group"><label>Name</label><input type="text" id="f-ag-name" value="'+esc(a.name)+'"></div>'
-      + '<div class="form-group"><label>Description</label><input type="text" id="f-ag-desc" value="'+esc(a.description||'')+'"></div>'
-      + '<div class="form-group"><label>Strategy</label><select id="f-ag-strat"><option value="">None</option>'+stratOpts+'</select></div>'
-      + '<div class="form-row"><div class="form-group"><label>Provider</label><select id="f-ag-provider" onchange="updateAgentModelDropdown()">'+provOpts+'</select></div>'
-      + '<div class="form-group"><label>Model</label><select id="f-ag-model">'+modelOpts+'</select></div></div>'
-      + '<div class="form-group"><label>Prompt Type</label><select id="f-ag-ptype" onchange="document.getElementById(\'f-ag-prompt-wrap\').style.display=this.value===\'custom\'?\'block\':\'none\'">'
-      + '<option value="default"'+(a.systemPromptTemplate==='default'?' selected':'')+'>Default Template</option>'
-      + '<option value="custom"'+(a.systemPromptTemplate==='custom'?' selected':'')+'>Custom Prompt</option></select></div>'
-      + '<div id="f-ag-prompt-wrap" style="display:'+(a.systemPromptTemplate==='custom'?'block':'none')+'">'
-      + '<div class="form-group"><label>Agent Prompt</label><textarea id="f-ag-prompt" rows="12" placeholder="Define the agent\'s personality, approach, and instructions...">'+(a.customSystemPrompt||'')+'</textarea>'
-      + '<div class="form-hint">This is the agent\'s base personality prompt. Strategy rules are appended separately.</div></div></div>'
-      + '<div class="modal-actions"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn primary" onclick="submitAgent(\''+(data?.id||'')+'\')">' + (data?'Save':'Create') + '</button></div>';
-  }
   else if(type === 'strategy-create' || type === 'strategy-edit') {
     const s = data || { name:'', description:'', customRules:'' };
     modal.innerHTML = '<h3>' + (data?'Edit':'Create') + ' Strategy</h3><div class="form-group"><label>Name</label><input type="text" id="f-st-name" value="'+esc(s.name)+'"></div><div class="form-group"><label>Description</label><input type="text" id="f-st-desc" value="'+esc(s.description)+'"></div><div class="form-group"><label>Trading Rules</label><textarea id="f-st-rules" rows="16" placeholder="## Position Sizing\n- Max 15% per position\n...">'+(s.customRules||'')+'</textarea><div class="form-hint">Markdown format. These rules are injected into the agent\'s system prompt.</div></div><div class="modal-actions"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn primary" onclick="submitStrategy(\''+(data?.id||'')+'\')">' + (data?'Save':'Create') + '</button></div>';
@@ -2553,24 +2774,18 @@ function showModal(type, data) {
   overlay.classList.add('visible');
 }
 
-function closeModal() { document.getElementById('modal-overlay').classList.remove('visible'); }
+function closeModal() {
+  document.getElementById('modal-overlay').classList.remove('visible');
+  document.getElementById('modal-content').classList.remove('modal-wide');
+}
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && document.getElementById('modal-overlay').classList.contains('visible')) closeModal();
+});
 
 async function submitAccount() {
   const body = { name: v('f-acc-name'), publicKey: v('f-acc-pk'), secretKey: v('f-acc-sk'), baseUrl: v('f-acc-url'), paper: document.getElementById('f-acc-paper').checked };
   try {
     const r = await fetch('/api/accounts', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
-    const d = await r.json();
-    if (d.error) { alert('Error: ' + d.error); return; }
-    closeModal();
-  } catch (e) { alert('Error: ' + e.message); }
-}
-
-async function submitAgent(id) {
-  const body = { name: v('f-ag-name'), description: v('f-ag-desc'), strategyId: v('f-ag-strat')||null, model: v('f-ag-model'), systemPromptTemplate: v('f-ag-ptype'), customSystemPrompt: v('f-ag-prompt')||'' };
-  try {
-    const r = id
-      ? await fetch('/api/agents/'+id, {method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)})
-      : await fetch('/api/agents', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
     const d = await r.json();
     if (d.error) { alert('Error: ' + d.error); return; }
     closeModal();
@@ -2589,59 +2804,377 @@ async function submitStrategy(id) {
   } catch (e) { alert('Error: ' + e.message); }
 }
 
-function openAgentBuilder(mode, agent, models, strategies, sandboxId) {
-  const isEdit = mode === 'edit' && agent;
-  const a = agent || { name: '', description: '', systemPromptTemplate: 'default', customSystemPrompt: '', strategyId: 'default', model: config.activeModel, heartbeatOverrides: {} };
-  const allModels = models || config.models || [];
-  const currentProvider = a.model ? a.model.split('/')[0] : 'anthropic';
-  const providers = [...new Set(allModels.map(m => m.id.split('/')[0]))].sort();
-  const provOpts = providers.map(p => '<option value="'+esc(p)+'"'+(p===currentProvider?' selected':'')+'>'+esc(p)+' ('+allModels.filter(m=>m.id.startsWith(p+'/')).length+')</option>').join('');
-  const modelOpts = allModels.filter(m => m.id.startsWith(currentProvider+'/')).map(m => '<option value="'+esc(m.id)+'"'+(m.id===a.model?' selected':'')+'>'+esc(m.name)+'</option>').join('');
-  const stratOpts = (strategies || config.strategies || []).map(s => '<option value="'+s.id+'"'+(s.id===a.strategyId?' selected':'')+'>'+esc(s.name)+'</option>').join('');
+// ── Agent Builder (guided create/edit flow) ────────────────────────
+// Steps: 1 Identity -> 2 Model & Strategy -> 3 Risk & Permissions -> 4 Prompt -> 5 Review
+// API contract preserved exactly:
+//   POST/PUT /api/agents            { name, description, strategyId, model, systemPromptTemplate, customSystemPrompt }
+//   PUT /api/sandboxes/:id/agent    { activeAgentId }               (same as assignAgentToSandbox/activateAgent)
+//   PUT /api/permissions            { ...permission fields, sandboxId }  (same as Settings tab savePermissions)
+let _builder = null;
+
+function openNewAgentModal() {
+  _openAgentBuilderFresh('create', null, getEffectiveSandboxId());
+}
+
+function editAgent(id) {
+  const a = config.agents.find(x => x.id === id);
+  if (a) _openAgentBuilderFresh('edit', a, getEffectiveSandboxId());
+}
+
+// Fetch the live model catalog fresh (not the possibly-stale config.models snapshot) before opening.
+async function _openAgentBuilderFresh(mode, agent, sandboxId) {
   const modal = document.getElementById('modal-content');
-  modal.innerHTML = '<h3>' + (isEdit?'Edit':'Create') + ' Agent</h3>' +
-    '<div class="form-group"><label>Name</label><input type="text" id="f-ag-name" value="'+esc(a.name)+'"></div>' +
-    '<div class="form-group"><label>Description</label><input type="text" id="f-ag-desc" value="'+esc(a.description||'')+'"></div>' +
-    '<div class="form-group"><label>Strategy</label><select id="f-ag-strat"><option value="">None</option>'+stratOpts+'</select></div>' +
-    '<div class="form-row"><div class="form-group"><label>Provider</label><select id="f-ag-provider" onchange="updateAgentModelDropdown()">'+provOpts+'</select></div>' +
-    '<div class="form-group"><label>Model</label><select id="f-ag-model">'+modelOpts+'</select></div></div>' +
-    '<div class="form-group"><label>Prompt Type</label><select id="f-ag-ptype" onchange="document.getElementById(\'f-ag-prompt-wrap\').style.display=this.value===\'custom\'?\'block\':\'none\'">' +
-    '<option value="default"'+(a.systemPromptTemplate==='default'?' selected':'')+'>Default Template</option>' +
-    '<option value="custom"'+(a.systemPromptTemplate==='custom'?' selected':'')+'>Custom Prompt</option></select></div>' +
-    '<div id="f-ag-prompt-wrap" style="display:'+(a.systemPromptTemplate==='custom'?'block':'none')+'">' +
-    '<div class="form-group"><label>Agent Prompt</label><textarea id="f-ag-prompt" rows="12" placeholder="Define the agent\'s personality, approach, and instructions...">'+(a.customSystemPrompt||'')+'</textarea><div class="form-hint">This is the agent\'s base personality prompt. Strategy rules are appended separately.</div></div></div>' +
-    '<div class="modal-actions"><button class="btn" onclick="closeModal()">Cancel</button>' +
-    '<button class="btn primary" onclick="submitAgentFromBuilder(\''+(isEdit?esc(a.id):'')+'\', \''+esc(sandboxId||'')+'\')">' + (isEdit?'Save':'Create') + '</button></div>';
+  modal.innerHTML = '<h3>' + (mode === 'edit' ? 'Edit Agent' : 'Create Agent') + '</h3>'
+    + '<p style="color:var(--ink-muted);font-size:13px;padding:28px 0;text-align:center">Loading live model catalog&hellip;</p>';
   document.getElementById('modal-overlay').classList.add('visible');
-}
-
-async function submitAgentFromBuilder(agentId, sandboxId) {
+  let models = config.models || [];
   try {
-    const body = { 
-      name: v('f-ag-name'), 
-      description: v('f-ag-desc'), 
-      strategyId: v('f-ag-strat')||null, 
-      model: v('f-ag-model'), 
-      systemPromptTemplate: v('f-ag-ptype'), 
-      customSystemPrompt: v('f-ag-prompt')||'' 
-    };
-    const url = agentId ? '/api/agents/'+agentId : '/api/agents';
-    const method = agentId ? 'PUT' : 'POST';
-    const r = await fetch(url, { method, headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
-    if (!r.ok) throw new Error((await r.json()).error || 'Failed');
-    if (sandboxId) {
-      await fetch('/api/sandboxes/'+encodeURIComponent(sandboxId)+'/agent', {
-        method: 'PUT', headers: {'Content-Type':'application/json'},
-        body: JSON.stringify({ activeAgentId: agentId || (await r.json()).id })
-      });
-    }
-    closeModal();
-    config = (await fetch('/api/config').then(r=>r.json()));
-    renderAll();
-  } catch(e) { alert('Error: '+e.message); }
+    const d = await fetch('/api/models').then(r => r.json());
+    if (d.models?.length) models = d.models;
+  } catch { /* fall back to the config snapshot */ }
+  await openAgentBuilder(mode, agent, models, config.strategies, sandboxId);
 }
 
-function editAgent(id) { const a = config.agents.find(x => x.id === id); if(a) showModal('agent-edit', a); }
+async function openAgentBuilder(mode, agent, models, strategies, sandboxId) {
+  const isEdit = mode === 'edit' && !!agent;
+  const a = agent || {
+    name: '', description: '', systemPromptTemplate: 'default', customSystemPrompt: '',
+    strategyId: (config.strategies || []).some(s => s.id === 'default') ? 'default' : '',
+    model: config.activeModel, heartbeatOverrides: {},
+  };
+  let allModels = (models && models.length) ? models.slice() : (config.models || []);
+  if (a.model && !allModels.some(m => m.id === a.model)) {
+    allModels = [{ id: a.model, name: a.model, description: 'Currently assigned to this agent' }, ...allModels];
+  }
+  const allStrategies = strategies || config.strategies || [];
+
+  let permissions = {};
+  if (sandboxId) {
+    try { permissions = await fetch('/api/permissions?sandboxId=' + encodeURIComponent(sandboxId)).then(r => r.json()); }
+    catch { permissions = config.permissions || {}; }
+  }
+
+  const sandboxAgentId = sandboxId ? (config.sandboxes || {})[sandboxId]?.agent?.activeAgentId : null;
+  const alreadyActive = isEdit && !!sandboxId && sandboxAgentId === a.id;
+  const accountLabel = sandboxId ? sandboxLabelById(sandboxId) : null;
+
+  _builder = {
+    step: 1, isEdit, agentId: a.id || null, sandboxId: sandboxId || null, accountLabel,
+    models: allModels, strategies: allStrategies, permsDirty: false, alreadyActive,
+  };
+
+  const providers = [...new Set(allModels.map(m => m.id.split('/')[0]))].sort();
+  const chipsHtml = '<button type="button" class="model-chip active" data-provider="" onclick="_builderFilterByProvider(this)">All (' + allModels.length + ')</button>'
+    + providers.map(p => '<button type="button" class="model-chip" data-provider="' + esc(p) + '" onclick="_builderFilterByProvider(this)">' + esc(p) + ' (' + allModels.filter(m => m.id.startsWith(p + '/')).length + ')</button>').join('');
+
+  const stratOpts = '<option value="">None (use platform defaults)</option>' + allStrategies.map(s =>
+    '<option value="' + esc(s.id) + '"' + (s.id === (a.strategyId || '') ? ' selected' : '') + '>' + esc(s.name) + '</option>'
+  ).join('');
+
+  const singleModelNotice = allModels.length <= 1
+    ? '<div class="form-hint" style="margin-top:8px">Only one model is available right now. Configure <code>opencode auth</code> on the server to unlock the full live catalog.</div>'
+    : '';
+
+  const p = permissions || {};
+  const riskStepHtml = sandboxId ? (
+    '<div class="scope-banner">Risk controls belong to <strong>' + esc(accountLabel) + '</strong>\'s account, not to this one agent &mdash; whichever agent runs there is bound by these limits. Adjust them here for convenience, or later from Settings.</div>'
+    + '<div class="toggle-grid">'
+    + '<label class="toggle-row"><input type="checkbox" id="b-perm-live" onchange="_builderMarkPermsDirty()"' + (p.allowLiveTrading !== false ? ' checked' : '') + '> Allow live trading</label>'
+    + '<label class="toggle-row"><input type="checkbox" id="b-perm-options" onchange="_builderMarkPermsDirty()"' + (p.allowOptions !== false ? ' checked' : '') + '> Allow options</label>'
+    + '<label class="toggle-row"><input type="checkbox" id="b-perm-stocks" onchange="_builderMarkPermsDirty()"' + (p.allowStocks !== false ? ' checked' : '') + '> Allow stocks</label>'
+    + '<label class="toggle-row"><input type="checkbox" id="b-perm-0dte" onchange="_builderMarkPermsDirty()"' + (p.allow0DTE ? ' checked' : '') + '> Allow 0DTE</label>'
+    + '<label class="toggle-row"><input type="checkbox" id="b-perm-confirm" onchange="_builderMarkPermsDirty()"' + (p.requireConfirmation ? ' checked' : '') + '> Require confirmation</label>'
+    + '</div>'
+    + '<div class="risk-grid">'
+    + '<div class="form-group"><label>Max position size (%)</label><input type="number" id="b-perm-maxpos" min="1" max="100" value="' + (p.maxPositionPct || 15) + '" oninput="_builderMarkPermsDirty()"></div>'
+    + '<div class="form-group"><label>Max deployed (%)</label><input type="number" id="b-perm-maxdeploy" min="1" max="100" value="' + (p.maxDeployedPct || 80) + '" oninput="_builderMarkPermsDirty()"></div>'
+    + '<div class="form-group"><label>Max daily loss (%)</label><input type="number" id="b-perm-maxloss" min="1" max="50" value="' + (p.maxDailyLoss || 5) + '" oninput="_builderMarkPermsDirty()"></div>'
+    + '<div class="form-group"><label>Max open positions</label><input type="number" id="b-perm-maxopen" min="1" max="50" value="' + (p.maxOpenPositions || 10) + '" oninput="_builderMarkPermsDirty()"></div>'
+    + '<div class="form-group"><label>Max order value ($)</label><input type="number" id="b-perm-maxorder" min="0" max="1000000" step="100" value="' + (p.maxOrderValue || 0) + '" oninput="_builderMarkPermsDirty()"><div class="form-hint">0 = unlimited</div></div>'
+    + '<div class="form-group"><label>Max tool rounds / beat</label><input type="number" id="b-perm-maxtools" min="5" max="100" value="' + (p.maxToolRoundsPerBeat || 25) + '" oninput="_builderMarkPermsDirty()"></div>'
+    + '</div>'
+    + '<div class="form-group" style="margin-top:4px"><label>Blocked tools</label><input type="text" id="b-perm-blocked" placeholder="e.g. place_order, close_position" value="' + esc((p.blockedTools || []).join(', ')) + '" oninput="_builderMarkPermsDirty()"><div class="form-hint">Comma-separated. Leave empty to allow all tools.</div></div>'
+  ) : (
+    '<div class="scope-banner">No trading account is selected yet, so risk controls can\'t be shown here. Add an account from the <strong>Accounts</strong> tab, then set its guardrails from Settings.</div>'
+  );
+
+  const modal = document.getElementById('modal-content');
+  modal.innerHTML = '<h3>' + (isEdit ? 'Edit Agent' : 'Create Agent') + '</h3>'
+    + '<div class="builder-error" id="builder-error"></div>'
+    + '<div class="builder-steps" role="tablist" aria-label="Agent builder steps">'
+    + '<button type="button" class="builder-step-tab" data-step="1" onclick="_builderGoStep(1)"><span class="num">1</span><span class="builder-step-label">Identity</span></button>'
+    + '<button type="button" class="builder-step-tab" data-step="2" onclick="_builderGoStep(2)"><span class="num">2</span><span class="builder-step-label">Model</span></button>'
+    + '<button type="button" class="builder-step-tab" data-step="3" onclick="_builderGoStep(3)"><span class="num">3</span><span class="builder-step-label">Risk</span></button>'
+    + '<button type="button" class="builder-step-tab" data-step="4" onclick="_builderGoStep(4)"><span class="num">4</span><span class="builder-step-label">Prompt</span></button>'
+    + '<button type="button" class="builder-step-tab" data-step="5" onclick="_builderGoStep(5)"><span class="num">5</span><span class="builder-step-label">Review</span></button>'
+    + '</div>'
+
+    + '<div class="builder-body">'
+    + '<div class="builder-panel" data-step="1">'
+    + '<p class="step-intro">Give this agent a name and a short description &mdash; this is what you\'ll see on the Agents tab.</p>'
+    + '<div class="form-group"><label for="f-ag-name">Agent name</label>'
+    + '<input type="text" id="f-ag-name" placeholder="e.g. Momentum Scout" value="' + esc(a.name) + '" oninput="_builderClearFieldError()">'
+    + '<div class="field-error-msg" id="f-ag-name-err">Give this agent a name so you can tell it apart.</div></div>'
+    + '<div class="form-group"><label for="f-ag-desc">Description</label>'
+    + '<input type="text" id="f-ag-desc" placeholder="One line on its personality or focus" value="' + esc(a.description || '') + '">'
+    + '<div class="form-hint">Optional, but helps once you have several agents.</div></div>'
+    + '</div>'
+
+    + '<div class="builder-panel" data-step="2">'
+    + '<p class="step-intro">Pick the model that powers this agent\'s thinking, and optionally attach a strategy with hard trading rules.</p>'
+    + '<div class="form-group"><label for="f-ag-strat">Strategy (rules)</label><select id="f-ag-strat">' + stratOpts + '</select>'
+    + '<div class="form-hint">Strategies set hard limits &mdash; position sizing, what to trade. Optional.</div></div>'
+    + '<div class="form-group"><label>Model</label>'
+    + '<input type="hidden" id="f-ag-model" value="' + esc(a.model || '') + '">'
+    + '<div class="model-picker">'
+    + '<div class="model-picker-search"><input type="text" id="model-search" placeholder="Search models by name, id, or price&hellip;" oninput="_builderFilterModels()" aria-label="Search models"></div>'
+    + '<div class="model-provider-chips" id="model-provider-chips">' + chipsHtml + '</div>'
+    + '<div class="model-list" id="model-list" role="listbox" aria-label="Available models"></div>'
+    + '</div>' + singleModelNotice + '</div>'
+    + '</div>'
+
+    + '<div class="builder-panel" data-step="3">'
+    + '<p class="step-intro">Guardrails that cap what any agent running on this account can do.</p>'
+    + riskStepHtml
+    + '</div>'
+
+    + '<div class="builder-panel" data-step="4">'
+    + '<p class="step-intro">Define this agent\'s personality, or use the default trading template.</p>'
+    + '<div class="form-group"><label for="f-ag-ptype">Prompt type</label>'
+    + '<select id="f-ag-ptype" onchange="document.getElementById(\'f-ag-prompt-wrap\').style.display=this.value===\'custom\'?\'block\':\'none\'">'
+    + '<option value="default"' + (a.systemPromptTemplate === 'default' ? ' selected' : '') + '>Default template</option>'
+    + '<option value="custom"' + (a.systemPromptTemplate === 'custom' ? ' selected' : '') + '>Custom prompt</option></select></div>'
+    + '<div id="f-ag-prompt-wrap" style="display:' + (a.systemPromptTemplate === 'custom' ? 'block' : 'none') + '">'
+    + '<div class="form-group"><label for="f-ag-prompt">Agent prompt</label>'
+    + '<textarea id="f-ag-prompt" rows="12" placeholder="Define the agent\'s personality, approach, and instructions...">' + esc(a.customSystemPrompt || '') + '</textarea>'
+    + '<div class="form-hint">This is the agent\'s base personality. Strategy rules are appended separately.</div></div></div>'
+    + '</div>'
+
+    + '<div class="builder-panel" data-step="5">'
+    + '<p class="step-intro">Double-check before you ' + (isEdit ? 'save' : 'create') + '.</p>'
+    + '<div class="review-summary" id="review-content"></div>'
+    + '<div id="review-activate-wrap"></div>'
+    + '</div>'
+    + '</div>'
+
+    + '<div class="builder-nav">'
+    + '<div class="builder-nav-left">'
+    + '<button type="button" class="btn" onclick="closeModal()">Cancel</button>'
+    + '<button type="button" class="btn" id="builder-back" onclick="_builderGoStep(_builder.step - 1)" style="display:none">Back</button>'
+    + '</div>'
+    + '<button type="button" class="btn primary" id="builder-next" onclick="_builderNext()">Continue</button>'
+    + '</div>';
+
+  document.getElementById('modal-content').classList.add('modal-wide');
+  document.getElementById('modal-overlay').classList.add('visible');
+  _builderRenderModelList('', '');
+  _builderGoStep(1);
+}
+
+function _builderClearFieldError() {
+  document.getElementById('f-ag-name')?.classList.remove('field-error');
+  const err = document.getElementById('f-ag-name-err');
+  if (err) err.style.display = 'none';
+}
+
+function _builderValidateStep1() {
+  const nameEl = document.getElementById('f-ag-name');
+  if (!nameEl) return true;
+  const name = nameEl.value.trim();
+  if (!name) {
+    nameEl.classList.add('field-error');
+    const err = document.getElementById('f-ag-name-err');
+    if (err) err.style.display = 'block';
+    nameEl.focus();
+    return false;
+  }
+  _builderClearFieldError();
+  return true;
+}
+
+function _builderGoStep(n) {
+  if (!_builder || n < 1 || n > 5) return;
+  if (n > 1 && !_builderValidateStep1()) n = 1;
+  _builder.step = n;
+  document.querySelectorAll('.builder-panel').forEach(p => p.classList.toggle('active', Number(p.dataset.step) === n));
+  document.querySelectorAll('.builder-step-tab').forEach(t => {
+    const s = Number(t.dataset.step);
+    t.classList.toggle('active', s === n);
+    t.classList.toggle('done', s < n);
+  });
+  const backBtn = document.getElementById('builder-back');
+  if (backBtn) backBtn.style.display = n === 1 ? 'none' : '';
+  const nextBtn = document.getElementById('builder-next');
+  if (nextBtn) nextBtn.textContent = n === 5 ? (_builder.isEdit ? 'Save Changes' : 'Create Agent') : 'Continue';
+  if (n === 5) _builderRenderReview();
+  const panel = document.querySelector('.builder-panel[data-step="' + n + '"]');
+  panel?.querySelector('input, select, textarea')?.focus();
+}
+
+function _builderNext() {
+  if (!_builder) return;
+  if (_builder.step === 1 && !_builderValidateStep1()) return;
+  if (_builder.step >= 5) { _builderSubmit(); return; }
+  _builderGoStep(_builder.step + 1);
+}
+
+// ── Model picker (searches the live catalog fetched when the builder opened) ──
+function _builderFilterModels() {
+  const q = (document.getElementById('model-search')?.value || '').toLowerCase();
+  const activeChip = document.querySelector('.model-chip.active');
+  _builderRenderModelList(q, activeChip ? activeChip.dataset.provider : '');
+}
+function _builderFilterByProvider(el) {
+  document.querySelectorAll('.model-chip').forEach(c => c.classList.remove('active'));
+  el.classList.add('active');
+  _builderFilterModels();
+}
+function _builderRenderModelList(query, provider) {
+  const list = document.getElementById('model-list');
+  if (!list || !_builder) return;
+  const models = _builder.models || [];
+  const filtered = models.filter(m => {
+    if (provider && !m.id.startsWith(provider + '/')) return false;
+    if (!query) return true;
+    return m.id.toLowerCase().includes(query) || (m.name || '').toLowerCase().includes(query) || (m.description || '').toLowerCase().includes(query);
+  });
+  if (!filtered.length) {
+    list.innerHTML = '<div class="model-empty">No models match &ldquo;' + esc(query) + '&rdquo;</div>';
+    return;
+  }
+  const selected = document.getElementById('f-ag-model')?.value;
+  list.innerHTML = filtered.map(m => {
+    const isSel = m.id === selected;
+    const idJs = esc(m.id).replace(/'/g, "\\'");
+    return '<button type="button" class="model-option' + (isSel ? ' selected' : '') + '" role="option" aria-selected="' + isSel + '" onclick="_builderSelectModel(\'' + idJs + '\')">'
+      + '<div class="mo-name"><span>' + esc(m.name) + '</span>' + (isSel ? '<span class="mo-tag">Selected</span>' : '') + '</div>'
+      + '<div class="mo-id">' + esc(m.id) + '</div>'
+      + (m.description ? '<div class="mo-desc">' + esc(m.description) + '</div>' : '')
+      + '</button>';
+  }).join('');
+}
+function _builderSelectModel(id) {
+  const field = document.getElementById('f-ag-model');
+  if (field) field.value = id;
+  const q = (document.getElementById('model-search')?.value || '').toLowerCase();
+  const activeChip = document.querySelector('.model-chip.active');
+  _builderRenderModelList(q, activeChip ? activeChip.dataset.provider : '');
+}
+
+function _builderMarkPermsDirty() { if (_builder) _builder.permsDirty = true; }
+
+function _builderRenderReview() {
+  if (!_builder) return;
+  const name = document.getElementById('f-ag-name')?.value.trim() || '(unnamed)';
+  const modelId = document.getElementById('f-ag-model')?.value || '';
+  const model = (_builder.models || []).find(m => m.id === modelId);
+  const stratId = document.getElementById('f-ag-strat')?.value || '';
+  const strat = (_builder.strategies || []).find(s => s.id === stratId);
+  const ptype = document.getElementById('f-ag-ptype')?.value;
+
+  const rows = [
+    ['Name', esc(name)],
+    ['Model', esc(model ? model.name : (modelId || 'Not selected'))],
+    ['Strategy', esc(strat ? strat.name : 'None')],
+    ['Prompt', ptype === 'custom' ? 'Custom' : 'Default template'],
+  ];
+  if (_builder.sandboxId) {
+    const live = document.getElementById('b-perm-live')?.checked;
+    const maxpos = document.getElementById('b-perm-maxpos')?.value;
+    const maxloss = document.getElementById('b-perm-maxloss')?.value;
+    rows.push(['Risk (' + esc(_builder.accountLabel) + ')', (live ? 'Live trading allowed' : 'Paper-only') + ' &middot; ' + esc(maxpos) + '% max position &middot; ' + esc(maxloss) + '% max daily loss' + (_builder.permsDirty ? ' (changed)' : '')]);
+  }
+
+  const el = document.getElementById('review-content');
+  if (el) el.innerHTML = rows.map(([k, val]) => '<div class="review-row"><span class="rk">' + k + '</span><span class="rv">' + val + '</span></div>').join('');
+
+  const actWrap = document.getElementById('review-activate-wrap');
+  if (!actWrap) return;
+  if (!_builder.sandboxId) {
+    actWrap.innerHTML = '';
+  } else if (_builder.alreadyActive) {
+    actWrap.innerHTML = '<div class="review-note">Already the active agent for <strong>' + esc(_builder.accountLabel) + '</strong>.</div>';
+  } else {
+    actWrap.innerHTML = '<label class="review-activate"><input type="checkbox" id="review-activate"' + (_builder.isEdit ? '' : ' checked') + '> <span>Activate this agent for <strong>' + esc(_builder.accountLabel) + '</strong> right away</span></label>';
+  }
+}
+
+function _builderShowError(msg) {
+  const el = document.getElementById('builder-error');
+  if (!el) return;
+  el.textContent = msg;
+  el.style.display = 'block';
+}
+function _builderClearError() {
+  const el = document.getElementById('builder-error');
+  if (el) el.style.display = 'none';
+}
+
+async function _builderSubmit() {
+  if (!_builder || !_builderValidateStep1()) { _builderGoStep(1); return; }
+  const btn = document.getElementById('builder-next');
+  const original = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = _builder.isEdit ? 'Saving…' : 'Creating…';
+  _builderClearError();
+  try {
+    const body = {
+      name: v('f-ag-name'),
+      description: v('f-ag-desc'),
+      strategyId: v('f-ag-strat') || null,
+      model: v('f-ag-model'),
+      systemPromptTemplate: v('f-ag-ptype'),
+      customSystemPrompt: v('f-ag-prompt') || '',
+    };
+    const url = _builder.isEdit ? '/api/agents/' + encodeURIComponent(_builder.agentId) : '/api/agents';
+    const method = _builder.isEdit ? 'PUT' : 'POST';
+    const r = await fetch(url, { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    const d = await r.json();
+    if (!r.ok || d.error) throw new Error(d.error || 'Failed to save agent');
+    const savedId = _builder.isEdit ? _builder.agentId : d.agent?.id;
+
+    if (_builder.sandboxId && _builder.permsDirty) {
+      const blocked = (document.getElementById('b-perm-blocked')?.value || '').split(',').map(s => s.trim()).filter(Boolean);
+      const permBody = {
+        allowLiveTrading: document.getElementById('b-perm-live').checked,
+        allowOptions: document.getElementById('b-perm-options').checked,
+        allowStocks: document.getElementById('b-perm-stocks').checked,
+        allow0DTE: document.getElementById('b-perm-0dte').checked,
+        requireConfirmation: document.getElementById('b-perm-confirm').checked,
+        maxPositionPct: parseInt(document.getElementById('b-perm-maxpos').value) || 15,
+        maxDeployedPct: parseInt(document.getElementById('b-perm-maxdeploy').value) || 80,
+        maxDailyLoss: parseInt(document.getElementById('b-perm-maxloss').value) || 5,
+        maxOpenPositions: parseInt(document.getElementById('b-perm-maxopen').value) || 10,
+        maxOrderValue: parseInt(document.getElementById('b-perm-maxorder').value) || 0,
+        maxToolRoundsPerBeat: parseInt(document.getElementById('b-perm-maxtools').value) || 25,
+        blockedTools: blocked,
+        sandboxId: _builder.sandboxId,
+      };
+      await fetch('/api/permissions', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(permBody) });
+    }
+
+    const activateEl = document.getElementById('review-activate');
+    let activated = false;
+    if (_builder.sandboxId && savedId && activateEl && activateEl.checked) {
+      await fetch('/api/sandboxes/' + encodeURIComponent(_builder.sandboxId) + '/agent', {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ activeAgentId: savedId }),
+      });
+      activated = true;
+    }
+
+    closeModal();
+    config = await fetch('/api/config').then(r => r.json());
+    await refreshSelectedSandboxConfig();
+    renderAll();
+    showToast((_builder.isEdit ? 'Saved "' : 'Created "') + body.name + '"' + (activated ? ' and activated for ' + _builder.accountLabel : ''), 'success');
+    _builder = null;
+  } catch (e) {
+    _builderShowError(e.message);
+    btn.disabled = false;
+    btn.textContent = original;
+  }
+}
 function editStrategy(id) { const s = config.strategies.find(x => x.id === id); if(s) showModal('strategy-edit', s); }
 function v(id) { const e = document.getElementById(id); return e ? (e.type==='checkbox'?e.checked:e.value) : ''; }
 
@@ -2663,6 +3196,7 @@ async function checkHealth() {
     el.textContent = healthy ? 'ok' : 'off';
     el.style.color = healthy ? 'var(--success)' : 'var(--error)';
     renderAccounts();
+    renderAgents();
     renderSandboxTabs();
     refreshSandboxButtons();
   } catch { document.getElementById('bot-status').textContent = 'err'; }

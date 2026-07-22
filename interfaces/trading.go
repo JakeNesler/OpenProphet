@@ -10,6 +10,7 @@ type TradingService interface {
 	PlaceOrder(ctx context.Context, order *Order) (*OrderResult, error)
 	CancelOrder(ctx context.Context, orderID string) error
 	GetOrder(ctx context.Context, orderID string) (*Order, error)
+	GetOrderByClientOrderID(ctx context.Context, clientOrderID string) (*Order, error)
 	ListOrders(ctx context.Context, status string) ([]*Order, error)
 	GetPositions(ctx context.Context) ([]*Position, error)
 	GetAccount(ctx context.Context) (*Account, error)
@@ -38,6 +39,7 @@ type StorageService interface {
 	SaveOrder(order *Order) error
 	GetOrder(orderID string) (*Order, error)
 	GetOrders(status string) ([]*Order, error)
+	GetOrdersNeedingReconciliation() ([]*Order, error)
 	CleanupOldData(before time.Time) error
 }
 
@@ -54,20 +56,21 @@ type StrategyExecutor interface {
 
 // Common data structures used across interfaces
 type Order struct {
-	ID            string
-	Symbol        string
-	Qty           float64
-	Side          string // "buy" or "sell"
-	Type          string // "market", "limit", etc.
-	TimeInForce   string // "day", "gtc", etc.
-	LimitPrice    *float64
-	StopPrice     *float64
-	Status        string
-	FilledQty     float64
+	ID             string
+	ClientOrderID  string
+	Symbol         string
+	Qty            float64
+	Side           string // "buy" or "sell"
+	Type           string // "market", "limit", etc.
+	TimeInForce    string // "day", "gtc", etc.
+	LimitPrice     *float64
+	StopPrice      *float64
+	Status         string
+	FilledQty      float64
 	FilledAvgPrice *float64
-	SubmittedAt   time.Time
-	FilledAt      *time.Time
-	CanceledAt    *time.Time
+	SubmittedAt    time.Time
+	FilledAt       *time.Time
+	CanceledAt     *time.Time
 }
 
 type OrderRequest struct {
@@ -145,6 +148,7 @@ type MarketData struct {
 
 // Options trading structures
 type OptionsOrder struct {
+	ClientOrderID string
 	Symbol        string  // Options symbol in OCC format (e.g., TSLA251219C00400000)
 	Underlying    string  // Underlying stock symbol
 	Qty           float64

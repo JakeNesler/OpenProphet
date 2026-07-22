@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import 'dotenv/config';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import {
@@ -11,9 +12,11 @@ import axios from 'axios';
 import fs from 'fs/promises';
 import path from 'path';
 import { storeTrade, findSimilarTrades, getTradeStats, getEmbeddingCount } from './vectorDB.js';
+import { ORDER_TOOLS, checkPermissions } from './permissions.js';
 
 // Configuration
-const TRADING_BOT_URL = process.env.TRADING_BOT_URL || 'http://localhost:4534';
+const TRADING_BOT_URL = process.env.TRADING_BOT_URL || 'http://127.0.0.1:4534';
+const TRADING_BOT_TOKEN = process.env.TRADING_BOT_TOKEN || '';
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const OPENPROPHET_ACCOUNT_ID = process.env.OPENPROPHET_ACCOUNT_ID || 'default';
 const OPENPROPHET_SANDBOX_ID = process.env.OPENPROPHET_SANDBOX_ID || `sbx_${OPENPROPHET_ACCOUNT_ID}`;
@@ -36,7 +39,7 @@ async function getTradingBotUrl() {
     const sandboxes = resp.data.sandboxes || [];
     const sandbox = sandboxes.find(s => s.sandboxId === OPENPROPHET_SANDBOX_ID);
     if (sandbox && sandbox.port) {
-      return `http://localhost:${sandbox.port}`;
+      return `http://127.0.0.1:${sandbox.port}`;
     }
   } catch {}
   return TRADING_BOT_URL;
@@ -58,6 +61,9 @@ async function callTradingBot(endpoint, method = 'GET', data = null) {
       url: `${_tradingBotUrl}/api/v1${endpoint}`,
       headers: { 'Content-Type': 'application/json' },
     };
+    if (TRADING_BOT_TOKEN) {
+      config.headers.Authorization = `Bearer ${TRADING_BOT_TOKEN}`;
+    }
     if (data) {
       config.data = data;
     }
@@ -66,6 +72,49 @@ async function callTradingBot(endpoint, method = 'GET', data = null) {
   } catch (error) {
     throw new Error(`Trading bot error: ${error.message}`);
   }
+}
+
+async function autoStoreSetup(args, action) {
+  if (typeof args.thesis !== 'string' || !args.thesis.trim()) return;
+
+  try {
+    const now = new Date();
+    const dateStr = now.toISOString().split('T')[0];
+    const id = `${dateStr}-${args.symbol}-${action}-${now.getTime()}`;
+    const trade = {
+      id,
+      decision_file: `manual_${id}.json`,
+      symbol: args.symbol,
+      action,
+      strategy: args.strategy || 'auto',
+      result_pct: null,
+      result_dollars: null,
+      date: dateStr,
+      reasoning: args.thesis,
+      market_context: args.market_context || '',
+    };
+
+    await storeTrade(trade);
+  } catch (error) {
+    console.error('Failed to auto-store trade setup:', error.message);
+  }
+}
+
+// Only OPENING trades should seed the entry-recall corpus; closing/exit orders would
+// pollute find_similar_setups (used as pre-entry research). Options carry an explicit intent;
+// default to opening when unknown.
+function isOpeningIntent(positionIntent) {
+  if (typeof positionIntent !== 'string' || !positionIntent) return true;
+  return positionIntent.includes('open');
+}
+
+// Build an order tool response, nudging the agent if no thesis was captured to memory.
+function orderResponse(data, args) {
+  let text = JSON.stringify(data, null, 2);
+  if (typeof args.thesis !== 'string' || !args.thesis.trim()) {
+    text += '\n\n⚠ No `thesis` provided — this trade was NOT captured to your trade-memory. Pass a `thesis` next time so find_similar_setups can recall it.';
+  }
+  return { content: [{ type: 'text', text }] };
 }
 
 // Create MCP server
@@ -132,6 +181,18 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               type: 'number',
               description: 'Limit price (required for limit orders)',
             },
+            thesis: {
+              type: 'string',
+              description: 'Your one-paragraph rationale for this trade — captured to the trade-memory for future recall.',
+            },
+            strategy: {
+              type: 'string',
+              description: 'Trading strategy for this setup',
+            },
+            market_context: {
+              type: 'string',
+              description: 'Relevant market context for this setup',
+            },
           },
           required: ['symbol', 'quantity', 'order_type'],
         },
@@ -158,6 +219,18 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             limit_price: {
               type: 'number',
               description: 'Limit price (required for limit orders)',
+            },
+            thesis: {
+              type: 'string',
+              description: 'Your one-paragraph rationale for this trade — captured to the trade-memory for future recall.',
+            },
+            strategy: {
+              type: 'string',
+              description: 'Trading strategy for this setup',
+            },
+            market_context: {
+              type: 'string',
+              description: 'Relevant market context for this setup',
             },
           },
           required: ['symbol', 'quantity', 'order_type'],
@@ -248,6 +321,14 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               items: {
                 type: 'string',
               },
+            },
+            thesis: {
+              type: 'string',
+              description: 'Your one-paragraph rationale for this trade — captured to the trade-memory for future recall.',
+            },
+            market_context: {
+              type: 'string',
+              description: 'Relevant market context for this setup',
             },
           },
           required: ['symbol', 'side', 'allocation_dollars'],
@@ -699,6 +780,18 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               type: 'number',
               description: 'Limit price per contract (required for limit orders)',
             },
+            thesis: {
+              type: 'string',
+              description: 'Your one-paragraph rationale for this trade — captured to the trade-memory for future recall.',
+            },
+            strategy: {
+              type: 'string',
+              description: 'Trading strategy for this setup',
+            },
+            market_context: {
+              type: 'string',
+              description: 'Relevant market context for this setup',
+            },
           },
           required: ['symbol', 'quantity', 'side', 'order_type'],
         },
@@ -1058,8 +1151,6 @@ const AGENT_QUERY = { sandboxId: OPENPROPHET_SANDBOX_ID };
 const agentAxios = axios.create({
   headers: AGENT_AUTH_TOKEN ? { Authorization: `Bearer ${AGENT_AUTH_TOKEN}` } : {},
 });
-const ORDER_TOOLS = ['place_buy_order', 'place_sell_order', 'place_options_order', 'place_managed_position', 'close_managed_position'];
-
 async function enforcePermissions(toolName, args) {
   let perms;
   try {
@@ -1071,54 +1162,8 @@ async function enforcePermissions(toolName, args) {
     return;
   }
 
-  // Blocked tools
-  if (perms.blockedTools?.length && perms.blockedTools.includes(toolName)) {
-    throw new Error(`Tool "${toolName}" is blocked by permissions. Blocked tools: ${perms.blockedTools.join(', ')}`);
-  }
-
-  // Order-specific enforcement
-  if (ORDER_TOOLS.includes(toolName)) {
-    // Live trading disabled
-    if (!perms.allowLiveTrading) {
-      throw new Error('Live trading is DISABLED (read-only mode). Cannot place orders. Change permissions to enable.');
-    }
-    // Options check
-    if (!perms.allowOptions && (toolName === 'place_options_order' || (args.symbol && args.symbol.length > 10))) {
-      throw new Error('Options trading is DISABLED by permissions.');
-    }
-    // Stock check
-    if (!perms.allowStocks && (toolName === 'place_buy_order' || toolName === 'place_sell_order')) {
-      throw new Error('Stock trading is DISABLED by permissions.');
-    }
-    // 0DTE check for options
-    if (!perms.allow0DTE && toolName === 'place_options_order' && args.symbol) {
-      // OCC format: SYMBOL + YYMMDD + C/P + price — extract expiration
-      const match = args.symbol.match(/(\d{6})[CP]/);
-      if (match) {
-        const expStr = match[1]; // YYMMDD
-        const expDate = new Date(`20${expStr.slice(0,2)}-${expStr.slice(2,4)}-${expStr.slice(4,6)}`);
-        const today = new Date();
-        today.setHours(0,0,0,0);
-        expDate.setHours(0,0,0,0);
-        if (expDate.getTime() === today.getTime()) {
-          throw new Error('0DTE options are NOT allowed by permissions.');
-        }
-      }
-    }
-    // Require confirmation
-    if (perms.requireConfirmation) {
-      throw new Error(`Order requires operator confirmation (requireConfirmation is enabled). Tell the operator what you want to do and wait for them to disable this setting or approve via the dashboard.`);
-    }
-    // Max order value
-    if (perms.maxOrderValue > 0) {
-      const orderValue = (args.limit_price || args.entry_price || 0) * (args.quantity || args.qty || 0);
-      const allocValue = args.allocation_dollars || 0;
-      const checkValue = allocValue || orderValue;
-      if (checkValue > perms.maxOrderValue) {
-        throw new Error(`Order value $${checkValue.toFixed(2)} exceeds max allowed $${perms.maxOrderValue}. Reduce size or change permissions.`);
-      }
-    }
-  }
+  // Delegate the actual policy decision to the pure, unit-tested checker.
+  checkPermissions(toolName, args, perms);
 }
 
 // Handle tool calls
@@ -1175,14 +1220,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           ...(args.limit_price && { limit_price: args.limit_price })
         };
         const data = await callTradingBot('/orders/buy', 'POST', requestData);
-        return {
-          content: [
-            {
-              type: 'text',
-              text: JSON.stringify(data, null, 2),
-            },
-          ],
-        };
+        void autoStoreSetup(args, 'buy');
+        return orderResponse(data, args);
       }
 
       case 'place_sell_order': {
@@ -1194,26 +1233,16 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           ...(args.limit_price && { limit_price: args.limit_price })
         };
         const data = await callTradingBot('/orders/sell', 'POST', requestData);
-        return {
-          content: [
-            {
-              type: 'text',
-              text: JSON.stringify(data, null, 2),
-            },
-          ],
-        };
+        // Sells are position exits in this system, not entry setups — not auto-captured to
+        // trade-memory (outcomes are recorded via store_trade_setup with the realized result).
+        return orderResponse(data, args);
       }
 
       case 'place_managed_position': {
-        const data = await callTradingBot('/positions/managed', 'POST', args);
-        return {
-          content: [
-            {
-              type: 'text',
-              text: JSON.stringify(data, null, 2),
-            },
-          ],
-        };
+        const { thesis, market_context, ...requestData } = args;
+        const data = await callTradingBot('/positions/managed', 'POST', requestData);
+        void autoStoreSetup(args, args.side || 'buy');
+        return orderResponse(data, args);
       }
 
       case 'get_managed_positions': {
@@ -1719,14 +1748,8 @@ ${allNews.map((article, i) =>
           ...(args.limit_price && { limit_price: args.limit_price })
         };
         const data = await callTradingBot('/options/order', 'POST', requestData);
-        return {
-          content: [
-            {
-              type: 'text',
-              text: JSON.stringify(data, null, 2),
-            },
-          ],
-        };
+        if (isOpeningIntent(args.position_intent)) void autoStoreSetup(args, args.side || 'buy');
+        return orderResponse(data, args);
       }
 
       case 'get_options_positions': {
@@ -1954,8 +1977,8 @@ ${i + 1}. ${trade.symbol} ${trade.action} - ${trade.strategy}
           symbol,
           action,
           strategy,
-          result_pct: result_pct || null,
-          result_dollars: result_dollars || null,
+          result_pct: result_pct ?? null,
+          result_dollars: result_dollars ?? null,
           date: dateStr,
           reasoning,
           market_context,
@@ -1998,8 +2021,8 @@ You can now use find_similar_setups to find trades similar to this one.`,
         const statsText = `
 📊 Trade Statistics${filterStr}
 
-Total Trades: ${stats.count}
-Winners: ${stats.winners} (${stats.win_rate.toFixed(1)}%)
+Total Trades: ${stats.count} (${stats.resolved} resolved, ${stats.pending} pending)
+Winners: ${stats.winners} (${stats.win_rate.toFixed(1)}% of resolved)
 Losers: ${stats.losers}
 
 Average Result: ${stats.avg_result_pct >= 0 ? '+' : ''}${stats.avg_result_pct.toFixed(1)}% ($${stats.avg_result_dollars >= 0 ? '+' : ''}${stats.avg_result_dollars.toFixed(0)})

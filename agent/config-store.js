@@ -5,6 +5,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import crypto from 'crypto';
 import { execSync } from 'child_process';
+import { DEFAULT_AGENT_MODEL, alpacaTradingUrl } from './defaults.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const CONFIG_PATH = path.join(__dirname, '..', 'data', 'agent-config.json');
@@ -112,7 +113,7 @@ function defaultAgents() {
       description: 'Aggressive discretionary options trader with scalping overlay',
       systemPromptTemplate: 'default',
       strategyId: 'default',
-      model: 'anthropic/claude-sonnet-4-6',
+      model: DEFAULT_AGENT_MODEL,
       heartbeatOverrides: {},
       customSystemPrompt: '',
       createdAt: new Date().toISOString(),
@@ -133,7 +134,7 @@ function defaultAgents() {
 - Stop loss at -10%, take profit at +30%
 - Maximum 5 positions at once`,
       strategyId: null,
-      model: 'anthropic/claude-sonnet-4-6',
+      model: DEFAULT_AGENT_MODEL,
       heartbeatOverrides: {
         pre_market: 1800,
         market_open: 300,
@@ -211,18 +212,36 @@ function defaultModels() {
       return models;
     }
   } catch (err) {
-    console.log('[config-store] Could not load models from opencode, using defaults:', err.message);
+    console.log('[config-store] Could not load models from opencode:', err.message);
   }
-  
-  return [
-    { id: 'anthropic/claude-sonnet-4-6', name: 'Claude Sonnet 4.6', description: 'Best speed + intelligence, $3/$15 per MTok' },
-    { id: 'anthropic/claude-opus-4-6', name: 'Claude Opus 4.6', description: 'Most intelligent, best for agents, $5/$25 per MTok' },
-    { id: 'anthropic/claude-haiku-4-5', name: 'Claude Haiku 4.5', description: 'Fastest, near-frontier, $1/$5 per MTok' },
-    { id: 'anthropic/claude-sonnet-4-5', name: 'Claude Sonnet 4.5 (Legacy)', description: 'Previous gen Sonnet, $3/$15 per MTok' },
-    { id: 'anthropic/claude-opus-4-5', name: 'Claude Opus 4.5 (Legacy)', description: 'Previous gen Opus, $5/$25 per MTok' },
-    { id: 'anthropic/claude-sonnet-4-0', name: 'Claude Sonnet 4 (Legacy)', description: 'Original Sonnet 4, $3/$15 per MTok' },
-    { id: 'anthropic/claude-opus-4-0', name: 'Claude Opus 4 (Legacy)', description: 'Original Opus 4, $15/$75 per MTok' },
-  ];
+
+  return null; // signal "discovery failed" so the registry can fall back to last-good / default
+}
+
+// Live, TTL-cached model registry. The catalog AUTO-UPDATES from `opencode models` rather than
+// being a frozen snapshot baked into config, so newly-available models appear without a code
+// change. On discovery failure it returns the last good list, then a minimal honest default.
+let _modelCache = { models: null, fetchedAt: 0, ttl: 0 };
+const MODEL_CACHE_TTL_MS = 10 * 60 * 1000; // refresh a good list at most every 10 min
+const MODEL_FAIL_TTL_MS = 30 * 1000;       // after a failure, retry sooner but don't hammer opencode
+const FALLBACK_MODELS = [
+  { id: DEFAULT_AGENT_MODEL, name: 'Default model', description: 'Model list unavailable — check `opencode auth`. Any valid provider/model id can still be entered.' },
+];
+
+export function getAvailableModels({ force = false } = {}) {
+  const now = Date.now();
+  if (!force && _modelCache.models && (now - _modelCache.fetchedAt) < _modelCache.ttl) {
+    return _modelCache.models;
+  }
+  const live = defaultModels(); // live `opencode models`, or null on failure
+  if (live && live.length > 0) {
+    _modelCache = { models: live, fetchedAt: now, ttl: MODEL_CACHE_TTL_MS };
+    return live;
+  }
+  // Discovery failed: keep serving the last good list (or the minimal default), and retry soon.
+  const fallback = _modelCache.models || FALLBACK_MODELS;
+  _modelCache = { models: fallback, fetchedAt: now, ttl: MODEL_FAIL_TTL_MS };
+  return fallback;
 }
 
 function createSandbox(account, overrides = {}) {
@@ -233,7 +252,7 @@ function createSandbox(account, overrides = {}) {
     name: overrides.name || account.name || `Sandbox ${account.id}`,
     agent: {
       activeAgentId: overrides.agent?.activeAgentId || overrides.activeAgentId || 'default',
-      model: overrides.agent?.model || overrides.activeModel || 'anthropic/claude-sonnet-4-6',
+      model: overrides.agent?.model || overrides.activeModel || DEFAULT_AGENT_MODEL,
       overrides: {
         ...DEFAULT_AGENT_OVERRIDES,
         ...(overrides.agent?.overrides || {}),
@@ -255,7 +274,7 @@ function createDefaultConfig() {
 
     // Legacy compatibility aliases. Keep mirrored during migration.
     activeAgentId: 'default',
-    activeModel: 'anthropic/claude-sonnet-4-6',
+    activeModel: DEFAULT_AGENT_MODEL,
     heartbeat: { ...DEFAULT_HEARTBEAT },
     permissions: { ...DEFAULT_PERMISSIONS },
     plugins: mergePlugins(),
@@ -265,10 +284,10 @@ function createDefaultConfig() {
     agents: defaultAgents(),
     strategies: defaultStrategies(),
     manager: {
-      model: 'anthropic/claude-sonnet-4-6',
+      model: DEFAULT_AGENT_MODEL,
       customPrompt: '',
     },
-    models: defaultModels(),
+    models: getAvailableModels(),
   };
 }
 
@@ -292,7 +311,7 @@ function mergeSandbox(sandbox, fallback = {}) {
     ...sandbox,
     agent: {
       activeAgentId: sandbox?.agent?.activeAgentId || fallback.activeAgentId || 'default',
-      model: sandbox?.agent?.model || fallback.activeModel || 'anthropic/claude-sonnet-4-6',
+      model: sandbox?.agent?.model || fallback.activeModel || DEFAULT_AGENT_MODEL,
       overrides: {
         ...DEFAULT_AGENT_OVERRIDES,
         ...(sandbox?.agent?.overrides || {}),
@@ -414,7 +433,7 @@ export async function loadConfig() {
         name: isPaper ? 'Paper (from .env)' : 'Live (from .env)',
         publicKey: pk,
         secretKey: sk,
-        baseUrl: baseUrl || (isPaper ? 'https://paper-api.alpaca.markets' : 'https://api.alpaca.markets'),
+        baseUrl: alpacaTradingUrl(isPaper, baseUrl),
         paper: isPaper,
         createdAt: new Date().toISOString(),
       };
@@ -490,7 +509,7 @@ export async function addAccount({ name, publicKey, secretKey, baseUrl, paper })
     name: name || `Account ${_config.accounts.length + 1}`,
     publicKey,
     secretKey,
-    baseUrl: baseUrl || (paper ? 'https://paper-api.alpaca.markets' : 'https://api.alpaca.markets'),
+    baseUrl: alpacaTradingUrl(paper, baseUrl),
     paper: paper !== false,
     createdAt: new Date().toISOString(),
   };
@@ -844,12 +863,23 @@ export function getPermissionsForSandbox(sandboxId) {
 
 // ── Plugins ────────────────────────────────────────────────────────
 
+const MASK_SENTINEL = /^\*{4}/;
+function dropMaskedFields(obj) {
+  if (!obj || typeof obj !== 'object') return obj;
+  const out = {};
+  for (const [k, v] of Object.entries(obj)) {
+    if (typeof v === 'string' && MASK_SENTINEL.test(v)) continue;
+    out[k] = v;
+  }
+  return out;
+}
+
 export async function updatePlugin(pluginName, pluginConfig) {
   updateSandbox(_config.activeAccountId, sandbox => ({
     ...sandbox,
     plugins: {
       ...(sandbox.plugins || {}),
-      [pluginName]: { ...((sandbox.plugins || {})[pluginName] || {}), ...pluginConfig },
+      [pluginName]: { ...((sandbox.plugins || {})[pluginName] || {}), ...dropMaskedFields(pluginConfig) },
     },
   }));
   await saveConfig();
@@ -864,7 +894,7 @@ export async function updatePluginForSandbox(sandboxId, pluginName, pluginConfig
       ...(sandbox.plugins || {}),
       [pluginName]: {
         ...((sandbox.plugins || {})[pluginName] || {}),
-        ...pluginConfig,
+        ...dropMaskedFields(pluginConfig),
       },
     },
     updatedAt: new Date().toISOString(),

@@ -142,8 +142,15 @@ OpenProphet
 - **Tab visibility optimization** — Pauses SSE and polling when tab is hidden
 
 ### Security & Guardrails
-- **Token-based auth** — Set `AGENT_AUTH_TOKEN` env var to require Bearer token on all API routes
-- **Secret stripping** — `safeConfig()` masks secret keys in all SSE broadcasts and API responses
+- **Authenticated trading backend** — the Go API binds `127.0.0.1` by default and requires a
+  bearer token on `/api/v1` (`/health` stays open). If `TRADING_BOT_TOKEN` is unset the
+  dashboard mints an ephemeral one at startup, so the loopback API is never left open.
+- **Dashboard auth** — set `AGENT_AUTH_TOKEN` to require a Bearer token on the dashboard API.
+- **Secret masking** — `safeConfig()` recursively masks any secret-named field (tokens, keys,
+  webhooks) in all SSE broadcasts and API responses.
+- **Order idempotency + startup reconciliation** — every broker submit carries a client order
+  ID and is persisted before submission; on boot the backend reconciles unresolved orders
+  against the broker so a lost response can't silently duplicate a position.
 - **MCP permission enforcement** — `enforcePermissions()` checks before every tool execution:
   - `blockedTools` — Reject calls to specific tools
   - `allowLiveTrading` — Block all order tools when disabled

@@ -62,6 +62,9 @@ func (s *AlpacaTradingService) PlaceOrder(ctx context.Context, order *interfaces
 		Type:        alpaca.OrderType(order.Type),
 		TimeInForce: alpaca.TimeInForce(order.TimeInForce),
 	}
+	if order.ClientOrderID != "" {
+		req.ClientOrderID = order.ClientOrderID
+	}
 
 	if order.LimitPrice != nil {
 		limitPrice := decimal.NewFromFloat(*order.LimitPrice)
@@ -82,6 +85,7 @@ func (s *AlpacaTradingService) PlaceOrder(ctx context.Context, order *interfaces
 
 	alpacaOrder, err := s.client.PlaceOrder(req)
 	if err != nil {
+		// Startup reconciliation is handled by OrderController.ReconcileOpenOrders.
 		s.logger.WithError(err).Error("Failed to place order")
 		return nil, fmt.Errorf("failed to place order: %w", err)
 	}
@@ -111,6 +115,16 @@ func (s *AlpacaTradingService) GetOrder(ctx context.Context, orderID string) (*i
 	alpacaOrder, err := s.client.GetOrder(orderID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get order: %w", err)
+	}
+
+	return s.convertAlpacaOrder(alpacaOrder), nil
+}
+
+// GetOrderByClientOrderID retrieves an order by its client order ID.
+func (s *AlpacaTradingService) GetOrderByClientOrderID(ctx context.Context, clientOrderID string) (*interfaces.Order, error) {
+	alpacaOrder, err := s.client.GetOrderByClientOrderID(clientOrderID)
+	if err != nil {
+		return nil, err
 	}
 
 	return s.convertAlpacaOrder(alpacaOrder), nil
@@ -184,14 +198,15 @@ func (s *AlpacaTradingService) GetAccount(ctx context.Context) (*interfaces.Acco
 // Helper function to convert Alpaca order to our interface
 func (s *AlpacaTradingService) convertAlpacaOrder(ao *alpaca.Order) *interfaces.Order {
 	order := &interfaces.Order{
-		ID:          ao.ID,
-		Symbol:      ao.Symbol,
-		Qty:         ao.Qty.InexactFloat64(),
-		Side:        string(ao.Side),
-		Type:        string(ao.Type),
-		TimeInForce: string(ao.TimeInForce),
-		Status:      string(ao.Status),
-		SubmittedAt: ao.SubmittedAt,
+		ID:            ao.ID,
+		ClientOrderID: ao.ClientOrderID,
+		Symbol:        ao.Symbol,
+		Qty:           ao.Qty.InexactFloat64(),
+		Side:          string(ao.Side),
+		Type:          string(ao.Type),
+		TimeInForce:   string(ao.TimeInForce),
+		Status:        string(ao.Status),
+		SubmittedAt:   ao.SubmittedAt,
 	}
 
 	if ao.LimitPrice != nil {
@@ -235,6 +250,9 @@ func (s *AlpacaTradingService) PlaceOptionsOrder(ctx context.Context, order *int
 		Type:        alpaca.OrderType(order.Type),
 		TimeInForce: alpaca.TimeInForce(order.TimeInForce),
 	}
+	if order.ClientOrderID != "" {
+		req.ClientOrderID = order.ClientOrderID
+	}
 
 	if order.LimitPrice != nil {
 		limitPrice := decimal.NewFromFloat(*order.LimitPrice)
@@ -250,6 +268,7 @@ func (s *AlpacaTradingService) PlaceOptionsOrder(ctx context.Context, order *int
 
 	alpacaOrder, err := s.client.PlaceOrder(req)
 	if err != nil {
+		// Startup reconciliation is handled by OrderController.ReconcileOpenOrders.
 		s.logger.WithError(err).Error("Failed to place options order")
 		return nil, fmt.Errorf("failed to place options order: %w", err)
 	}
