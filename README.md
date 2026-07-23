@@ -1,5 +1,7 @@
 # OpenProphet
 
+# 7/23/2026 Huge update and rewrite for a lot of logic. Existing workflows you have should be easy to port over. If you encounter issues or flaws please open an issue, and if you are so inclined, a PR. I appreciate the interest from all of you and I hope that you are enjoying using Openprophet! 
+
 *As featured in [Bloomberg](https://www.bloomberg.com/news/articles/2026-05-01/ai-tools-for-stock-trading-put-up-mixed-results)*
 
 **Autonomous AI trading agent with a web dashboard, MCP tools, and a Go trading backend**
