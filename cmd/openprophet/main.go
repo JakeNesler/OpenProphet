@@ -29,6 +29,7 @@ const maxApplianceArchiveBytes int64 = 2 << 30
 type Manifest struct {
 	SchemaVersion int      `json:"schemaVersion"`
 	Image         string   `json:"image"`
+	Architecture  string   `json:"architecture"`
 	DashboardURL  string   `json:"dashboardUrl,omitempty"`
 	Delivery      Delivery `json:"delivery"`
 }
@@ -43,6 +44,19 @@ type Delivery struct {
 
 // Allow mocking of commands in tests.
 var execCommand = exec.Command
+
+// Allow overriding the detected host architecture in tests.
+var runtimeArch = runtime.GOARCH
+
+// hostArchitecture maps the host architecture onto the appliance architectures
+// the manifest API can deliver.
+func hostArchitecture() (string, error) {
+	switch runtimeArch {
+	case "amd64", "arm64":
+		return runtimeArch, nil
+	}
+	return "", fmt.Errorf("unsupported host architecture: %s", runtimeArch)
+}
 
 func getHomeDir() string {
 	if home := os.Getenv("OPENPROPHET_HOME"); home != "" {
@@ -140,9 +154,12 @@ func validateOrigin(apiURL string) error {
 	return nil
 }
 
-func validateManifest(m *Manifest) error {
+func validateManifest(m *Manifest, arch string) error {
 	if m.SchemaVersion != 2 {
 		return fmt.Errorf("unsupported manifest schema version")
+	}
+	if m.Architecture != arch {
+		return fmt.Errorf("malformed manifest: architecture does not match this host")
 	}
 	image := strings.TrimSpace(m.Image)
 	if image == "" {
@@ -202,13 +219,35 @@ func validateDeliveryURL(rawURL string) error {
 	return fmt.Errorf("malformed manifest: delivery URL must use HTTPS")
 }
 
+// manifestEndpoint builds the manifest URL for the requested architecture. The
+// entitlement key is never part of the URL; it travels in the Authorization header.
+func manifestEndpoint(apiURL string, arch string) (string, error) {
+	parsed, err := url.Parse(strings.TrimSuffix(apiURL, "/"))
+	if err != nil {
+		return "", fmt.Errorf("invalid API URL")
+	}
+	endpoint := parsed.JoinPath("api", "appliance", "manifest")
+	query := url.Values{}
+	query.Set("arch", arch)
+	endpoint.RawQuery = query.Encode()
+	return endpoint.String(), nil
+}
+
 func fetchManifest(ctx context.Context, apiURL string, key string) (*Manifest, error) {
 	if err := validateOrigin(apiURL); err != nil {
 		return nil, err
 	}
 
-	manifestEndpoint := fmt.Sprintf("%s/api/appliance/manifest", strings.TrimSuffix(apiURL, "/"))
-	req, err := http.NewRequestWithContext(ctx, "GET", manifestEndpoint, nil)
+	arch, err := hostArchitecture()
+	if err != nil {
+		return nil, err
+	}
+
+	endpoint, err := manifestEndpoint(apiURL, arch)
+	if err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequestWithContext(ctx, "GET", endpoint, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create HTTP request")
 	}
@@ -236,7 +275,7 @@ func fetchManifest(ctx context.Context, apiURL string, key string) (*Manifest, e
 		return nil, fmt.Errorf("malformed manifest: invalid JSON")
 	}
 
-	if err := validateManifest(&m); err != nil {
+	if err := validateManifest(&m, arch); err != nil {
 		return nil, err
 	}
 
@@ -252,10 +291,12 @@ func saveManifest(m *Manifest) error {
 	saved := struct {
 		SchemaVersion int    `json:"schemaVersion"`
 		Image         string `json:"image"`
+		Architecture  string `json:"architecture"`
 		DashboardURL  string `json:"dashboardUrl,omitempty"`
 	}{
 		SchemaVersion: m.SchemaVersion,
 		Image:         m.Image,
+		Architecture:  m.Architecture,
 		DashboardURL:  m.DashboardURL,
 	}
 	data, err := json.MarshalIndent(saved, "", "  ")

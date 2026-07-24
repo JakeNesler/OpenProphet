@@ -19,6 +19,7 @@ func manifestForArchive(archiveURL string, archive []byte) Manifest {
 	return Manifest{
 		SchemaVersion: 2,
 		Image:         "openprophet/runtime:v2.0.0",
+		Architecture:  runtimeArch,
 		DashboardURL:  "http://127.0.0.1:3737",
 		Delivery: Delivery{
 			Kind:      "docker-image-archive",
@@ -28,6 +29,22 @@ func manifestForArchive(archiveURL string, archive []byte) Manifest {
 			SHA256:    fmt.Sprintf("%x", sha256.Sum256(archive)),
 		},
 	}
+}
+
+// otherArch returns a supported appliance architecture different from arch.
+func otherArch(arch string) string {
+	if arch == "amd64" {
+		return "arm64"
+	}
+	return "amd64"
+}
+
+// withHostArch pins the detected host architecture for the duration of a test.
+func withHostArch(t *testing.T, arch string) {
+	t.Helper()
+	previous := runtimeArch
+	runtimeArch = arch
+	t.Cleanup(func() { runtimeArch = previous })
 }
 
 func TestGetHomeDir(t *testing.T) {
@@ -121,12 +138,12 @@ func TestValidateOriginInsecureLocal(t *testing.T) {
 
 func TestValidateManifest(t *testing.T) {
 	valid := manifestForArchive("https://downloads.example.com/archive.tar.gz?signature=secret", []byte("archive"))
-	if err := validateManifest(&valid); err != nil {
+	if err := validateManifest(&valid, runtimeArch); err != nil {
 		t.Fatalf("valid schema-v2 manifest rejected: %v", err)
 	}
 	uppercaseChecksum := valid
 	uppercaseChecksum.Delivery.SHA256 = strings.ToUpper(uppercaseChecksum.Delivery.SHA256)
-	if err := validateManifest(&uppercaseChecksum); err != nil {
+	if err := validateManifest(&uppercaseChecksum, runtimeArch); err != nil {
 		t.Fatalf("valid uppercase checksum rejected: %v", err)
 	}
 
@@ -135,6 +152,8 @@ func TestValidateManifest(t *testing.T) {
 		mutate func(*Manifest)
 	}{
 		{"schema", func(m *Manifest) { m.SchemaVersion = 1 }},
+		{"missing_architecture", func(m *Manifest) { m.Architecture = "" }},
+		{"foreign_architecture", func(m *Manifest) { m.Architecture = otherArch(runtimeArch) }},
 		{"latest_image", func(m *Manifest) { m.Image = "openprophet/runtime:latest" }},
 		{"untagged_image", func(m *Manifest) { m.Image = "openprophet/runtime" }},
 		{"invalid_image", func(m *Manifest) { m.Image = "openprophet/runtime:v2\nBAD=value" }},
@@ -154,7 +173,7 @@ func TestValidateManifest(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			m := valid
 			tt.mutate(&m)
-			if err := validateManifest(&m); err == nil {
+			if err := validateManifest(&m, runtimeArch); err == nil {
 				t.Fatalf("invalid manifest was accepted: %+v", m)
 			}
 		})
@@ -199,6 +218,101 @@ func TestFetchManifest(t *testing.T) {
 	// Verify no key leakage in error message
 	if strings.Contains(err.Error(), "wrong_key") {
 		t.Error("error message leaked key!")
+	}
+}
+
+func TestFetchManifestRequestsHostArchitecture(t *testing.T) {
+	key := "op_arch_secret"
+	for _, arch := range []string{"amd64", "arm64"} {
+		t.Run(arch, func(t *testing.T) {
+			withHostArch(t, arch)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/api/appliance/manifest" {
+					t.Errorf("unexpected manifest path %q", r.URL.Path)
+					w.WriteHeader(http.StatusNotFound)
+					return
+				}
+				if got := r.URL.Query()["arch"]; len(got) != 1 || got[0] != arch {
+					t.Errorf("expected exactly one arch=%q query value, got %v", arch, got)
+				}
+				if strings.Contains(r.URL.RawQuery, key) {
+					t.Error("manifest request leaked the entitlement key into the URL")
+				}
+				json.NewEncoder(w).Encode(manifestForArchive("https://downloads.example.com/archive.tar.gz", []byte("archive")))
+			}))
+			defer server.Close()
+
+			m, err := fetchManifest(context.Background(), server.URL, key)
+			if err != nil {
+				t.Fatalf("fetchManifest failed: %v", err)
+			}
+			if m.Architecture != arch {
+				t.Errorf("expected manifest architecture %q, got %q", arch, m.Architecture)
+			}
+		})
+	}
+}
+
+func TestFetchManifestRejectsUnsupportedHostBeforeRequest(t *testing.T) {
+	withHostArch(t, "386")
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		json.NewEncoder(w).Encode(manifestForArchive("https://downloads.example.com/archive.tar.gz", []byte("archive")))
+	}))
+	defer server.Close()
+
+	_, err := fetchManifest(context.Background(), server.URL, "op_unsupported")
+	if err == nil || !strings.Contains(err.Error(), "unsupported host architecture") {
+		t.Fatalf("expected unsupported host architecture error, got %v", err)
+	}
+	if requests != 0 {
+		t.Fatalf("unsupported host still contacted the manifest API %d time(s)", requests)
+	}
+}
+
+func TestInstallRejectsForeignArchitectureBeforeDownload(t *testing.T) {
+	oldExecCommand := execCommand
+	execCommand = mockExecCommand
+	defer func() { execCommand = oldExecCommand }()
+
+	tempHome := t.TempDir()
+	t.Setenv("OPENPROPHET_HOME", tempHome)
+	withHostArch(t, "arm64")
+
+	archive := []byte("amd64 archive fixture")
+	archiveRequests := 0
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/appliance/manifest":
+			m := manifestForArchive(server.URL+"/archive", archive)
+			m.Architecture = otherArch(runtimeArch)
+			json.NewEncoder(w).Encode(m)
+		case "/archive":
+			archiveRequests++
+			w.Write(archive)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	var stdout, stderr strings.Builder
+	err := handleInstall(context.Background(), "op_arch_mismatch", server.URL, &stdout, &stderr)
+	if err == nil || !strings.Contains(err.Error(), "architecture does not match this host") {
+		t.Fatalf("expected architecture mismatch, got %v", err)
+	}
+	if archiveRequests != 0 {
+		t.Fatal("architecture mismatch still downloaded the appliance archive")
+	}
+	if strings.Contains(stdout.String(), "image load") || strings.Contains(stdout.String(), "compose up") {
+		t.Fatalf("architecture mismatch continued into the Docker lifecycle: %s", stdout.String())
+	}
+	for _, name := range []string{"entitlement.key", "manifest.json", ".env", "docker-compose.yml"} {
+		if _, err := os.Stat(filepath.Join(tempHome, name)); !os.IsNotExist(err) {
+			t.Fatalf("architecture mismatch persisted %s", name)
+		}
 	}
 }
 
@@ -394,6 +508,9 @@ func TestInstall(t *testing.T) {
 	}
 	if strings.Contains(string(manifestBytes), "X-Amz-Signature") || strings.Contains(string(manifestBytes), `"delivery"`) {
 		t.Fatal("saved manifest persisted the short-lived delivery URL")
+	}
+	if !strings.Contains(string(manifestBytes), fmt.Sprintf(`"architecture": %q`, runtimeArch)) {
+		t.Fatalf("saved manifest did not record the host architecture: %s", manifestBytes)
 	}
 }
 

@@ -1,5 +1,11 @@
 # Changelog
 
+## v2.0.5
+
+- Requests the paid appliance archive for the launcher's native amd64 or arm64 host.
+- Rejects unsupported hosts and architecture-mismatched manifests before downloading,
+  loading an image, or persisting entitlement state.
+
 ## v2.0.4
 
 - Delivers the paid appliance through a short-lived, entitlement-gated archive URL instead of
