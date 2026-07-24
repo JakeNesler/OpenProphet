@@ -1,5 +1,13 @@
 # Changelog
 
+## v2.0.4
+
+- Delivers the paid appliance through a short-lived, entitlement-gated archive URL instead of
+  exposing the private GHCR package.
+- Verifies the archive checksum and exact image tag before loading it locally, and disables
+  registry pulls when starting or updating the appliance.
+- Keeps entitlement keys and signed download URLs out of command output and persisted manifests.
+
 ## v2.0.3
 
 - Adds eight built-in agent personas with eight paired strategy templates.
