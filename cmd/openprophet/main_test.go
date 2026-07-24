@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -11,7 +12,23 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
+
+func manifestForArchive(archiveURL string, archive []byte) Manifest {
+	return Manifest{
+		SchemaVersion: 2,
+		Image:         "openprophet/runtime:v2.0.0",
+		DashboardURL:  "http://127.0.0.1:3737",
+		Delivery: Delivery{
+			Kind:      "docker-image-archive",
+			Format:    "docker-tar-gzip",
+			URL:       archiveURL,
+			ExpiresAt: time.Now().Add(time.Hour).UTC().Format(time.RFC3339),
+			SHA256:    fmt.Sprintf("%x", sha256.Sum256(archive)),
+		},
+	}
+}
 
 func TestGetHomeDir(t *testing.T) {
 	tempHome := t.TempDir()
@@ -103,26 +120,44 @@ func TestValidateOriginInsecureLocal(t *testing.T) {
 }
 
 func TestValidateManifest(t *testing.T) {
+	valid := manifestForArchive("https://downloads.example.com/archive.tar.gz?signature=secret", []byte("archive"))
+	if err := validateManifest(&valid); err != nil {
+		t.Fatalf("valid schema-v2 manifest rejected: %v", err)
+	}
+	uppercaseChecksum := valid
+	uppercaseChecksum.Delivery.SHA256 = strings.ToUpper(uppercaseChecksum.Delivery.SHA256)
+	if err := validateManifest(&uppercaseChecksum); err != nil {
+		t.Fatalf("valid uppercase checksum rejected: %v", err)
+	}
+
 	tests := []struct {
-		m       Manifest
-		wantErr bool
+		name   string
+		mutate func(*Manifest)
 	}{
-		{Manifest{SchemaVersion: 1, Image: "openprophet/runtime:v2.0.0"}, false},
-		{Manifest{SchemaVersion: 1, Image: "openprophet/runtime@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}, false},
-		{Manifest{SchemaVersion: 0, Image: "openprophet/runtime:v2.0.0"}, true},
-		{Manifest{SchemaVersion: 2, Image: "openprophet/runtime:v2.0.0"}, true},
-		{Manifest{SchemaVersion: 1, Image: "openprophet/runtime:latest"}, true},
-		{Manifest{SchemaVersion: 1, Image: "openprophet/runtime"}, true},
-		{Manifest{SchemaVersion: 1, Image: "openprophet/runtime:v2\nBAD=value"}, true},
-		{Manifest{SchemaVersion: 1, Image: "openprophet/runtime:v2", DashboardURL: "https://example.com"}, true},
-		{Manifest{SchemaVersion: 2, Image: ""}, true},
+		{"schema", func(m *Manifest) { m.SchemaVersion = 1 }},
+		{"latest_image", func(m *Manifest) { m.Image = "openprophet/runtime:latest" }},
+		{"untagged_image", func(m *Manifest) { m.Image = "openprophet/runtime" }},
+		{"invalid_image", func(m *Manifest) { m.Image = "openprophet/runtime:v2\nBAD=value" }},
+		{"remote_dashboard", func(m *Manifest) { m.DashboardURL = "https://example.com" }},
+		{"delivery_kind", func(m *Manifest) { m.Delivery.Kind = "oci" }},
+		{"delivery_format", func(m *Manifest) { m.Delivery.Format = "zip" }},
+		{"delivery_http", func(m *Manifest) { m.Delivery.URL = "http://downloads.example.com/archive.tar.gz" }},
+		{"delivery_credentials", func(m *Manifest) { m.Delivery.URL = "https://user:pass@downloads.example.com/archive.tar.gz" }},
+		{"delivery_fragment", func(m *Manifest) { m.Delivery.URL = "https://downloads.example.com/archive.tar.gz#secret" }},
+		{"expiry_invalid", func(m *Manifest) { m.Delivery.ExpiresAt = "tomorrow" }},
+		{"expiry_expired", func(m *Manifest) { m.Delivery.ExpiresAt = time.Now().Add(-time.Minute).Format(time.RFC3339) }},
+		{"checksum_short", func(m *Manifest) { m.Delivery.SHA256 = "abcd" }},
+		{"checksum_invalid", func(m *Manifest) { m.Delivery.SHA256 = strings.Repeat("z", 64) }},
 	}
 
 	for _, tt := range tests {
-		err := validateManifest(&tt.m)
-		if (err != nil) != tt.wantErr {
-			t.Errorf("validateManifest(%+v) error = %v, wantErr %v", tt.m, err, tt.wantErr)
-		}
+		t.Run(tt.name, func(t *testing.T) {
+			m := valid
+			tt.mutate(&m)
+			if err := validateManifest(&m); err == nil {
+				t.Fatalf("invalid manifest was accepted: %+v", m)
+			}
+		})
 	}
 }
 
@@ -139,11 +174,7 @@ func TestFetchManifest(t *testing.T) {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		m := Manifest{
-			SchemaVersion: 1,
-			Image:         "openprophet/runtime:v2.0.0",
-			DashboardURL:  "http://127.0.0.1:3737",
-		}
+		m := manifestForArchive("https://downloads.example.com/archive.tar.gz", []byte("archive"))
 		json.NewEncoder(w).Encode(m)
 	}))
 	defer server.Close()
@@ -258,6 +289,9 @@ func TestHelperProcess(t *testing.T) {
 			fmt.Println("docker-compose version 2.20.0")
 			os.Exit(0)
 		}
+		if len(subArgs) >= 2 && subArgs[0] == "image" && subArgs[1] == "inspect" && os.Getenv("MOCK_DOCKER_INSPECT_FAIL") == "1" {
+			os.Exit(1)
+		}
 		// Print the run trace for testing assertions
 		fmt.Printf("MOCK_DOCKER_RUN: %s\n", strings.Join(subArgs, " "))
 		os.Exit(0)
@@ -271,7 +305,7 @@ func mockExecCommand(command string, args ...string) *exec.Cmd {
 	cs := []string{"-test.run=TestHelperProcess", "--", command}
 	cs = append(cs, args...)
 	cmd := exec.Command(os.Args[0], cs...)
-	cmd.Env = []string{"GO_WANT_HELPER_PROCESS=1"}
+	cmd.Env = append(os.Environ(), "GO_WANT_HELPER_PROCESS=1")
 	return cmd
 }
 
@@ -285,16 +319,23 @@ func TestInstall(t *testing.T) {
 	os.Setenv("OPENPROPHET_HOME", tempHome)
 	defer os.Unsetenv("OPENPROPHET_HOME")
 
-	// Set up httptest server for manifest
 	key := "test-token"
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		m := Manifest{
-			SchemaVersion: 1,
-			Image:         "openprophet/runtime:v2.0.0",
-			DashboardURL:  "http://127.0.0.1:3737",
+	archive := []byte("docker archive fixture")
+	var ts *httptest.Server
+	ts = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/appliance/manifest":
+			if got := r.Header.Get("Authorization"); got != "Bearer "+key {
+				t.Errorf("unexpected authorization header")
+			}
+			w.Header().Set("Content-Type", "application/json")
+			m := manifestForArchive(ts.URL+"/archive?X-Amz-Signature=signed-secret", archive)
+			json.NewEncoder(w).Encode(m)
+		case "/archive":
+			w.Write(archive)
+		default:
+			http.NotFound(w, r)
 		}
-		json.NewEncoder(w).Encode(m)
 	}))
 	defer ts.Close()
 
@@ -305,13 +346,15 @@ func TestInstall(t *testing.T) {
 	}
 
 	output := stdoutBuf.String()
-	if !strings.Contains(output, "Pulling appliance images...") {
+	if !strings.Contains(output, "Downloading and verifying appliance image...") {
 		t.Errorf("unexpected output: %s", output)
 	}
 	if strings.Contains(output+stderrBuf.String(), key) {
 		t.Fatal("install output leaked entitlement key")
 	}
-	if !strings.Contains(output, "MOCK_DOCKER_RUN: compose pull") || !strings.Contains(output, "MOCK_DOCKER_RUN: compose up -d") {
+	if !strings.Contains(output, "MOCK_DOCKER_RUN: image load --input") ||
+		!strings.Contains(output, "MOCK_DOCKER_RUN: compose up -d --pull never") ||
+		strings.Contains(output, "compose pull") {
 		t.Fatalf("unexpected Docker lifecycle commands: %s", output)
 	}
 
@@ -341,6 +384,96 @@ func TestInstall(t *testing.T) {
 	if strings.Contains(string(composeBytes), key) {
 		t.Fatal("generated compose file leaked entitlement key")
 	}
+	if !strings.Contains(string(composeBytes), "pull_policy: never") {
+		t.Fatal("generated compose file does not disable image pulls")
+	}
+
+	manifestBytes, err := os.ReadFile(filepath.Join(tempHome, "manifest.json"))
+	if err != nil {
+		t.Fatalf("manifest.json was not generated: %v", err)
+	}
+	if strings.Contains(string(manifestBytes), "X-Amz-Signature") || strings.Contains(string(manifestBytes), `"delivery"`) {
+		t.Fatal("saved manifest persisted the short-lived delivery URL")
+	}
+}
+
+func TestInstallChecksumMismatchDoesNotLeakOrPersist(t *testing.T) {
+	oldExecCommand := execCommand
+	execCommand = mockExecCommand
+	defer func() { execCommand = oldExecCommand }()
+
+	tempHome := t.TempDir()
+	t.Setenv("OPENPROPHET_HOME", tempHome)
+	key := "op_entitlement_secret"
+	signedSecret := "signed-url-secret"
+	archive := []byte("tampered archive")
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/appliance/manifest":
+			m := manifestForArchive(server.URL+"/archive?X-Amz-Signature="+signedSecret, []byte("expected archive"))
+			json.NewEncoder(w).Encode(m)
+		case "/archive":
+			w.Write(archive)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	var stdout, stderr strings.Builder
+	err := handleInstall(context.Background(), key, server.URL, &stdout, &stderr)
+	if err == nil || !strings.Contains(err.Error(), "checksum mismatch") {
+		t.Fatalf("expected checksum mismatch, got %v", err)
+	}
+	allOutput := err.Error() + stdout.String() + stderr.String()
+	if strings.Contains(allOutput, key) || strings.Contains(allOutput, signedSecret) || strings.Contains(allOutput, server.URL) {
+		t.Fatal("failure output leaked an entitlement key or signed URL")
+	}
+	if _, err := os.Stat(filepath.Join(tempHome, "entitlement.key")); !os.IsNotExist(err) {
+		t.Fatal("failed install persisted the entitlement key")
+	}
+	if _, err := os.Stat(filepath.Join(tempHome, "manifest.json")); !os.IsNotExist(err) {
+		t.Fatal("failed install persisted the signed manifest")
+	}
+	if strings.Contains(stdout.String(), "image load") || strings.Contains(stdout.String(), "compose up") {
+		t.Fatal("checksum failure continued into the Docker lifecycle")
+	}
+}
+
+func TestInstallFailsWhenLoadedArchiveLacksManifestImage(t *testing.T) {
+	oldExecCommand := execCommand
+	execCommand = mockExecCommand
+	defer func() { execCommand = oldExecCommand }()
+
+	tempHome := t.TempDir()
+	t.Setenv("OPENPROPHET_HOME", tempHome)
+	t.Setenv("MOCK_DOCKER_INSPECT_FAIL", "1")
+	archive := []byte("valid archive with wrong image")
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/appliance/manifest":
+			json.NewEncoder(w).Encode(manifestForArchive(server.URL+"/archive", archive))
+		case "/archive":
+			w.Write(archive)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	var stdout, stderr strings.Builder
+	err := handleInstall(context.Background(), "op_test", server.URL, &stdout, &stderr)
+	if err == nil || !strings.Contains(err.Error(), "does not contain the manifest image") {
+		t.Fatalf("expected exact-image verification failure, got %v", err)
+	}
+	if !strings.Contains(stdout.String(), "image load --input") || strings.Contains(stdout.String(), "compose up") {
+		t.Fatalf("unexpected Docker lifecycle after image verification failure: %s", stdout.String())
+	}
+	if _, err := os.Stat(filepath.Join(tempHome, "entitlement.key")); !os.IsNotExist(err) {
+		t.Fatal("failed image verification persisted the entitlement key")
+	}
 }
 
 func TestUpdatePreservesCredentialsAndUsesSavedEntitlement(t *testing.T) {
@@ -358,11 +491,22 @@ func TestUpdatePreservesCredentialsAndUsesSavedEntitlement(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if got := r.Header.Get("Authorization"); got != "Bearer "+key {
-			t.Errorf("unexpected authorization header")
+	archive := []byte("updated docker archive fixture")
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/appliance/manifest":
+			if got := r.Header.Get("Authorization"); got != "Bearer "+key {
+				t.Errorf("unexpected authorization header")
+			}
+			m := manifestForArchive(server.URL+"/archive", archive)
+			m.Image = "example/openprophet:v2"
+			json.NewEncoder(w).Encode(m)
+		case "/archive":
+			w.Write(archive)
+		default:
+			http.NotFound(w, r)
 		}
-		json.NewEncoder(w).Encode(Manifest{SchemaVersion: 1, Image: "example/openprophet:v2", DashboardURL: "http://127.0.0.1:3737"})
 	}))
 	defer server.Close()
 
@@ -382,5 +526,8 @@ func TestUpdatePreservesCredentialsAndUsesSavedEntitlement(t *testing.T) {
 	}
 	if strings.Contains(stdout.String()+stderr.String(), key) {
 		t.Fatal("update output leaked entitlement key")
+	}
+	if strings.Contains(stdout.String(), "compose pull") || !strings.Contains(stdout.String(), "compose up -d --pull never") {
+		t.Fatalf("update used an unexpected Docker lifecycle: %s", stdout.String())
 	}
 }

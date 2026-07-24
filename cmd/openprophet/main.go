@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -21,11 +23,22 @@ var Version = "2.0.0-dev"
 
 const defaultAPIUrl = "https://openprophet.io"
 
+const maxApplianceArchiveBytes int64 = 2 << 30
+
 // Manifest defines the contract for fetching the appliance manifest.
 type Manifest struct {
-	SchemaVersion int    `json:"schemaVersion"`
-	Image         string `json:"image"`
-	DashboardURL  string `json:"dashboardUrl,omitempty"`
+	SchemaVersion int      `json:"schemaVersion"`
+	Image         string   `json:"image"`
+	DashboardURL  string   `json:"dashboardUrl,omitempty"`
+	Delivery      Delivery `json:"delivery"`
+}
+
+type Delivery struct {
+	Kind      string `json:"kind"`
+	Format    string `json:"format"`
+	URL       string `json:"url"`
+	ExpiresAt string `json:"expiresAt"`
+	SHA256    string `json:"sha256"`
 }
 
 // Allow mocking of commands in tests.
@@ -128,7 +141,7 @@ func validateOrigin(apiURL string) error {
 }
 
 func validateManifest(m *Manifest) error {
-	if m.SchemaVersion != 1 {
+	if m.SchemaVersion != 2 {
 		return fmt.Errorf("unsupported manifest schema version")
 	}
 	image := strings.TrimSpace(m.Image)
@@ -151,7 +164,42 @@ func validateManifest(m *Manifest) error {
 			return fmt.Errorf("malformed manifest: dashboard URL must be loopback")
 		}
 	}
+	if m.Delivery.Kind != "docker-image-archive" {
+		return fmt.Errorf("malformed manifest: unsupported delivery kind")
+	}
+	if m.Delivery.Format != "docker-tar-gzip" {
+		return fmt.Errorf("malformed manifest: unsupported delivery format")
+	}
+	if err := validateDeliveryURL(m.Delivery.URL); err != nil {
+		return err
+	}
+	expiresAt, err := time.Parse(time.RFC3339, strings.TrimSpace(m.Delivery.ExpiresAt))
+	if err != nil {
+		return fmt.Errorf("malformed manifest: invalid delivery expiry")
+	}
+	if !time.Now().Before(expiresAt) {
+		return fmt.Errorf("malformed manifest: delivery URL has expired")
+	}
+	checksum, err := hex.DecodeString(strings.TrimSpace(m.Delivery.SHA256))
+	if err != nil || len(checksum) != sha256.Size {
+		return fmt.Errorf("malformed manifest: invalid archive checksum")
+	}
 	return nil
+}
+
+func validateDeliveryURL(rawURL string) error {
+	parsed, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil || parsed.Hostname() == "" || parsed.User != nil || parsed.Fragment != "" {
+		return fmt.Errorf("malformed manifest: invalid delivery URL")
+	}
+	if parsed.Scheme == "https" {
+		return nil
+	}
+	host := strings.ToLower(strings.TrimSuffix(parsed.Hostname(), "."))
+	if parsed.Scheme == "http" && (host == "localhost" || host == "127.0.0.1" || host == "::1") {
+		return nil
+	}
+	return fmt.Errorf("malformed manifest: delivery URL must use HTTPS")
 }
 
 func fetchManifest(ctx context.Context, apiURL string, key string) (*Manifest, error) {
@@ -201,7 +249,16 @@ func saveManifest(m *Manifest) error {
 		return fmt.Errorf("failed to create home directory: %v", err)
 	}
 	manifestPath := filepath.Join(homeDir, "manifest.json")
-	data, err := json.MarshalIndent(m, "", "  ")
+	saved := struct {
+		SchemaVersion int    `json:"schemaVersion"`
+		Image         string `json:"image"`
+		DashboardURL  string `json:"dashboardUrl,omitempty"`
+	}{
+		SchemaVersion: m.SchemaVersion,
+		Image:         m.Image,
+		DashboardURL:  m.DashboardURL,
+	}
+	data, err := json.MarshalIndent(saved, "", "  ")
 	if err != nil {
 		return fmt.Errorf("failed to serialize manifest")
 	}
@@ -228,6 +285,7 @@ func loadSavedDashboardURL() string {
 const composeTemplate = `services:
   appliance:
     image: "${OPENPROPHET_IMAGE}"
+    pull_policy: never
     init: true
     restart: unless-stopped
     security_opt:
@@ -315,6 +373,93 @@ func runDockerComposeCmdInteractive(stdin io.Reader, stdout, stderr io.Writer, a
 	return cmd.Run()
 }
 
+func downloadApplianceArchive(ctx context.Context, m *Manifest) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, m.Delivery.URL, nil)
+	if err != nil {
+		return "", fmt.Errorf("failed to create appliance download request")
+	}
+
+	client := &http.Client{
+		Timeout: 2 * time.Hour,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) >= 5 {
+				return fmt.Errorf("too many redirects")
+			}
+			return validateDeliveryURL(req.URL.String())
+		},
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("failed to download appliance archive")
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("failed to download appliance archive: server returned HTTP %d", resp.StatusCode)
+	}
+	if resp.ContentLength > maxApplianceArchiveBytes {
+		return "", fmt.Errorf("appliance archive exceeds size limit")
+	}
+
+	archive, err := os.CreateTemp("", "openprophet-appliance-*.tar.gz")
+	if err != nil {
+		return "", fmt.Errorf("failed to create temporary appliance archive")
+	}
+	archivePath := archive.Name()
+	removeArchive := true
+	defer func() {
+		archive.Close()
+		if removeArchive {
+			os.Remove(archivePath)
+		}
+	}()
+	if err := archive.Chmod(0600); err != nil {
+		return "", fmt.Errorf("failed to secure temporary appliance archive")
+	}
+
+	hasher := sha256.New()
+	written, err := io.Copy(io.MultiWriter(archive, hasher), io.LimitReader(resp.Body, maxApplianceArchiveBytes+1))
+	if err != nil {
+		return "", fmt.Errorf("failed to download appliance archive")
+	}
+	if written > maxApplianceArchiveBytes {
+		return "", fmt.Errorf("appliance archive exceeds size limit")
+	}
+	if err := archive.Close(); err != nil {
+		return "", fmt.Errorf("failed to finalize appliance archive")
+	}
+	actualChecksum := hex.EncodeToString(hasher.Sum(nil))
+	if !strings.EqualFold(actualChecksum, strings.TrimSpace(m.Delivery.SHA256)) {
+		return "", fmt.Errorf("appliance archive checksum mismatch")
+	}
+
+	removeArchive = false
+	return archivePath, nil
+}
+
+func loadAndVerifyAppliance(ctx context.Context, m *Manifest, stdout, stderr io.Writer) error {
+	archivePath, err := downloadApplianceArchive(ctx, m)
+	if err != nil {
+		return err
+	}
+	defer os.Remove(archivePath)
+
+	load := execCommand("docker", "image", "load", "--input", archivePath)
+	load.Stdout = stdout
+	load.Stderr = stderr
+	if err := load.Run(); err != nil {
+		return fmt.Errorf("failed to load appliance image")
+	}
+
+	inspect := execCommand("docker", "image", "inspect", "--format", "{{.Id}}", m.Image)
+	inspect.Stdout = io.Discard
+	inspect.Stderr = io.Discard
+	if err := inspect.Run(); err != nil {
+		return fmt.Errorf("loaded archive does not contain the manifest image")
+	}
+	return nil
+}
+
 func handleInstall(ctx context.Context, keyFlag string, apiURL string, stdout, stderr io.Writer) error {
 	if err := checkDockerCompose(); err != nil {
 		return err
@@ -337,6 +482,11 @@ func handleInstall(ctx context.Context, keyFlag string, apiURL string, stdout, s
 		return err
 	}
 
+	fmt.Fprintln(stdout, "Downloading and verifying appliance image...")
+	if err := loadAndVerifyAppliance(ctx, m, stdout, stderr); err != nil {
+		return err
+	}
+
 	if err := saveEntitlementKey(key); err != nil {
 		return err
 	}
@@ -355,13 +505,8 @@ func handleInstall(ctx context.Context, keyFlag string, apiURL string, stdout, s
 		return err
 	}
 
-	fmt.Fprintln(stdout, "Pulling appliance images...")
-	if err := runDockerComposeCmdInteractive(os.Stdin, stdout, stderr, "pull"); err != nil {
-		return fmt.Errorf("failed to pull image: %v", err)
-	}
-
 	fmt.Fprintln(stdout, "Starting appliance container...")
-	if err := runDockerComposeCmdInteractive(os.Stdin, stdout, stderr, "up", "-d"); err != nil {
+	if err := runDockerComposeCmdInteractive(os.Stdin, stdout, stderr, "up", "-d", "--pull", "never"); err != nil {
 		return fmt.Errorf("failed to start container: %v", err)
 	}
 
@@ -391,6 +536,11 @@ func handleUpdate(ctx context.Context, keyFlag string, apiURL string, stdout, st
 		return err
 	}
 
+	fmt.Fprintln(stdout, "Downloading and verifying updated appliance image...")
+	if err := loadAndVerifyAppliance(ctx, m, stdout, stderr); err != nil {
+		return err
+	}
+
 	if err := saveEntitlementKey(key); err != nil {
 		return err
 	}
@@ -409,13 +559,8 @@ func handleUpdate(ctx context.Context, keyFlag string, apiURL string, stdout, st
 		return err
 	}
 
-	fmt.Fprintln(stdout, "Pulling updated images...")
-	if err := runDockerComposeCmdInteractive(os.Stdin, stdout, stderr, "pull"); err != nil {
-		return fmt.Errorf("failed to pull image: %v", err)
-	}
-
 	fmt.Fprintln(stdout, "Recreating appliance container...")
-	if err := runDockerComposeCmdInteractive(os.Stdin, stdout, stderr, "up", "-d"); err != nil {
+	if err := runDockerComposeCmdInteractive(os.Stdin, stdout, stderr, "up", "-d", "--pull", "never"); err != nil {
 		return fmt.Errorf("failed to start container: %v", err)
 	}
 
