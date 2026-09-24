@@ -24,6 +24,10 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+    # Move to a new Node major deliberately after it reaches LTS.
+    ignore:
+      - dependency-name: "node"
+        update-types: ["version-update:semver-major"]
     open-pull-requests-limit: 5
     labels:
       - "dependencies"
