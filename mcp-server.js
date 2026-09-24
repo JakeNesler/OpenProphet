@@ -7,7 +7,7 @@ import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
-import { GoogleGenerativeAI } from '@google/generative-ai';
+import { generateNewsSummary } from './news-summary.js';
 import axios from 'axios';
 import fs from 'fs/promises';
 import path from 'path';
@@ -17,16 +17,11 @@ import { ORDER_TOOLS, checkPermissions } from './permissions.js';
 // Configuration
 const TRADING_BOT_URL = process.env.TRADING_BOT_URL || 'http://127.0.0.1:4534';
 const TRADING_BOT_TOKEN = process.env.TRADING_BOT_TOKEN || '';
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const OPENPROPHET_ACCOUNT_ID = process.env.OPENPROPHET_ACCOUNT_ID || 'default';
 const OPENPROPHET_SANDBOX_ID = process.env.OPENPROPHET_SANDBOX_ID || `sbx_${OPENPROPHET_ACCOUNT_ID}`;
 const SANDBOX_DATA_DIR = path.join(process.cwd(), 'data', 'sandboxes', OPENPROPHET_ACCOUNT_ID);
 const SUMMARIES_DIR = path.join(SANDBOX_DATA_DIR, 'news_summaries');
 const DECISIONS_DIR = path.join(SANDBOX_DATA_DIR, 'decisive_actions');
-
-// Initialize Gemini
-const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
-const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash-exp' });
 
 // Ensure directories exist
 await fs.mkdir(SUMMARIES_DIR, { recursive: true });
@@ -1478,8 +1473,7 @@ ${newsText}
 
 Provide a well-structured analysis that a trader could use to make informed decisions.`;
 
-        const result = await model.generateContent(prompt);
-        const summary = result.response.text();
+        const summary = await generateNewsSummary(prompt);
 
         // Save summary to file
         const timestamp = new Date().toISOString().replace(/:/g, '-').split('.')[0];
