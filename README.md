@@ -185,8 +185,8 @@ OpenProphet
 
 ### Prerequisites
 
-- **Go 1.22+** — For the trading backend
-- **Node.js 18+** — For the agent server and MCP tools
+- **Go 1.26+** — For the trading backend (built with Go 1.27.1)
+- **Node.js 22.13+** — For the agent server and MCP tools (Node.js 24 LTS recommended)
 - **[OpenCode CLI](https://opencode.ai)** — The AI harness that drives the autonomous agent
 - **Alpaca account** — [alpaca.markets](https://alpaca.markets) (paper trading is free)
 
@@ -225,7 +225,7 @@ OpenProphet uses [OpenCode](https://opencode.ai) as its AI runtime. OpenCode is 
 
 ```bash
 # Install OpenCode globally
-npm install -g opencode
+npm install -g opencode-ai
 
 # Authenticate with Anthropic (opens browser for OAuth)
 opencode auth login

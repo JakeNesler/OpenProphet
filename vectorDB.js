@@ -13,11 +13,11 @@ let embedder = null;
 async function getEmbedder() {
   if (!embedder) {
     console.log('🔄 Loading local embedding model (first run may take 30s)...');
-    // Lazy-load the heavy ML stack (@xenova/transformers → sharp/onnx) only when an
+    // Lazy-load the heavy ML stack (@huggingface/transformers → sharp/onnx) only when an
     // embedding is actually needed, so DB/stats paths (getTradeStats, getEmbeddingCount)
     // and module import don't pull it in.
-    const { pipeline } = await import('@xenova/transformers');
-    embedder = await pipeline('feature-extraction', 'Xenova/all-MiniLM-L6-v2');
+    const { pipeline } = await import('@huggingface/transformers');
+    embedder = await pipeline('feature-extraction', 'Xenova/all-MiniLM-L6-v2', { dtype: 'q8' });
     console.log('✅ Embedding model loaded');
   }
   return embedder;
