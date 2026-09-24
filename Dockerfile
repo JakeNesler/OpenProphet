@@ -13,7 +13,7 @@ COPY . .
 RUN CGO_ENABLED=1 go build -ldflags='-s -w' -o prophet_bot ./cmd/bot
 
 # ── Stage 2: build Node deps (native: better-sqlite3, sharp/onnx) ──
-FROM node:24.21.0-bookworm AS nodedeps
+FROM node:26.9.0-bookworm AS nodedeps
 WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends python3 make g++ ca-certificates \
     && rm -rf /var/lib/apt/lists/*
@@ -21,7 +21,7 @@ COPY package.json package-lock.json ./
 RUN npm ci --omit=dev
 
 # ── Stage 3: runtime ──
-FROM node:24.21.0-bookworm
+FROM node:26.9.0-bookworm
 WORKDIR /app
 ENV NODE_ENV=production \
     AGENT_PORT=3737 \
