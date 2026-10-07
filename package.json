@@ -42,7 +42,7 @@
     "cors": "^2.8.6",
     "dotenv": "^18.0.3",
     "express": "^5.2.1",
-    "openai": "^7.23.0",
+    "openai": "^7.27.0",
     "sqlite-vec": "^0.1.9"
   },
   "engines": {
