@@ -33,7 +33,7 @@
   },
   "homepage": "https://github.com/JakeNesler/OpenProphet#readme",
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.128.0",
+    "@anthropic-ai/sdk": "^0.131.0",
     "@google/genai": "^2.24.0",
     "@huggingface/transformers": "^4.3.0",
     "@modelcontextprotocol/sdk": "^1.30.1",
