@@ -293,7 +293,7 @@ if (initialActiveAccount?.id) {
 const chatStore = new ChatStore();
 const orchestrator = new AgentOrchestrator({
   chatStore,
-  agentUrl: `http://localhost:${PORT}`,
+  agentUrl: `http://127.0.0.1:${PORT}`,
   tradingBotBasePort: Number(TRADING_BOT_PORT),
 });
 let harness = createHarnessForActiveSandbox();
