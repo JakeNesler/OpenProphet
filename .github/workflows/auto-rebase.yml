@@ -1,0 +1,127 @@
+# Keeps every non-main branch rebased on the latest main so downstream work never drifts.
+#
+# On each push to main (and on a daily schedule / manual run) it walks all remote branches,
+# skips main itself, Dependabot branches (Dependabot rebases its own PRs and stops managing a
+# branch that someone else force-pushes), and branches already merged into main, then
+# rebases each remaining branch onto main and force-pushes it with --force-with-lease.
+# A branch that conflicts is left untouched and listed in the job summary.
+#
+# In a FORK: `main` is first rebased onto upstream (JakeNesler/OpenProphet) main, then the
+# fork's feature branches follow. Forks must enable Actions and (for the schedule) keep the
+# workflow enabled; GitHub disables scheduled runs on inactive forks.
+#
+# Note: pushes made with GITHUB_TOKEN do not trigger other workflows (CI will not re-run on
+# the rebased branches). Add a repo secret AUTO_REBASE_TOKEN (a fine-grained PAT with
+# contents: write) to use instead, and CI runs again.
+name: Auto-rebase branches onto main
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: '17 6 * * *'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Report what would be rebased without pushing
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: auto-rebase
+  cancel-in-progress: false
+
+env:
+  UPSTREAM_REPO: JakeNesler/OpenProphet
+  DEFAULT_BRANCH: main
+
+jobs:
+  rebase:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.AUTO_REBASE_TOKEN || secrets.GITHUB_TOKEN }}
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config rebase.autoStash true
+
+      - name: Sync fork main from upstream
+        if: github.event.repository.fork
+        env:
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          git remote add upstream "https://github.com/${UPSTREAM_REPO}.git"
+          git fetch upstream "$DEFAULT_BRANCH"
+          git checkout "$DEFAULT_BRANCH"
+          if git merge-base --is-ancestor "upstream/$DEFAULT_BRANCH" HEAD; then
+            echo "Fork main already contains upstream main."
+          elif git rebase "upstream/$DEFAULT_BRANCH"; then
+            echo "Rebased fork main onto upstream main."
+            [ "$DRY_RUN" = "true" ] || git push --force-with-lease origin "$DEFAULT_BRANCH"
+          else
+            git rebase --abort
+            echo "::warning::Fork main conflicts with upstream main — resolve manually."
+          fi
+
+      - name: Rebase branches
+        env:
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          git fetch origin --prune
+          base="origin/$DEFAULT_BRANCH"
+          rebased=(); skipped=(); conflicted=()
+          for ref in $(git for-each-ref --format='%(refname:short)' refs/remotes/origin); do
+            branch="${ref#origin/}"
+            case "$branch" in
+              HEAD|"$DEFAULT_BRANCH"|dependabot/*|gh-pages) continue ;;
+            esac
+            # Already contains main → nothing to do.
+            if git merge-base --is-ancestor "$base" "$ref"; then
+              continue
+            fi
+            # Fully merged into main → stale, leave for its owner to delete.
+            if git merge-base --is-ancestor "$ref" "$base"; then
+              skipped+=("$branch (already merged)")
+              continue
+            fi
+            echo "::group::rebase $branch"
+            git checkout -q -B "$branch" "$ref"
+            if git rebase -q "$base"; then
+              if [ "$DRY_RUN" = "true" ]; then
+                rebased+=("$branch (dry run)")
+              elif git push --force-with-lease="$branch:$ref" origin "$branch"; then
+                rebased+=("$branch")
+              else
+                conflicted+=("$branch (push rejected — branch moved during run)")
+              fi
+            else
+              git rebase --abort
+              conflicted+=("$branch")
+            fi
+            git checkout -q --detach "$base"
+            git branch -q -D "$branch"
+            echo "::endgroup::"
+          done
+          {
+            echo "## Auto-rebase onto $DEFAULT_BRANCH"
+            echo
+            echo "### Rebased (${#rebased[@]})"; for b in "${rebased[@]:-}"; do [ -n "$b" ] && echo "- $b"; done
+            echo
+            echo "### Conflicts — left untouched (${#conflicted[@]})"; for b in "${conflicted[@]:-}"; do [ -n "$b" ] && echo "- $b"; done
+            echo
+            echo "### Skipped (${#skipped[@]})"; for b in "${skipped[@]:-}"; do [ -n "$b" ] && echo "- $b"; done
+          } >> "$GITHUB_STEP_SUMMARY"
+          for b in "${conflicted[@]:-}"; do
+            [ -n "$b" ] && echo "::warning::Branch '$b' conflicts with $DEFAULT_BRANCH and was not rebased."
+          done
+          true
