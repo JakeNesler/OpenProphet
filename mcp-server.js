@@ -1140,7 +1140,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
 });
 
 // ── Permission Enforcement ──────────────────────────────────────────
-const AGENT_URL = process.env.AGENT_URL || 'http://localhost:3737';
+const AGENT_URL = process.env.AGENT_URL || 'http://127.0.0.1:3737';
 const AGENT_AUTH_TOKEN = process.env.AGENT_AUTH_TOKEN || '';
 const AGENT_QUERY = { sandboxId: OPENPROPHET_SANDBOX_ID };
 const agentAxios = axios.create({
@@ -1158,7 +1158,23 @@ async function enforcePermissions(toolName, args) {
   }
 
   // Delegate the actual policy decision to the pure, unit-tested checker.
-  checkPermissions(toolName, args, perms);
+  checkPermissions(toolName, await withPriceHint(toolName, args, perms), perms);
+}
+
+// A market order carries no price, so maxOrderValue could not value it and silently passed.
+// Attach a live quote as `estimated_price` (gate-only; never forwarded to the broker). Options
+// have no single quote endpoint here, so they stay limit-only when the cap is set.
+async function withPriceHint(toolName, args, perms) {
+  if (!(perms?.maxOrderValue > 0)) return args;
+  if (toolName !== 'place_buy_order' && toolName !== 'place_sell_order') return args;
+  if (args?.limit_price || args?.entry_price || args?.allocation_dollars || !args?.symbol) return args;
+  try {
+    const quote = await callTradingBot(`/market/quote/${encodeURIComponent(args.symbol)}`);
+    const price = Number(quote?.AskPrice || quote?.BidPrice || 0);
+    return price > 0 ? { ...args, estimated_price: price } : args;
+  } catch {
+    return args; // the gate fails closed with an actionable message
+  }
 }
 
 // Handle tool calls
