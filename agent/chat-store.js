@@ -15,8 +15,18 @@ export class ChatStore {
 
   // ── Paths ────────────────────────────────────────────────────────
 
+  // Account and session ids come straight from URL params/query; keep them to a single
+  // safe path segment so `../` can never walk out of the sandbox's chat-history directory.
+  _safeId(id, label) {
+    const s = String(id ?? '');
+    if (!/^[A-Za-z0-9._-]{1,128}$/.test(s) || s === '.' || s === '..') {
+      throw new Error(`Invalid ${label} id`);
+    }
+    return s;
+  }
+
   _sandboxDir(accountId) {
-    return path.join(DATA_DIR, 'sandboxes', accountId);
+    return path.join(DATA_DIR, 'sandboxes', this._safeId(accountId, 'account'));
   }
 
   _chatDir(accountId) {
@@ -24,7 +34,7 @@ export class ChatStore {
   }
 
   _sessionFile(accountId, sessionId) {
-    return path.join(this._chatDir(accountId), `session-${sessionId}.jsonl`);
+    return path.join(this._chatDir(accountId), `session-${this._safeId(sessionId, 'session')}.jsonl`);
   }
 
   _sessionIndexFile(accountId) {

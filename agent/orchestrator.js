@@ -38,7 +38,7 @@ export class AgentOrchestrator extends EventEmitter {
   constructor(options = {}) {
     super();
     this.projectRoot = options.projectRoot || PROJECT_ROOT;
-    this.agentUrl = options.agentUrl || process.env.AGENT_URL || 'http://localhost:3737';
+    this.agentUrl = options.agentUrl || process.env.AGENT_URL || 'http://127.0.0.1:3737';
     this.tradingBotBasePort = Number(options.tradingBotBasePort || process.env.TRADING_BOT_PORT || 4534);
     this.chatStore = options.chatStore || null;
     this.runtimes = new Map();
