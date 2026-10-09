@@ -525,7 +525,7 @@ func TestHelperProcess(t *testing.T) {
 		if len(subArgs) >= 2 && subArgs[0] == "image" && subArgs[1] == "inspect" && os.Getenv("MOCK_DOCKER_INSPECT_FAIL") == "1" {
 			os.Exit(1)
 		}
-		if len(subArgs) >= 1 && subArgs[0] == "info" && os.Getenv("MOCK_DOCKER_INFO_FAIL") == "socket" {
+		if len(subArgs) >= 1 && subArgs[0] == "version" && os.Getenv("MOCK_DOCKER_INFO_FAIL") == "socket" {
 			// What the real CLI prints for a user outside the docker group.
 			fmt.Fprintln(os.Stderr, "permission denied while trying to connect to the docker API at unix:///var/run/docker.sock")
 			os.Exit(1)

@@ -411,7 +411,9 @@ func checkDockerCompose() error {
 // preflight, downloaded the entitlement-gated archive, and only then hit an opaque
 // "failed to load appliance image". Run this before any download.
 func checkDockerDaemon() error {
-	cmd := execCommand("docker", "info", "--format", "{{.ServerVersion}}")
+	// `docker version` exits non-zero when the daemon is unreachable or the socket is denied;
+	// `docker info` prints the error but still exits 0, which would let this check pass.
+	cmd := execCommand("docker", "version", "--format", "{{.Server.Version}}")
 	var stderr strings.Builder
 	cmd.Stdout = io.Discard
 	cmd.Stderr = &stderr
@@ -507,7 +509,7 @@ func handleDoctor(stdout io.Writer) error {
 			fmt.Fprintf(stdout, "              %s\n", l)
 		}
 	} else {
-		server, _ := dockerOutput("info", "--format", "{{.ServerVersion}}")
+		server, _ := dockerOutput("version", "--format", "{{.Server.Version}}")
 		row("✓", "daemon", "reachable (server "+server+")")
 	}
 
