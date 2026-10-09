@@ -404,6 +404,36 @@ func checkDockerCompose() error {
 	return nil
 }
 
+// checkDockerDaemon proves the CLI can actually reach the daemon. `docker compose version`
+// never opens the socket, so a user who is not in the `docker` group sailed through the
+// preflight, downloaded the entitlement-gated archive, and only then hit an opaque
+// "failed to load appliance image". Run this before any download.
+func checkDockerDaemon() error {
+	cmd := execCommand("docker", "info", "--format", "{{.ServerVersion}}")
+	var stderr strings.Builder
+	cmd.Stdout = io.Discard
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err == nil {
+		return nil
+	}
+	detail := strings.TrimSpace(stderr.String())
+	if i := strings.IndexByte(detail, '\n'); i >= 0 {
+		detail = detail[:i]
+	}
+	if strings.Contains(detail, "permission denied") && strings.Contains(detail, "docker.sock") {
+		return fmt.Errorf("docker is installed but this user cannot access the Docker daemon (%s).\n"+
+			"Add yourself to the docker group, start a new login shell, and re-run the install:\n"+
+			"  sudo usermod -aG docker \"$USER\"\n"+
+			"  newgrp docker        # or log out and back in\n"+
+			"  openprophet install\n"+
+			"Do not run the launcher with sudo. On rootless Docker or Docker Desktop, point DOCKER_HOST at your user socket instead.", detail)
+	}
+	if detail == "" {
+		detail = "docker info failed"
+	}
+	return fmt.Errorf("the Docker daemon is not reachable (%s). Start Docker, confirm `docker info` works, then re-run.", detail)
+}
+
 func runDockerComposeCmdInteractive(stdin io.Reader, stdout, stderr io.Writer, args ...string) error {
 	fullArgs := append([]string{"compose"}, args...)
 	cmd := execCommand("docker", fullArgs...)
@@ -505,6 +535,9 @@ func handleInstall(ctx context.Context, keyFlag string, apiURL string, stdout, s
 	if err := checkDockerCompose(); err != nil {
 		return err
 	}
+	if err := checkDockerDaemon(); err != nil {
+		return err
+	}
 
 	key := keyFlag
 	if key == "" {
@@ -557,6 +590,9 @@ func handleInstall(ctx context.Context, keyFlag string, apiURL string, stdout, s
 
 func handleUpdate(ctx context.Context, keyFlag string, apiURL string, stdout, stderr io.Writer) error {
 	if err := checkDockerCompose(); err != nil {
+		return err
+	}
+	if err := checkDockerDaemon(); err != nil {
 		return err
 	}
 
