@@ -316,6 +316,43 @@ func TestInstallRejectsForeignArchitectureBeforeDownload(t *testing.T) {
 	}
 }
 
+func TestInstallFailsBeforeAnyRequestWhenDockerSocketIsDenied(t *testing.T) {
+	oldExecCommand := execCommand
+	execCommand = mockExecCommand
+	defer func() { execCommand = oldExecCommand }()
+
+	tempHome := t.TempDir()
+	t.Setenv("OPENPROPHET_HOME", tempHome)
+	t.Setenv("MOCK_DOCKER_INFO_FAIL", "socket")
+
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+
+	var stdout, stderr strings.Builder
+	err := handleInstall(context.Background(), "op_no_docker_group", server.URL, &stdout, &stderr)
+	if err == nil {
+		t.Fatal("expected install to fail when the docker socket is not accessible")
+	}
+	for _, want := range []string{"cannot access the Docker daemon", "usermod -aG docker", "openprophet install"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error should tell the user how to fix it (missing %q): %v", want, err)
+		}
+	}
+	if requests != 0 {
+		t.Fatalf("install contacted the API %d time(s) before confirming Docker access", requests)
+	}
+	if strings.Contains(stdout.String(), "Downloading") {
+		t.Fatalf("install started downloading before confirming Docker access: %s", stdout.String())
+	}
+	if _, err := os.Stat(filepath.Join(tempHome, "entitlement.key")); !os.IsNotExist(err) {
+		t.Fatal("install persisted the entitlement key although it could not proceed")
+	}
+}
+
 func TestUpdateEnvFile(t *testing.T) {
 	tempDir := t.TempDir()
 	envPath := filepath.Join(tempDir, ".env")
@@ -404,6 +441,11 @@ func TestHelperProcess(t *testing.T) {
 			os.Exit(0)
 		}
 		if len(subArgs) >= 2 && subArgs[0] == "image" && subArgs[1] == "inspect" && os.Getenv("MOCK_DOCKER_INSPECT_FAIL") == "1" {
+			os.Exit(1)
+		}
+		if len(subArgs) >= 1 && subArgs[0] == "info" && os.Getenv("MOCK_DOCKER_INFO_FAIL") == "socket" {
+			// What the real CLI prints for a user outside the docker group.
+			fmt.Fprintln(os.Stderr, "permission denied while trying to connect to the docker API at unix:///var/run/docker.sock")
 			os.Exit(1)
 		}
 		// Print the run trace for testing assertions

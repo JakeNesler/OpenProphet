@@ -3,6 +3,11 @@
 ## Unreleased
 
 ### Fixed
+- **Appliance launcher: Docker access is checked before downloading.** `openprophet install`
+  / `update` only ran `docker compose version` (which never touches the daemon), so a user
+  outside the `docker` group downloaded the whole appliance archive and then failed with an
+  opaque "failed to load appliance image". The launcher now runs `docker info` first and, on
+  `permission denied … docker.sock`, prints the `usermod -aG docker` fix instead.
 - **0DTE gate was timezone-broken.** The expiry date was parsed as UTC midnight, so on any
   host west of UTC (every US operator) a same-day expiry passed `allow0DTE=false` and the
   next day's expiry was blocked instead. Expiry is now a local calendar date; tests cover
