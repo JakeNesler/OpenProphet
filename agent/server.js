@@ -9,9 +9,10 @@ import { existsSync, rmSync } from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { spawn, execSync } from 'child_process';
-import { randomBytes } from 'crypto';
+import { randomBytes, timingSafeEqual } from 'crypto';
 import axios from 'axios';
 import { AgentHarness, buildSystemPrompt } from './harness.js';
+import { checkForUpdates, securityNotices, formatUpdateNotices } from './update-check.js';
 import ChatStore from './chat-store.js';
 import AgentOrchestrator from './orchestrator.js';
 import { alpacaTradingUrl, DEFAULT_AGENT_MODEL } from './defaults.js';
@@ -45,6 +46,9 @@ if (!process.env.TRADING_BOT_TOKEN) {
 }
 
 const PORT = process.env.AGENT_PORT || 3737;
+// Dashboard bind address. 0.0.0.0 keeps the LAN/mobile dashboard reachable (and is what the
+// container needs); set AGENT_HOST=127.0.0.1 to keep it local-only. See securityNotices().
+const HOST = process.env.AGENT_HOST || '0.0.0.0';
 const TRADING_BOT_PORT = process.env.TRADING_BOT_PORT || '4534';
 const TRADING_BOT_URL = process.env.TRADING_BOT_URL || `http://127.0.0.1:${TRADING_BOT_PORT}`;
 const TRADING_BOT_TOKEN = process.env.TRADING_BOT_TOKEN || '';
@@ -76,8 +80,15 @@ function authMiddleware(req, res, next) {
   // Check Authorization header or query param
   const header = req.headers.authorization;
   const token = header?.startsWith('Bearer ') ? header.slice(7) : req.query.token;
-  if (token === AUTH_TOKEN) return next();
+  if (tokenMatches(token, AUTH_TOKEN)) return next();
   res.status(401).json({ error: 'Unauthorized. Set Authorization: Bearer <token> header.' });
+}
+// Constant-time compare so a LAN attacker can't recover the token byte-by-byte via timing.
+function tokenMatches(presented, expected) {
+  if (typeof presented !== 'string' || !expected) return false;
+  const a = Buffer.from(presented);
+  const b = Buffer.from(expected);
+  return a.length === b.length && timingSafeEqual(a, b);
 }
 app.use('/api', authMiddleware);
 
@@ -282,7 +293,7 @@ if (initialActiveAccount?.id) {
 const chatStore = new ChatStore();
 const orchestrator = new AgentOrchestrator({
   chatStore,
-  agentUrl: `http://localhost:${PORT}`,
+  agentUrl: `http://127.0.0.1:${PORT}`,
   tradingBotBasePort: Number(TRADING_BOT_PORT),
 });
 let harness = createHarnessForActiveSandbox();
@@ -307,7 +318,7 @@ function createHarnessForActiveSandbox() {
       TRADING_BOT_URL,
       TRADING_BOT_TOKEN,
       SERVER_HOST: '127.0.0.1',
-      AGENT_URL: `http://localhost:${PORT}`,
+      AGENT_URL: `http://127.0.0.1:${PORT}`,
       OPENPROPHET_SANDBOX_ID: sandbox?.id || '',
       OPENPROPHET_ACCOUNT_ID: sandbox?.accountId || '',
       DATABASE_PATH: sandbox?.accountId ? getSandboxDbPathForAccount(sandbox.accountId) : '',
@@ -504,11 +515,12 @@ function bindOperationalHooks(targetHarness) {
 
 // ── SSE Endpoint ───────────────────────────────────────────────────
 app.get('/api/events', (req, res) => {
+  // No CORS header: the stream carries config/state and the dashboard is same-origin, so a
+  // page on another origin (e.g. via DNS rebinding) must not be able to read it.
   res.writeHead(200, {
     'Content-Type': 'text/event-stream',
     'Cache-Control': 'no-cache',
     'Connection': 'keep-alive',
-    'Access-Control-Allow-Origin': '*',
   });
   res.write(`event: state\ndata: ${JSON.stringify({ ...harness.state.toJSON(), sandboxId: getActiveSandbox()?.id || null })}\n\n`);
   res.write(`event: config\ndata: ${JSON.stringify(safeConfig())}\n\n`);
@@ -1515,6 +1527,16 @@ app.post('/api/auth/login', (req, res) => {
 
   let output = '';
   let urlSent = false;
+  const failOnce = (status, error) => {
+    if (urlSent) return;
+    urlSent = true;
+    res.status(status).json({ error, output: output.substring(0, 500) });
+  };
+  // Without this, a missing `opencode` binary emits an unhandled 'error' on the child and
+  // takes the whole dashboard down with it.
+  proc.on('error', (err) => failOnce(500, `Could not start opencode: ${err.message}. Is the OpenCode CLI installed and on PATH?`));
+  // Exited before printing a URL (already logged in, bad args) — don't make the UI wait 15s.
+  proc.on('close', (code) => failOnce(500, `opencode auth login exited (code ${code}) before producing a login URL`));
 
   const sendUrl = (data) => {
     output += data.toString();
@@ -1544,8 +1566,8 @@ app.post('/api/auth/login', (req, res) => {
   // Timeout - if no URL found in 15s, return error
   setTimeout(() => {
     if (!urlSent) {
+      failOnce(500, 'Timed out waiting for auth URL');
       proc.kill();
-      res.status(500).json({ error: 'Timed out waiting for auth URL', output: output.substring(0, 500) });
     }
   }, 15000);
 });
@@ -1564,6 +1586,25 @@ app.post('/api/auth/logout', (req, res) => {
     res.status(500).json({ error: 'Logout failed: ' + output.substring(0, 200) });
   }
 });
+
+// ── Update / security status ───────────────────────────────────────
+// Populated at boot by runStartupChecks() and refreshed daily; the dashboard renders it as a
+// banner so operators who never read the console still see "you're behind" / advisories.
+let updateStatus = { security: [], update: null };
+app.get('/api/update-status', (req, res) => res.json(updateStatus));
+
+async function runStartupChecks() {
+  let envFileMode = null;
+  try { envFileMode = (await fs.stat(path.join(PROJECT_ROOT, '.env'))).mode & 0o777; } catch {}
+  updateStatus.security = securityNotices({
+    host: HOST, port: PORT, authToken: AUTH_TOKEN, accounts: getConfig().accounts || [], envFileMode,
+  });
+  for (const n of updateStatus.security) {
+    (n.level === 'warning' ? console.warn : console.log)(`  [security] ${n.level === 'warning' ? 'WARNING: ' : ''}${n.message}`);
+  }
+  updateStatus.update = await checkForUpdates({ cwd: PROJECT_ROOT });
+  for (const line of formatUpdateNotices(updateStatus.update)) console.log(`  [update] ${line}`);
+}
 
 // ── Health ──────────────────────────────────────────────────────────
 app.get('/api/health', async (req, res) => {
@@ -1636,9 +1677,12 @@ process.on('SIGINT', async () => {
   process.exit(0);
 });
 
-app.listen(PORT, '0.0.0.0', () => {
+app.listen(PORT, HOST, () => {
   console.log(`\n  Prophet Agent Dashboard: http://localhost:${PORT}`);
-  console.log(`  Network:                http://0.0.0.0:${PORT}`);
+  console.log(`  Network:                http://${HOST}:${PORT}`);
   console.log(`  Trading Bot Backend:    ${TRADING_BOT_URL}`);
   console.log(`  Active Account:         ${activeAccount?.name || 'none'}\n`);
+  // Security posture + "are you behind upstream / any advisories" reminders. Never blocks boot.
+  runStartupChecks().catch(err => console.warn(`  [update] startup checks failed: ${err.message}`));
+  setInterval(() => runStartupChecks().catch(() => {}), 24 * 60 * 60 * 1000).unref();
 });

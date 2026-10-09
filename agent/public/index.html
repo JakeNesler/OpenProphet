@@ -667,10 +667,31 @@
     @media (min-width: 769px) {
       .tab-portfolio-mobile { display: none !important; }
     }
+    /* Update / security notice bar (fed by /api/update-status) */
+    .notice-bar {
+      display: flex; align-items: flex-start; gap: 10px;
+      padding: 8px 14px; font-size: 12px; line-height: 1.45;
+      background: var(--warning-bg); color: var(--warning);
+      border-bottom: 1px solid var(--rule);
+    }
+    .notice-bar[hidden] { display: none; }
+    .notice-bar.info { background: var(--paper-dark); color: var(--ink-muted); }
+    .notice-bar ul { margin: 0; padding: 0; list-style: none; flex: 1; }
+    .notice-bar li + li { margin-top: 3px; }
+    .notice-bar a { color: inherit; text-decoration: underline; }
+    .notice-bar code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; background: rgba(0,0,0,0.06); padding: 0 4px; border-radius: 3px; }
+    .notice-bar .notice-close { background: none; border: none; color: inherit; cursor: pointer; font-size: 14px; line-height: 1; padding: 0 2px; }
+    [data-theme="dark"] .notice-bar { background: #2a2416; color: #e0c27a; border-bottom-color: #3a3222; }
+    [data-theme="dark"] .notice-bar.info { background: #10131b; color: #9aa3b2; }
   </style>
 </head>
 <body>
 <div class="app">
+  <!-- Update / security notices -->
+  <div class="notice-bar" id="notice-bar" hidden role="status">
+    <ul id="notice-list"></ul>
+    <button class="notice-close" title="Dismiss until next restart" onclick="dismissNotices()">&times;</button>
+  </div>
   <!-- Top Bar -->
   <div class="topbar">
     <div class="topbar-left">
@@ -3576,7 +3597,58 @@ function startPolling() {
     setInterval(checkAuth, 30000),
   ];
   // Run immediately on start
-  updateClock(); refreshPortfolio(); checkHealth(); checkAuth();
+  updateClock(); refreshPortfolio(); checkHealth(); checkAuth(); loadUpdateStatus();
+}
+
+// ── Update / security notices ──────────────
+// The server checks at boot (+ daily) whether this checkout is behind upstream main and
+// whether advisories are published; surface that here so it isn't buried in the console.
+let _noticesLoadedAt = 0;
+let _noticesDismissedAt = 0;
+async function loadUpdateStatus() {
+  if (Date.now() - _noticesLoadedAt < 10 * 60 * 1000) return;
+  _noticesLoadedAt = Date.now();
+  try {
+    const r = await fetch('/api/update-status');
+    const d = await r.json();
+    renderNotices(d);
+  } catch {}
+}
+function renderNotices(d) {
+  const bar = document.getElementById('notice-bar');
+  const list = document.getElementById('notice-list');
+  const esc = (s) => String(s ?? '').replace(/[&<>"]/g, c => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;' }[c]));
+  const items = [];
+  let warning = false;
+  for (const n of (d.security || [])) {
+    if (n.level !== 'warning') continue;
+    warning = true;
+    items.push(`<li><strong>Security:</strong> ${esc(n.message)}</li>`);
+  }
+  const u = d.update;
+  if (u && u.enabled) {
+    if (u.status === 'behind' || u.status === 'diverged') {
+      warning = true;
+      items.push(`<li><strong>Update available:</strong> this install is ${esc(u.behindBy)} commit(s) behind <a href="https://github.com/JakeNesler/OpenProphet/commits/main" target="_blank" rel="noopener">upstream main</a> — stop the agent, run <code>npm run update</code>, restart.</li>`);
+    }
+    for (const a of (u.advisories || []).slice(0, 3)) {
+      warning = true;
+      items.push(`<li><strong>Security advisory [${esc((a.severity || 'unknown').toUpperCase())}]:</strong> <a href="${esc(a.url)}" target="_blank" rel="noopener">${esc(a.summary)}</a></li>`);
+    }
+  }
+  const stale = u && u.checkedAt && (Date.now() - new Date(u.checkedAt).getTime() > 36 * 60 * 60 * 1000);
+  if (!items.length && stale) items.push('<li>Update check is stale — restart the dashboard to re-check for upstream changes and security advisories.</li>');
+  if (!items.length || (_noticesDismissedAt && u && new Date(u.checkedAt).getTime() <= _noticesDismissedAt)) {
+    bar.hidden = true;
+    return;
+  }
+  list.innerHTML = items.join('');
+  bar.classList.toggle('info', !warning);
+  bar.hidden = false;
+}
+function dismissNotices() {
+  _noticesDismissedAt = Date.now();
+  document.getElementById('notice-bar').hidden = true;
 }
 function stopPolling() {
   _pollIntervals.forEach(id => clearInterval(id));

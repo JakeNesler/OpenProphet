@@ -23,10 +23,14 @@ RUN npm ci --omit=dev
 # ── Stage 3: runtime ──
 FROM node:24.21.0-bookworm
 WORKDIR /app
+# The image has no .git, so the startup update check reads the commit from this env instead:
+#   docker build --build-arg OPENPROPHET_COMMIT=$(git rev-parse HEAD) .
+ARG OPENPROPHET_COMMIT=""
 ENV NODE_ENV=production \
     AGENT_PORT=3737 \
     SERVER_HOST=127.0.0.1 \
-    DATABASE_PATH=/app/data/prophet_trader.db
+    DATABASE_PATH=/app/data/prophet_trader.db \
+    OPENPROPHET_COMMIT=$OPENPROPHET_COMMIT
 # opencode CLI for the per-heartbeat LLM subprocess (package is opencode-ai)
 RUN npm install -g opencode-ai@1.18.32 && rm -rf /root/.npm
 COPY --from=nodedeps /app/node_modules ./node_modules

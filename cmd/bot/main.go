@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/subtle"
 	"log"
 	"net/url"
 	"os"
@@ -170,6 +171,9 @@ func main() {
 	}()
 
 	// Start HTTP server
+	if cfg.AuthToken == "" {
+		logger.Warn("TRADING_BOT_TOKEN is not set — /api/v1 accepts unauthenticated orders from any local process. The dashboard mints one automatically; set it explicitly when running this backend standalone.")
+	}
 	logger.WithFields(logrus.Fields{"host": cfg.ServerHost, "port": cfg.ServerPort}).Info("Starting HTTP server...")
 	if err := router.Run(cfg.ServerHost + ":" + cfg.ServerPort); err != nil {
 		logger.Fatal("Failed to start server:", err)
@@ -201,8 +205,10 @@ func setupRouter(orderController *controllers.OrderController, newsController *c
 
 	// Trading endpoints
 	api := router.Group("/api/v1")
+	expected := []byte("Bearer " + config.AppConfig.AuthToken)
 	api.Use(func(c *gin.Context) {
-		if config.AppConfig.AuthToken == "" || c.GetHeader("Authorization") == "Bearer "+config.AppConfig.AuthToken {
+		if config.AppConfig.AuthToken == "" ||
+			subtle.ConstantTimeCompare([]byte(c.GetHeader("Authorization")), expected) == 1 {
 			c.Next()
 			return
 		}

@@ -1,5 +1,49 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+- **0DTE gate was timezone-broken.** The expiry date was parsed as UTC midnight, so on any
+  host west of UTC (every US operator) a same-day expiry passed `allow0DTE=false` and the
+  next day's expiry was blocked instead. Expiry is now a local calendar date; tests cover
+  New York, Los Angeles, UTC, and Tokyo.
+- **`maxOrderValue` could be bypassed.** Options were valued at premium × contracts (100×
+  too low) and market orders — which carry no price — were valued at $0 and waved through.
+  Options now use the 100-share multiplier, the MCP server attaches a live quote to market
+  orders, and an order that still cannot be valued fails closed with an actionable message.
+  Closing a managed position (an exit) is exempt.
+- **Dashboard crash on "Login" without the OpenCode CLI.** `/api/auth/login` had no `error`
+  handler on the child process, so a missing `opencode` binary took the whole dashboard down.
+  It now returns a 500 with the reason, and no longer waits 15s when the CLI exits early.
+- `agent-config.json` (every account's broker keys) is now written atomically
+  (write-then-rename, mode 0600) so a crash mid-save can't truncate it.
+- Chat-history account/session ids from URL params are validated as single path segments
+  (no `../`).
+- Dashboard and Go API bearer-token checks are constant-time.
+- The SSE stream no longer sends `Access-Control-Allow-Origin: *`.
+- Node→dashboard loopback URLs use `127.0.0.1` consistently (no `localhost`/IPv6 ambiguity).
+- `npm install` with npm ≥ 12 skipped `better-sqlite3`'s native build (install scripts are
+  blocked by default), leaving a broken install. `package.json` now approves the required
+  install scripts via `allowScripts`.
+
+### Added
+- **Startup security & update reminders.** On boot (and daily) the dashboard prints a
+  security checklist (open LAN dashboard without `AGENT_AUTH_TOKEN`, live accounts,
+  world-readable `.env`), checks whether the checkout is behind upstream `main`, lists
+  published security advisories, and shows a banner in the dashboard. `GET /api/update-status`
+  exposes the same data. Disable with `OPENPROPHET_UPDATE_CHECK=0`.
+- `npm run update` — pull `main`, `npm ci`, rebuild the Go backend.
+- `AGENT_HOST` to choose the dashboard bind address (default unchanged: `0.0.0.0`).
+- CI (`.github/workflows/ci.yml`): gofmt, `go vet`, `go test -race`, staticcheck,
+  govulncheck, Node 22/24 test matrix, `npm audit`, Docker image build, actionlint.
+- Auto-rebase workflow (`.github/workflows/auto-rebase.yml`): after every push to `main`
+  (and daily), every non-main branch that is behind `main` is rebased and force-pushed with
+  lease; conflicts are reported, Dependabot branches are left alone; forks sync `main` from
+  upstream first.
+- Dependabot now also tracks GitHub Actions, and groups minor/patch bumps per ecosystem.
+- `SECURITY.md` with a private reporting channel and an operator checklist.
+- Dockerfile accepts `OPENPROPHET_COMMIT` so containers can report their version.
+
 ## v2.0.5
 
 - Requests the paid appliance archive for the launcher's native amd64 or arm64 host.

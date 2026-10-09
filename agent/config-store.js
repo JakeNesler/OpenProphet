@@ -850,7 +850,11 @@ export async function saveConfig() {
   _writeLock = _writeLock.then(async () => {
     syncLegacyAliases(_config);
     await fs.mkdir(path.dirname(CONFIG_PATH), { recursive: true });
-    await fs.writeFile(CONFIG_PATH, JSON.stringify(_config, null, 2));
+    // Write-then-rename so a crash, kill, or full disk mid-write can never leave a truncated
+    // agent-config.json (it holds every account's broker keys) for the next boot to choke on.
+    const tmpPath = `${CONFIG_PATH}.${process.pid}.tmp`;
+    await fs.writeFile(tmpPath, JSON.stringify(_config, null, 2), { mode: 0o600 });
+    await fs.rename(tmpPath, CONFIG_PATH);
   }).catch(err => console.error('Config save error:', err.message));
   return _writeLock;
 }

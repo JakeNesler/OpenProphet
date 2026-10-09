@@ -11,7 +11,14 @@
     "start": "node mcp-server.js",
     "agent": "node agent/server.js",
     "test": "node --test test/*.test.mjs",
-    "test:embeddings": "node test/embedding-smoke.mjs"
+    "test:embeddings": "node test/embedding-smoke.mjs",
+    "update": "git pull --rebase --autostash origin main && npm ci && go build -o prophet_bot ./cmd/bot && echo 'Updated — restart the dashboard (npm run agent).'"
+  },
+  "allowScripts": {
+    "better-sqlite3": true,
+    "onnxruntime-node": true,
+    "protobufjs": true,
+    "@google/genai": true
   },
   "repository": {
     "type": "git",

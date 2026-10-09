@@ -148,6 +148,12 @@ OpenProphet
   bearer token on `/api/v1` (`/health` stays open). If `TRADING_BOT_TOKEN` is unset the
   dashboard mints an ephemeral one at startup, so the loopback API is never left open.
 - **Dashboard auth** — set `AGENT_AUTH_TOKEN` to require a Bearer token on the dashboard API.
+  `AGENT_HOST=127.0.0.1` keeps the dashboard local-only (default `0.0.0.0` = LAN-reachable).
+- **Startup security & update reminders** — on boot and daily, the dashboard prints a security
+  checklist (LAN-open dashboard without a token, live accounts, world-readable `.env`), checks
+  whether your checkout is behind upstream `main`, lists published
+  [security advisories](https://github.com/JakeNesler/OpenProphet/security/advisories), and
+  shows a banner in the UI (`GET /api/update-status`). See [SECURITY.md](SECURITY.md).
 - **Secret masking** — `safeConfig()` recursively masks any secret-named field (tokens, keys,
   webhooks) in all SSE broadcasts and API responses.
 - **Order idempotency + startup reconciliation** — every broker submit carries a client order
@@ -325,6 +331,26 @@ The MCP server is a standalone stdio server that works with any MCP-compatible c
 
 ---
 
+### 6. Keep It Updated
+
+Only the latest `main` gets fixes. The dashboard tells you when you're behind (console at
+startup + a banner in the UI). To update:
+
+```bash
+npm run update    # git pull --rebase origin main && npm ci && go build -o prophet_bot ./cmd/bot
+npm run agent     # restart
+```
+
+Stop the agent before updating so a beat isn't interrupted mid-order. Read the
+[CHANGELOG](CHANGELOG.md) and any [security advisories](https://github.com/JakeNesler/OpenProphet/security/advisories)
+first. Air-gapped? `OPENPROPHET_UPDATE_CHECK=0` turns the check off (it is a single
+unauthenticated GitHub API call; nothing about your setup is sent).
+
+**Working on your own branch or fork?** The `auto-rebase` workflow rebases every non-`main`
+branch onto the latest `main` after each push to `main` (and daily), and a fork's `main`
+onto upstream first. Enable Actions on your fork to get it. Branches that conflict are left
+untouched and listed in the workflow summary.
+
 ## MCP Tools Reference
 
 ### Trading (order execution)
@@ -431,6 +457,7 @@ The agent server exposes 40 REST endpoints under `/api/`:
 | GET/POST | `/api/strategies` | List / add strategies |
 | PUT | `/api/strategies/:id` | Update strategy |
 | GET/PUT | `/api/permissions` | Get / update guardrails |
+| GET | `/api/update-status` | Security notices, upstream drift, published advisories |
 | GET/PUT | `/api/heartbeat` | Get / update phase intervals |
 | GET/PUT | `/api/plugins/:name` | Get / update plugin config |
 | POST | `/api/models/activate` | Switch Claude model |
@@ -532,7 +559,14 @@ All runtime config is stored in `data/agent-config.json`. The dashboard provides
 ```bash
 npm run agent    # Start dashboard + agent server (port 3737)
 npm start        # Start MCP server only (for Claude Code integration)
+npm test         # Node tests (risk gate, config catalog, MCP startup, update check)
+go test ./...    # Go tests (order idempotency, reconciliation, position manager)
+npm run update   # Pull latest main, reinstall deps, rebuild the Go backend
 ```
+
+CI runs gofmt, `go vet`, `go test -race`, staticcheck, govulncheck, the Node test suite on
+Node 22 and 24, `npm audit`, and a Docker image build on every push and pull request.
+Dependabot opens grouped weekly PRs for npm, Go, Docker, and GitHub Actions dependencies.
 
 ---
 

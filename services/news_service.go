@@ -73,7 +73,7 @@ func (ns *NewsService) GetGoogleNews() ([]NewsItem, error) {
 // GetGoogleNewsByTopic fetches news for a specific topic
 // Topics: WORLD, NATION, BUSINESS, TECHNOLOGY, ENTERTAINMENT, SPORTS, SCIENCE, HEALTH
 func (ns *NewsService) GetGoogleNewsByTopic(topic string) ([]NewsItem, error) {
-	url := fmt.Sprintf("https://news.google.com/rss/topics/CAAqJggKIiBDQkFTRWdvSUwyMHZNRGx6TVdZU0FtVnVHZ0pWVXlnQVAB?hl=en-US&gl=US&ceid=US:en")
+	url := "https://news.google.com/rss/topics/CAAqJggKIiBDQkFTRWdvSUwyMHZNRGx6TVdZU0FtVnVHZ0pWVXlnQVAB?hl=en-US&gl=US&ceid=US:en"
 
 	// Topic-specific URLs
 	topicURLs := map[string]string{
