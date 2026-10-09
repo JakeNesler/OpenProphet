@@ -5,7 +5,7 @@
 # opencode CLI (authenticated at runtime via the ANTHROPIC_API_KEY secret — no interactive login).
 
 # ── Stage 1: build the Go trading backend (CGO for the sqlite driver) ──
-FROM golang:1.27.1-bookworm AS gobuild
+FROM golang:1.27.2-bookworm AS gobuild
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
