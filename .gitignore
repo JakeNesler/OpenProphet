@@ -58,3 +58,6 @@ diagnostics/
 # Runtime output (agent-generated journals/decisions — not release material)
 activity_logs/
 decisive_actions/
+
+# Launcher build output (go build ./cmd/openprophet)
+/openprophet
