@@ -426,12 +426,12 @@ func checkDockerDaemon() error {
 			"  sudo usermod -aG docker \"$USER\"\n"+
 			"  newgrp docker        # or log out and back in\n"+
 			"  openprophet install\n"+
-			"Do not run the launcher with sudo. On rootless Docker or Docker Desktop, point DOCKER_HOST at your user socket instead.", detail)
+			"Do not run the launcher with sudo. On rootless Docker or Docker Desktop, point DOCKER_HOST at your user socket instead", detail)
 	}
 	if detail == "" {
 		detail = "docker info failed"
 	}
-	return fmt.Errorf("the Docker daemon is not reachable (%s). Start Docker, confirm `docker info` works, then re-run.", detail)
+	return fmt.Errorf("the Docker daemon is not reachable (%s). Start Docker, confirm `docker info` works, then re-run", detail)
 }
 
 func runDockerComposeCmdInteractive(stdin io.Reader, stdout, stderr io.Writer, args ...string) error {
