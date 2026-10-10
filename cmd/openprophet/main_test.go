@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -353,6 +354,87 @@ func TestInstallFailsBeforeAnyRequestWhenDockerSocketIsDenied(t *testing.T) {
 	}
 }
 
+func TestDoctorReportsEveryPrerequisiteAndFailsOnDeniedSocket(t *testing.T) {
+	oldExecCommand := execCommand
+	execCommand = mockExecCommand
+	defer func() { execCommand = oldExecCommand }()
+	t.Setenv("OPENPROPHET_HOME", t.TempDir())
+
+	// Healthy host, nothing installed yet: informational rows, no failure.
+	var out strings.Builder
+	if err := handleDoctor(&out); err != nil {
+		t.Fatalf("doctor failed on a healthy host: %v\n%s", err, out.String())
+	}
+	for _, want := range []string{"✓ host", "✓ docker", "✓ compose", "✓ daemon", "- key", "not saved yet", "- appliance", "not installed yet", "All checks passed."} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("doctor output missing %q:\n%s", want, out.String())
+		}
+	}
+
+	// Socket denied: the daemon row fails and carries the usermod fix.
+	t.Setenv("MOCK_DOCKER_INFO_FAIL", "socket")
+	out.Reset()
+	err := handleDoctor(&out)
+	if err == nil || !strings.Contains(err.Error(), "1 check(s) failed") {
+		t.Fatalf("expected one failed check, got %v", err)
+	}
+	for _, want := range []string{"✗ daemon", "usermod -aG docker", "✓ docker", "✓ compose"} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("doctor output missing %q:\n%s", want, out.String())
+		}
+	}
+}
+
+func TestResolveEntitlementKeyPrecedenceAndPrompt(t *testing.T) {
+	t.Setenv("OPENPROPHET_HOME", t.TempDir())
+	oldReader, oldIsTerminal := stdinReader, stdinIsTerminal
+	defer func() { stdinReader, stdinIsTerminal = oldReader, oldIsTerminal }()
+	missing := fmt.Errorf("key missing")
+
+	// Flag beats env beats saved key.
+	t.Setenv("OPENPROPHET_KEY", "op_env")
+	if key, _ := resolveEntitlementKey("op_flag", io.Discard, missing); key != "op_flag" {
+		t.Fatalf("flag should win, got %q", key)
+	}
+	if key, _ := resolveEntitlementKey("", io.Discard, missing); key != "op_env" {
+		t.Fatalf("env should win over saved, got %q", key)
+	}
+	t.Setenv("OPENPROPHET_KEY", "")
+	if err := saveEntitlementKey("op_saved"); err != nil {
+		t.Fatal(err)
+	}
+	if key, _ := resolveEntitlementKey("", io.Discard, missing); key != "op_saved" {
+		t.Fatalf("saved key should be used, got %q", key)
+	}
+	os.Remove(filepath.Join(getHomeDir(), "entitlement.key"))
+
+	// Non-interactive (installer script, CI): the caller's error, no prompt.
+	stdinIsTerminal = func() bool { return false }
+	if _, err := resolveEntitlementKey("", io.Discard, missing); err != missing {
+		t.Fatalf("non-interactive should return the missing error, got %v", err)
+	}
+
+	// Interactive terminal: prompt and read the key.
+	stdinIsTerminal = func() bool { return true }
+	stdinReader = strings.NewReader("  op_typed_1234  \n")
+	var prompt strings.Builder
+	key, err := resolveEntitlementKey("", &prompt, missing)
+	if err != nil || key != "op_typed_1234" {
+		t.Fatalf("expected prompted key, got %q / %v", key, err)
+	}
+	if !strings.Contains(prompt.String(), "Entitlement key") {
+		t.Fatalf("expected a prompt, got %q", prompt.String())
+	}
+	stdinReader = strings.NewReader("not-a-key\n")
+	if _, err := resolveEntitlementKey("", io.Discard, missing); err == nil || !strings.Contains(err.Error(), "start with op_") {
+		t.Fatalf("expected op_ validation error, got %v", err)
+	}
+	stdinReader = strings.NewReader("\n")
+	if _, err := resolveEntitlementKey("", io.Discard, missing); err != missing {
+		t.Fatalf("empty prompt should return the missing error, got %v", err)
+	}
+}
+
 func TestUpdateEnvFile(t *testing.T) {
 	tempDir := t.TempDir()
 	envPath := filepath.Join(tempDir, ".env")
@@ -443,7 +525,7 @@ func TestHelperProcess(t *testing.T) {
 		if len(subArgs) >= 2 && subArgs[0] == "image" && subArgs[1] == "inspect" && os.Getenv("MOCK_DOCKER_INSPECT_FAIL") == "1" {
 			os.Exit(1)
 		}
-		if len(subArgs) >= 1 && subArgs[0] == "info" && os.Getenv("MOCK_DOCKER_INFO_FAIL") == "socket" {
+		if len(subArgs) >= 1 && subArgs[0] == "version" && os.Getenv("MOCK_DOCKER_INFO_FAIL") == "socket" {
 			// What the real CLI prints for a user outside the docker group.
 			fmt.Fprintln(os.Stderr, "permission denied while trying to connect to the docker API at unix:///var/run/docker.sock")
 			os.Exit(1)

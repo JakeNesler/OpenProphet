@@ -1,10 +1,12 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -409,7 +411,9 @@ func checkDockerCompose() error {
 // preflight, downloaded the entitlement-gated archive, and only then hit an opaque
 // "failed to load appliance image". Run this before any download.
 func checkDockerDaemon() error {
-	cmd := execCommand("docker", "info", "--format", "{{.ServerVersion}}")
+	// `docker version` exits non-zero when the daemon is unreachable or the socket is denied;
+	// `docker info` prints the error but still exits 0, which would let this check pass.
+	cmd := execCommand("docker", "version", "--format", "{{.Server.Version}}")
 	var stderr strings.Builder
 	cmd.Stdout = io.Discard
 	cmd.Stderr = &stderr
@@ -432,6 +436,151 @@ func checkDockerDaemon() error {
 		detail = "docker info failed"
 	}
 	return fmt.Errorf("the Docker daemon is not reachable (%s). Start Docker, confirm `docker info` works, then re-run", detail)
+}
+
+func checkDockerCLI() error {
+	cmd := execCommand("docker", "--version")
+	cmd.Stdout, cmd.Stderr = io.Discard, io.Discard
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("docker is not installed or not on PATH. Install Docker Engine (Linux: https://docs.docker.com/engine/install/) or Docker Desktop (macOS: https://docs.docker.com/desktop/), then re-run")
+	}
+	return nil
+}
+
+// runPreflight is the shared gate for install and update: CLI, compose plugin, then daemon
+// access, each failing with an actionable message before anything is downloaded.
+func runPreflight() error {
+	for _, check := range []func() error{checkDockerCLI, checkDockerCompose, checkDockerDaemon} {
+		if err := check(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// dockerOutput runs a docker subcommand and returns its trimmed stdout, or the first line of
+// stderr as the error.
+func dockerOutput(args ...string) (string, error) {
+	cmd := execCommand("docker", args...)
+	var out, errOut strings.Builder
+	cmd.Stdout, cmd.Stderr = &out, &errOut
+	if err := cmd.Run(); err != nil {
+		msg := strings.TrimSpace(errOut.String())
+		if i := strings.IndexByte(msg, '\n'); i >= 0 {
+			msg = msg[:i]
+		}
+		if msg == "" {
+			msg = err.Error()
+		}
+		return "", errors.New(msg)
+	}
+	return strings.TrimSpace(out.String()), nil
+}
+
+// handleDoctor prints one line per prerequisite so a user (or a support thread) can see at a
+// glance what is missing before — or after — an install. Informational rows use "-" and never
+// fail the run; only the Docker rows can.
+func handleDoctor(stdout io.Writer) error {
+	fmt.Fprintf(stdout, "openprophet %s — doctor\n", Version)
+	failed := 0
+	row := func(mark, name, detail string) {
+		fmt.Fprintf(stdout, "  %s %-9s %s\n", mark, name, detail)
+	}
+	fail := func(name, detail string) { failed++; row("✗", name, detail) }
+
+	row("✓", "host", runtime.GOOS+"/"+runtime.GOARCH)
+
+	if out, err := dockerOutput("--version"); err != nil {
+		fail("docker", "not installed or not on PATH — https://docs.docker.com/get-docker/")
+	} else {
+		row("✓", "docker", out)
+	}
+
+	if out, err := dockerOutput("compose", "version"); err != nil {
+		fail("compose", "docker compose plugin not available — "+err.Error())
+	} else {
+		row("✓", "compose", out)
+	}
+
+	if err := checkDockerDaemon(); err != nil {
+		lines := strings.Split(err.Error(), "\n")
+		fail("daemon", lines[0])
+		for _, l := range lines[1:] {
+			fmt.Fprintf(stdout, "              %s\n", l)
+		}
+	} else {
+		server, _ := dockerOutput("version", "--format", "{{.Server.Version}}")
+		row("✓", "daemon", "reachable (server "+server+")")
+	}
+
+	home := getHomeDir()
+	if _, err := loadEntitlementKey(); err == nil {
+		row("-", "key", "saved in "+home)
+	} else {
+		row("-", "key", "not saved yet — `openprophet install` will ask for it")
+	}
+	if _, err := os.Stat(filepath.Join(home, "manifest.json")); err == nil {
+		row("-", "appliance", "installed — `openprophet status` for the container")
+	} else {
+		row("-", "appliance", "not installed yet")
+	}
+
+	if failed > 0 {
+		return fmt.Errorf("%d check(s) failed — fix the ✗ items above and run `openprophet doctor` again", failed)
+	}
+	fmt.Fprintln(stdout, "All checks passed.")
+	return nil
+}
+
+// Prompting for the key only makes sense on a real terminal; a piped stdin (the installer
+// script, CI) keeps the explicit "key is required" error. Both are variables so tests can
+// simulate a terminal.
+var (
+	stdinReader     io.Reader = os.Stdin
+	stdinIsTerminal           = func() bool {
+		fi, err := os.Stdin.Stat()
+		return err == nil && fi.Mode()&os.ModeCharDevice != 0
+	}
+)
+
+// resolveEntitlementKey: --key flag, then OPENPROPHET_KEY, then the key saved by a previous
+// install, then an interactive prompt. `missing` is returned when none of those yield a key.
+func resolveEntitlementKey(keyFlag string, stdout io.Writer, missing error) (string, error) {
+	if keyFlag != "" {
+		return keyFlag, nil
+	}
+	if v := os.Getenv("OPENPROPHET_KEY"); v != "" {
+		return v, nil
+	}
+	if saved, err := loadEntitlementKey(); err == nil && saved != "" {
+		return saved, nil
+	}
+	if !stdinIsTerminal() {
+		return "", missing
+	}
+	fmt.Fprint(stdout, "Entitlement key (op_..., from your openprophet.io guides page): ")
+	line, err := bufio.NewReader(stdinReader).ReadString('\n')
+	if err != nil && err != io.EOF {
+		return "", err
+	}
+	key := strings.TrimSpace(line)
+	if key == "" {
+		return "", missing
+	}
+	if !strings.HasPrefix(key, "op_") {
+		return "", fmt.Errorf("entitlement keys start with op_ — copy it from the guides page")
+	}
+	return key, nil
+}
+
+func printNextSteps(stdout io.Writer) {
+	fmt.Fprintln(stdout, `
+Next steps:
+  openprophet open      open the dashboard in your browser
+  openprophet auth      connect your model provider inside the appliance
+  openprophet status    container status        openprophet logs    follow output
+  openprophet update    pull the latest approved image (your data is preserved)
+  openprophet doctor    re-check Docker and the install at any time`)
 }
 
 func runDockerComposeCmdInteractive(stdin io.Reader, stdout, stderr io.Writer, args ...string) error {
@@ -532,23 +681,14 @@ func loadAndVerifyAppliance(ctx context.Context, m *Manifest, stdout, stderr io.
 }
 
 func handleInstall(ctx context.Context, keyFlag string, apiURL string, stdout, stderr io.Writer) error {
-	if err := checkDockerCompose(); err != nil {
-		return err
-	}
-	if err := checkDockerDaemon(); err != nil {
+	if err := runPreflight(); err != nil {
 		return err
 	}
 
-	key := keyFlag
-	if key == "" {
-		key = os.Getenv("OPENPROPHET_KEY")
-	}
-	if key == "" {
-		var err error
-		key, err = loadEntitlementKey()
-		if err != nil {
-			return fmt.Errorf("entitlement key is required (specify via --key or OPENPROPHET_KEY env var)")
-		}
+	key, err := resolveEntitlementKey(keyFlag, stdout,
+		fmt.Errorf("entitlement key is required (specify via --key or OPENPROPHET_KEY env var)"))
+	if err != nil {
+		return err
 	}
 
 	m, err := fetchManifest(ctx, apiURL, key)
@@ -585,27 +725,19 @@ func handleInstall(ctx context.Context, keyFlag string, apiURL string, stdout, s
 	}
 
 	fmt.Fprintln(stdout, "OpenProphet appliance installed and started successfully.")
+	printNextSteps(stdout)
 	return nil
 }
 
 func handleUpdate(ctx context.Context, keyFlag string, apiURL string, stdout, stderr io.Writer) error {
-	if err := checkDockerCompose(); err != nil {
-		return err
-	}
-	if err := checkDockerDaemon(); err != nil {
+	if err := runPreflight(); err != nil {
 		return err
 	}
 
-	key := keyFlag
-	if key == "" {
-		key = os.Getenv("OPENPROPHET_KEY")
-	}
-	if key == "" {
-		var err error
-		key, err = loadEntitlementKey()
-		if err != nil {
-			return fmt.Errorf("entitlement key not found (run install first, or specify via --key/OPENPROPHET_KEY)")
-		}
+	key, err := resolveEntitlementKey(keyFlag, stdout,
+		fmt.Errorf("entitlement key not found (run install first, or specify via --key/OPENPROPHET_KEY)"))
+	if err != nil {
+		return err
 	}
 
 	m, err := fetchManifest(ctx, apiURL, key)
@@ -693,6 +825,7 @@ func printUsage(out io.Writer) {
 	fmt.Fprintln(out, `Usage: openprophet <command> [options]
 
 Commands:
+  doctor    Check Docker, the daemon, and the install state (run this first if anything fails)
   install   Install and start the OpenProphet appliance
   start     Start the installed appliance
   stop      Stop the running appliance
@@ -702,12 +835,27 @@ Commands:
   auth      Login to OpenCode inside the appliance
   open      Open the appliance dashboard in your browser
   version   Show version information
+  help      Show this help (also: openprophet <command> --help)
 
 Options for install and update:
-  --key     The entitlement key (can also be set via OPENPROPHET_KEY env var)
+  --key     The entitlement key. Also read from OPENPROPHET_KEY, then from the key saved by a
+            previous install; on a terminal you are prompted if none is set.
 
 Options for logs:
-  --no-follow   Do not follow log output`)
+  --no-follow   Do not follow log output
+
+Environment:
+  OPENPROPHET_KEY       Entitlement key (alternative to --key)
+  OPENPROPHET_HOME      Where the appliance state lives (default: ~/.openprophet)`)
+}
+
+func wantsHelp(args []string) bool {
+	for _, a := range args {
+		if a == "-h" || a == "--help" || a == "help" {
+			return true
+		}
+	}
+	return false
 }
 
 func main() {
@@ -731,10 +879,29 @@ func main() {
 	var keyFlag string
 	var followLogs bool = true
 
+	// `openprophet <command> --help` for commands that take no flags.
 	switch cmd {
+	case "doctor", "start", "stop", "status", "auth", "open":
+		if wantsHelp(os.Args[2:]) {
+			printUsage(os.Stdout)
+			return
+		}
+	}
+
+	switch cmd {
+	case "doctor":
+		if err := handleDoctor(os.Stdout); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+
 	case "install", "update":
 		fs := flag.NewFlagSet(cmd, flag.ExitOnError)
-		fs.StringVar(&keyFlag, "key", "", "entitlement key")
+		fs.StringVar(&keyFlag, "key", "", "entitlement key (or OPENPROPHET_KEY; prompted on a terminal)")
+		fs.Usage = func() {
+			fmt.Fprintf(os.Stderr, "Usage: openprophet %s [--key op_...]\n\n", cmd)
+			fs.PrintDefaults()
+		}
 		fs.Parse(os.Args[2:])
 
 		apiURL := os.Getenv("OPENPROPHET_API_URL")
