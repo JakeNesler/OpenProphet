@@ -8,7 +8,7 @@ require (
 	github.com/alpacahq/alpaca-trade-api-go/v3 v3.11.0
 	github.com/gin-gonic/gin v1.12.0
 	github.com/joho/godotenv v1.5.1
-	github.com/shopspring/decimal v1.4.0
+	github.com/shopspring/decimal v1.5.0
 	github.com/sirupsen/logrus v1.10.2
 	gorm.io/driver/sqlite v1.6.0
 	gorm.io/gorm v1.31.2
