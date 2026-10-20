@@ -813,7 +813,10 @@ export async function loadConfig() {
     const raw = await fs.readFile(CONFIG_PATH, 'utf-8');
     _config = normalizeConfig(JSON.parse(raw));
   } catch (err) {
-    if (err.code !== 'ENOENT') console.error('Warning: Failed to parse config file:', err.message);
+    if (err.code !== 'ENOENT') {
+      _config = null;
+      throw new Error(`Unable to load config at ${CONFIG_PATH}; the original file has been preserved.`, { cause: err });
+    }
     _config = createDefaultConfig();
   }
 
@@ -822,7 +825,9 @@ export async function loadConfig() {
     const sk = process.env.ALPACA_SECRET_KEY;
     if (pk && sk) {
       const baseUrl = process.env.ALPACA_BASE_URL || process.env.ALPACA_ENDPOINT || '';
-      const isPaper = baseUrl.includes('paper') || process.env.ALPACA_PAPER === 'true';
+      const isPaper = baseUrl
+        ? baseUrl.includes('paper')
+        : process.env.ALPACA_PAPER !== 'false';
       const id = crypto.randomUUID().slice(0, 8);
       const account = {
         id,
@@ -847,16 +852,26 @@ export async function loadConfig() {
 }
 
 export async function saveConfig() {
-  _writeLock = _writeLock.then(async () => {
+  const write = _writeLock.then(async () => {
     syncLegacyAliases(_config);
     await fs.mkdir(path.dirname(CONFIG_PATH), { recursive: true });
-    // Write-then-rename so a crash, kill, or full disk mid-write can never leave a truncated
-    // agent-config.json (it holds every account's broker keys) for the next boot to choke on.
-    const tmpPath = `${CONFIG_PATH}.${process.pid}.tmp`;
-    await fs.writeFile(tmpPath, JSON.stringify(_config, null, 2), { mode: 0o600 });
-    await fs.rename(tmpPath, CONFIG_PATH);
-  }).catch(err => console.error('Config save error:', err.message));
-  return _writeLock;
+    const tempPath = `${CONFIG_PATH}.${crypto.randomUUID()}.tmp`;
+    let file;
+    try {
+      file = await fs.open(tempPath, 'wx', 0o600);
+      await file.writeFile(JSON.stringify(_config, null, 2));
+      await file.sync();
+      await file.close();
+      file = null;
+      await fs.rename(tempPath, CONFIG_PATH);
+    } finally {
+      if (file) await file.close();
+      await fs.rm(tempPath, { force: true });
+    }
+  });
+  // Report this failure to the caller, while allowing the next queued save to retry.
+  _writeLock = write.catch(() => {});
+  return write;
 }
 
 export function getConfig() {
@@ -903,12 +918,17 @@ function updateSandbox(accountId, updater) {
 // ── Accounts ───────────────────────────────────────────────────────
 
 export async function addAccount({ name, publicKey, secretKey, baseUrl, paper }) {
+  if (typeof publicKey !== 'string' || !publicKey.trim() ||
+      typeof secretKey !== 'string' || !secretKey.trim()) {
+    throw new Error('Both Alpaca API key and secret key are required');
+  }
+  paper = paper !== false;
   const id = crypto.randomUUID().slice(0, 8);
   const account = {
     id,
     name: name || `Account ${_config.accounts.length + 1}`,
-    publicKey,
-    secretKey,
+    publicKey: publicKey.trim(),
+    secretKey: secretKey.trim(),
     baseUrl: alpacaTradingUrl(paper, baseUrl),
     paper: paper !== false,
     createdAt: new Date().toISOString(),

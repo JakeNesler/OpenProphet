@@ -3,11 +3,12 @@ import http from 'http';
 import path from 'path';
 import fs from 'fs/promises';
 import { fileURLToPath } from 'url';
-import { spawn, execSync } from 'child_process';
+import { spawn } from 'child_process';
 import axios from 'axios';
 
 import { AgentHarness } from './harness.js';
 import { alpacaTradingUrl, portForAgent } from './defaults.js';
+import { ensureGoBinary } from './server-lifecycle.js';
 import {
   getSandbox,
   getSandboxes,
@@ -139,19 +140,7 @@ export class AgentOrchestrator extends EventEmitter {
 
   async _ensureBinary(force = false) {
     if (!force && this._binaryReady) return;
-    const binaryPath = path.join(this.projectRoot, 'prophet_bot');
-    let exists = true;
-    try { await fs.access(binaryPath); } catch { exists = false; }
-    if (force || !exists) {
-      // `go build -o` refuses to overwrite a file it doesn't recognize as its own output
-      // (a stale/wrong-arch binary), so remove it first when rebuilding.
-      if (force && exists) { try { await fs.rm(binaryPath, { force: true }); } catch { /* fall through */ } }
-      execSync('go build -o prophet_bot ./cmd/bot', {
-        cwd: this.projectRoot,
-        timeout: 120000,
-        stdio: 'pipe',
-      });
-    }
+    ensureGoBinary({ projectRoot: this.projectRoot, force });
     this._binaryReady = true;
   }
 

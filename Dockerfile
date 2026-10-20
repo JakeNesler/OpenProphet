@@ -35,6 +35,9 @@ ENV NODE_ENV=production \
 RUN npm install -g opencode-ai@1.18.32 && rm -rf /root/.npm
 COPY --from=nodedeps /app/node_modules ./node_modules
 COPY . .
+# opencode run needs opencode.jsonc (registers the prophet MCP tools). The operator's own copy is
+# excluded by .dockerignore, so a clean build always ships the tracked example.
+COPY opencode.example.jsonc ./opencode.jsonc
 COPY --from=gobuild /src/prophet_bot ./prophet_bot
 # data/ (SQLite + agent-config.json) is a mounted PVC in the cluster; create the mountpoint
 RUN mkdir -p /app/data

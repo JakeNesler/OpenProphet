@@ -12,3 +12,8 @@ decisive_actions
 .env.example
 .claude
 test
+# Operator OpenCode config (gitignored, may hold personal MCP servers/keys); the image builds
+# opencode.jsonc from the tracked opencode.example.jsonc instead.
+opencode.json
+opencode.jsonc
+.opencode

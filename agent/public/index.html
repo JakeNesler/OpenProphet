@@ -743,7 +743,13 @@
       <!-- Sandbox Tabs -->
       <div class="sandbox-tabs" id="sandbox-tabs"></div>
       <!-- Per-sandbox terminal containers (created by JS) -->
-      <div id="sandbox-terminals" style="display:flex;flex-direction:column;flex:1;overflow:hidden"></div>
+      <div id="sandbox-terminals" style="display:flex;flex-direction:column;flex:1;overflow:hidden">
+        <!-- First-run guidance, shown by renderSandboxTabs() until an account exists -->
+        <div id="terminal-empty" class="no-data" style="display:none;padding:24px 16px">
+          No trading account yet. Add one in Accounts to start the agent.
+          <div style="margin-top:10px;font-style:normal"><button class="btn primary sm" onclick="switchTab('accounts')">Open Accounts</button></div>
+        </div>
+      </div>
       <!-- Hidden fallback terminal for legacy log() calls -->
       <div id="terminal" style="display:none"></div>
     </div>
@@ -997,7 +1003,7 @@
 
         <!-- Creator -->
         <div style="display:flex;align-items:center;gap:16px;padding:20px;background:var(--bg-dark);border:1px solid var(--border);border-radius:8px;margin-bottom:24px">
-          <img src="img/jake.jpg" alt="Jake Nesler" style="width:56px;height:56px;border-radius:50%;object-fit:cover;border:2px solid var(--border)">
+          <img src="img/jake.jpg" alt="Jake Nesler" width="56" height="56" loading="lazy" decoding="async" style="width:56px;height:56px;border-radius:50%;object-fit:cover;border:2px solid var(--border)">
           <div style="flex:1">
             <div style="font-size:15px;font-weight:600;color:var(--text)">Jake Nesler</div>
             <div style="font-size:12px;color:var(--ink-muted);margin-top:2px">Creator</div>
@@ -1042,7 +1048,7 @@
 
           <!-- AnyRentCloud -->
           <a href="https://anyrentcloud.com" target="_blank" rel="noopener" style="display:flex;align-items:center;gap:16px;padding:20px;background:var(--bg-dark);border:1px solid var(--border);border-radius:8px;text-decoration:none;margin-bottom:12px;transition:border-color 0.2s,transform 0.15s" onmouseover="this.style.borderColor='#22c55e';this.style.transform='translateY(-1px)'" onmouseout="this.style.borderColor='var(--border)';this.style.transform=''">
-            <img src="img/anyrentcloud.png" alt="AnyRentCloud" style="width:48px;height:48px;border-radius:12px;object-fit:contain;flex-shrink:0;background:#fff;padding:4px">
+            <img src="img/anyrentcloud.png" alt="AnyRentCloud" width="48" height="48" loading="lazy" decoding="async" style="width:48px;height:48px;border-radius:12px;object-fit:contain;flex-shrink:0;background:#fff;padding:4px">
             <div style="flex:1">
               <div style="font-size:16px;font-weight:600;color:var(--text)">AnyRentCloud</div>
               <div style="font-size:13px;color:var(--ink-muted);margin-top:2px">AI-powered property management platform. Automates tenant communication, maintenance tickets, lease management, and financials with agentic AI workers.</div>
@@ -1489,7 +1495,7 @@ function updateState(s) {
   _set('footer-model', (s.activeModel || '--').replace('claude-', '').split('-202')[0]);
   updatePhase(s.phase);
   updateButtons(s.running ? (s.paused ? 'paused' : 'started') : 'stopped');
-  if (s.recentTrades) s.recentTrades.forEach(t => addTradeCard(t));
+  if (s.recentTrades) applyTradeSnapshot(s.recentTrades, s.sandboxId);
 }
 
 function updateButtons(status) {
@@ -1542,7 +1548,11 @@ async function startAgent() {
   btn.textContent = 'Starting...'; btn.disabled = true;
   try {
     const sid = getEffectiveSandboxId();
-    if (!sid) { log('No sandbox selected', 'error'); return; }
+    if (!sid) {
+      showToast('Add a trading account in Accounts before starting the agent.', 'warning');
+      switchTab('accounts');
+      return;
+    }
     const r = await fetch('/api/sandboxes/' + encodeURIComponent(sid) + '/start', {method:'POST'});
     const d = await r.json();
     if (!d.ok && d.error) {
@@ -1556,8 +1566,10 @@ async function startAgent() {
   } catch (e) {
     const sid = getEffectiveSandboxId();
     if (sid) logToSandbox(sid, `<div class="log-entry error"><span class="time">${fmtTime()}</span>Start error: ${esc(e.message)}</div>`);
+    showToast('Start error: ' + e.message, 'error');
+  } finally {
+    btn.textContent = 'Start'; btn.disabled = false;
   }
-  btn.textContent = 'Start'; btn.disabled = false;
 }
 async function stopAgent() {
   const sid = getEffectiveSandboxId();
@@ -1837,15 +1849,70 @@ function clearPortfolioView(sid) {
 }
 
 // ── Trade feed ─────────────────────────────
-function addTradeCard(trade) {
+// Live `trade` events are each one genuine trade. `state.recentTrades` is instead
+// the server's newest-first snapshot of a sandbox's latest trades, re-sent on every
+// SSE (re)connect and dashboard refresh, so it is reconciled rather than appended:
+// a snapshot entry already shown (same sandbox and trade id) is skipped, anything
+// else was missed and is added. Trades from servers that predate trade ids fall
+// back to exact order fields + timestamp. The feed is ordered by trade time.
+const TRADE_FEED_MAX = 50;
+let tradeFeed = []; // newest first: { trade, sandboxId, key, ts, live }
+
+function _tradeRecord(trade, sandboxId, live, now) {
+  const key = trade.id != null
+    ? 'id:' + trade.id
+    : 'legacy:' + [trade.tool, trade.symbol, trade.side, trade.quantity, trade.price, trade.timestamp].map(v => v == null ? '' : String(v)).join('|');
+  const ts = Date.parse(trade.timestamp);
+  return { trade, sandboxId: sandboxId || null, key, ts: Number.isFinite(ts) ? ts : now, live };
+}
+
+function _sameTrade(a, b) {
+  return a.key === b.key && (!a.sandboxId || !b.sandboxId || a.sandboxId === b.sandboxId);
+}
+
+function mergeLiveTrade(feed, trade, now = Date.now()) {
+  const rec = _tradeRecord(trade, trade.sandboxId, true, now);
+  // A snapshot can land before the live event for the same trade; claim that card.
+  // Legacy keys can repeat, so each legacy card absorbs at most one live event.
+  const shown = feed.find(r => _sameTrade(r, rec) && (trade.id != null || !r.live));
+  if (shown) return feed.map(r => r === shown ? { ...r, live: true } : r);
+  return _sortTradeFeed([rec, ...feed]);
+}
+
+function mergeTradeSnapshot(feed, snapshot, sandboxId, now = Date.now()) {
+  const claimed = new Set();
+  const missed = [];
+  for (const t of snapshot || []) {
+    const rec = _tradeRecord(t, sandboxId, false, now);
+    const shown = feed.find(r => !claimed.has(r) && _sameTrade(r, rec));
+    if (shown) claimed.add(shown); else missed.push(rec);
+  }
+  return missed.length ? _sortTradeFeed([...feed, ...missed]) : feed;
+}
+
+function _sortTradeFeed(feed) {
+  return feed.slice().sort((a, b) => b.ts - a.ts).slice(0, TRADE_FEED_MAX);
+}
+
+function renderTradeFeed() {
   const feed = document.getElementById('trades-feed');
-  if(feed.querySelector('.no-data')) feed.innerHTML = '';
-  const card = document.createElement('div');
-  card.className = 'trade-card';
-  const t = trade.timestamp ? new Date(trade.timestamp).toLocaleTimeString('en-US',{hour12:false}) : '--';
-  card.innerHTML = '<div class="trade-header"><span class="trade-symbol">' + esc(trade.symbol||'??') + '</span><span class="trade-side ' + (trade.side||'') + '">' + esc(trade.side||'--') + '</span></div><div class="trade-details">' + esc(trade.tool||'') + (trade.quantity?' | Qty: '+trade.quantity:'') + (trade.price?' | $'+trade.price:'') + '</div><div class="trade-time">' + t + '</div>';
-  feed.insertBefore(card, feed.firstChild);
-  while(feed.children.length > 50) feed.removeChild(feed.lastChild);
+  if (!tradeFeed.length) return;
+  feed.innerHTML = tradeFeed.map(({ trade }) => {
+    const t = trade.timestamp ? new Date(trade.timestamp).toLocaleTimeString('en-US',{hour12:false}) : '--';
+    return '<div class="trade-card"><div class="trade-header"><span class="trade-symbol">' + esc(trade.symbol||'??') + '</span><span class="trade-side ' + (trade.side||'') + '">' + esc(trade.side||'--') + '</span></div><div class="trade-details">' + esc(trade.tool||'') + (trade.quantity?' | Qty: '+trade.quantity:'') + (trade.price?' | $'+trade.price:'') + '</div><div class="trade-time">' + t + '</div></div>';
+  }).join('');
+}
+
+function addTradeCard(trade) {
+  tradeFeed = mergeLiveTrade(tradeFeed, trade);
+  renderTradeFeed();
+}
+
+function applyTradeSnapshot(snapshot, sandboxId) {
+  const next = mergeTradeSnapshot(tradeFeed, snapshot, sandboxId);
+  if (next === tradeFeed) return;
+  tradeFeed = next;
+  renderTradeFeed();
 }
 
 // ── Render config panels ───────────────────
@@ -1982,6 +2049,8 @@ function renderSandboxTabs() {
   for (const [sid, t] of Object.entries(sandboxTerminals)) {
     t.el.style.display = sid === currentSid ? 'flex' : 'none';
   }
+  const empty = document.getElementById('terminal-empty');
+  if (empty) empty.style.display = !accounts.length && !sandboxTerminals[currentSid] ? '' : 'none';
 }
 
 function ensureManagerTerminal() {
@@ -2367,9 +2436,22 @@ function _agentCardControls(sandboxId, state) {
   return '<button class="btn sm primary" onclick="startSandbox(\'' + sandboxId + '\')">Start</button>';
 }
 
+// Unsaved identity-prompt text and open panels per agent. renderAgents() runs on
+// every health poll and config event, so these live outside the DOM it rebuilds.
+const agentPromptDrafts = new Map(); // agentId -> textarea text not yet saved
+const agentPromptOpen = new Set();
+const agentMoreOpen = new Set();
+
+function trackAgentPromptDraft(agentId, value) { agentPromptDrafts.set(agentId, value); }
+function trackAgentMore(agentId, open) { open ? agentMoreOpen.add(agentId) : agentMoreOpen.delete(agentId); }
+
 function renderAgents() {
   const el = document.getElementById('agents-list');
   if(!config.agents?.length) { el.innerHTML = '<div class="no-data">No agents configured</div>'; return; }
+  const focused = document.activeElement;
+  const focusedPrompt = focused?.id?.startsWith('agent-prompt-text-')
+    ? { id: focused.id, start: focused.selectionStart, end: focused.selectionEnd, scroll: focused.scrollTop }
+    : null;
   const currentSid = getEffectiveSandboxId();
   const currentAgentId = sandboxScoped.agent?.id || config.activeAgentId;
   const currentAcctName = (config.accounts || []).find(ac => 'sbx_' + ac.id === currentSid)?.name || 'current';
@@ -2454,7 +2536,7 @@ function renderAgents() {
       + '<button class="btn sm" onclick="editAgent(\'' + a.id + '\')">Edit</button>'
       + '</div>'
       // Secondary controls, tucked away so the primary state + actions stay scannable
-      + '<details class="agent-more" style="margin-top:10px">'
+      + '<details class="agent-more"' + (agentMoreOpen.has(a.id) ? ' open' : '') + ' ontoggle="trackAgentMore(\'' + a.id + '\', this.open)" style="margin-top:10px">'
       + '<summary style="cursor:pointer;font-size:10.5px;font-weight:700;text-transform:uppercase;letter-spacing:0.5px;color:var(--ink-muted);padding:4px 0;list-style:none">More options</summary>'
       + '<div style="padding-top:10px;display:flex;flex-direction:column;gap:12px">'
       + '<div class="form-group" style="margin-bottom:0"><label>Strategy</label><select onchange="assignStrategyToAgent(this.value, \'' + a.id + '\')"><option value="">None (use defaults)</option>' + stratOptions + '</select></div>'
@@ -2462,9 +2544,9 @@ function renderAgents() {
       + '<div>'
       + '<button class="btn sm" onclick="toggleAgentPrompt(\'' + a.id + '\')" style="font-size:10px;padding:4px 10px">Edit Identity</button>'
       + '<button class="btn sm" onclick="previewAgentPrompt(\'' + a.id + '\')" style="font-size:10px;padding:4px 10px;margin-left:4px">Preview Final Instructions</button>'
-      + '<div id="agent-prompt-' + a.id + '" style="display:none;margin-top:8px">'
+      + '<div id="agent-prompt-' + a.id + '" style="display:' + (agentPromptOpen.has(a.id) ? 'block' : 'none') + ';margin-top:8px">'
       + '<p style="font-size:11px;color:var(--ink-faint);margin-bottom:6px">Custom identity prompt. Defines how this agent thinks and behaves. Leave blank to use default. Strategy rules are appended separately.</p>'
-      + '<textarea id="agent-prompt-text-' + a.id + '" rows="10" style="width:100%;font-size:11px;font-family:monospace;background:var(--bg-dark);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:8px;resize:vertical" placeholder="Example: You are a conservative long-term investor focused on dividend stocks...">' + esc(a.customSystemPrompt || '') + '</textarea>'
+      + '<textarea id="agent-prompt-text-' + a.id + '" rows="10" oninput="trackAgentPromptDraft(\'' + a.id + '\', this.value)" style="width:100%;font-size:11px;font-family:monospace;background:var(--bg-dark);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:8px;resize:vertical" placeholder="Example: You are a conservative long-term investor focused on dividend stocks...">' + esc(agentPromptDrafts.has(a.id) ? agentPromptDrafts.get(a.id) : (a.customSystemPrompt || '')) + '</textarea>'
       + '<div style="display:flex;gap:6px;margin-top:6px;flex-wrap:wrap">'
       + '<button class="btn sm primary" onclick="saveAgentPrompt(\'' + a.id + '\')">Save</button>'
       + '<button class="btn sm" onclick="clearAgentPrompt(\'' + a.id + '\')">Reset to Default</button>'
@@ -2472,6 +2554,15 @@ function renderAgents() {
       + (a.id !== 'default' ? '<div><button class="btn sm danger" onclick="deleteAgent(\'' + a.id + '\')">Delete Agent</button></div>' : '')
       + '</div></details></div>';
   }).join('');
+
+  if (focusedPrompt) {
+    const ta = document.getElementById(focusedPrompt.id);
+    if (ta) {
+      ta.focus();
+      ta.setSelectionRange(focusedPrompt.start, focusedPrompt.end);
+      ta.scrollTop = focusedPrompt.scroll;
+    }
+  }
 }
 
 function renderStrategies() {
@@ -2569,6 +2660,7 @@ function toggleAgentPrompt(agentId) {
   if (!el) return;
   const showing = el.style.display !== 'none';
   el.style.display = showing ? 'none' : 'block';
+  showing ? agentPromptOpen.delete(agentId) : agentPromptOpen.add(agentId);
   if (!showing) {
     // Load current prompt into textarea
     const agent = (config.agents || []).find(a => a.id === agentId);
@@ -2583,16 +2675,21 @@ function toggleAgentPrompt(agentId) {
 async function saveAgentPrompt(agentId) {
   const textarea = document.getElementById('agent-prompt-text-' + agentId);
   if (!textarea) return;
-  const prompt = textarea.value.trim();
+  const draft = textarea.value;
+  const prompt = draft.trim();
   try {
-    await fetch('/api/agents/' + encodeURIComponent(agentId), {
+    const r = await fetch('/api/agents/' + encodeURIComponent(agentId), {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ 
-        customSystemPrompt: prompt, 
-        systemPromptTemplate: prompt ? 'custom' : 'default' 
+      body: JSON.stringify({
+        customSystemPrompt: prompt,
+        systemPromptTemplate: prompt ? 'custom' : 'default'
       }),
     });
+    // Keep the draft on failure so the re-render below cannot discard it.
+    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || 'HTTP ' + r.status);
+    // Text typed while the save was in flight is still unsaved.
+    if (agentPromptDrafts.get(agentId) === draft) agentPromptDrafts.delete(agentId);
     config = await fetch('/api/config').then(r => r.json());
     renderAll();
     logToSandbox(getEffectiveSandboxId(), '<div class="log-entry success"><span class="time">' + fmtTime() + '</span>Prompt saved for ' + esc(agentId) + '. Takes effect next beat.</div>');
@@ -2610,6 +2707,7 @@ async function previewAgentPrompt(agentId) {
     if (textarea && !textarea.value) {
       textarea.value = d.prompt || '';
       textarea.placeholder = 'Full system prompt shown. Edit and save to customize.';
+      if (textarea.value) trackAgentPromptDraft(agentId, textarea.value);
     }
     // Show in modal for viewing
     const modal = document.getElementById('modal-content');
@@ -2626,6 +2724,7 @@ async function clearAgentPrompt(agentId) {
   if (!confirm('Reset to the default system prompt template?')) return;
   const textarea = document.getElementById('agent-prompt-text-' + agentId);
   if (textarea) textarea.value = '';
+  agentPromptDrafts.delete(agentId);
   await fetch('/api/agents/' + encodeURIComponent(agentId), {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
