@@ -19,6 +19,7 @@ routes:
 sizing:
   profile: minimal
   replicas: 1                                    # MUST stay 1 — a trading agent is a singleton; 2 => double orders
+  updateStrategy: Recreate                       # stop the old writer before mounting its state in the new pod
   autoscale:
     enabled: false
 

@@ -14,7 +14,9 @@ test('MCP starts and lists tools without optional Gemini credentials', { timeout
     command: process.execPath,
     args: [fileURLToPath(new URL('../mcp-server.js', import.meta.url))],
     cwd: dir,
-    env: { PATH: process.env.PATH, GEMINI_API_KEY: '', GOOGLE_API_KEY: '', DATABASE_PATH: path.join(dir, 'test.db') },
+    env: { PATH: process.env.PATH, GEMINI_API_KEY: '', GOOGLE_API_KEY: '',
+      DOTENV_CONFIG_PATH: path.join(dir, '.env'), OPENPROPHET_DATA_DIR: path.join(dir, 'app-data'),
+      DATABASE_PATH: path.join(dir, 'test.db') },
     stderr: 'pipe',
   });
   t.after(async () => {
@@ -26,4 +28,6 @@ test('MCP starts and lists tools without optional Gemini credentials', { timeout
   const { tools } = await client.listTools();
   assert.ok(tools.some(tool => tool.name === 'aggregate_and_summarize_news'));
   assert.ok(tools.some(tool => tool.name === 'get_positions'));
+  assert.equal(fs.existsSync(path.join(dir, 'data')), false, 'does not write data in the client project');
+  assert.ok(fs.existsSync(path.join(dir, 'app-data', 'sandboxes', 'default', 'news_summaries')));
 });

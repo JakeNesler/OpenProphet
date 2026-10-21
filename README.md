@@ -191,7 +191,8 @@ OpenProphet
 
 ### Prerequisites
 
-- **Go 1.26+** — For the trading backend (built with Go 1.27.2)
+- **Go 1.27.3** — For the trading backend. Pinned by the `toolchain` line in `go.mod` and the Docker build image; any Go 1.26+ with the default `GOTOOLCHAIN=auto` downloads 1.27.3 automatically
+- **C toolchain (gcc or clang)** — The SQLite driver (`mattn/go-sqlite3`) uses cgo, so the Go build needs `CGO_ENABLED=1` (the default when a C compiler is on `PATH`). On Debian/Ubuntu: `sudo apt install build-essential`; on macOS: `xcode-select --install`
 - **Node.js 22.13+** — For the agent server and MCP tools (Node.js 24 LTS recommended)
 - **[OpenCode CLI](https://opencode.ai)** — The AI harness that drives the autonomous agent
 - **Alpaca account** — [alpaca.markets](https://alpaca.markets) (paper trading is free)
@@ -223,7 +224,10 @@ ALPACA_ENDPOINT=https://paper-api.alpaca.markets
 GEMINI_API_KEY=your_gemini_key        # AI news cleaning
 AGENT_AUTH_TOKEN=your_secret_token    # Protect dashboard API
 AGENT_PORT=3737                       # Dashboard port
+TRADING_BOT_PORT=4534                 # Go backend port
 ```
+
+The Go backend also accepts its canonical names `ALPACA_API_KEY`, `ALPACA_BASE_URL` and `PORT`/`SERVER_PORT`; when both are set, the canonical name wins over `ALPACA_PUBLIC_KEY`, `ALPACA_ENDPOINT` and `TRADING_BOT_PORT`. Trading defaults to paper: an explicit endpoint decides the mode, and without one only `ALPACA_PAPER=false` selects the live endpoint.
 
 ### 3. Install and Authenticate OpenCode
 
@@ -268,6 +272,8 @@ The example config registers the Prophet MCP tools server, which is all you need
 ```
 
 You can add any additional MCP servers you use (Playwright, Cartogopher, etc.) to your local `opencode.jsonc` -- it won't be committed.
+
+The Docker image never copies your local `opencode.jsonc` (it is excluded by `.dockerignore`); the build writes `/app/opencode.jsonc` from the tracked `opencode.example.jsonc`. To run the container with a custom config, mount it over `/app/opencode.jsonc`.
 
 #### How the Agent Uses OpenCode
 

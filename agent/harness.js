@@ -2,6 +2,7 @@
 // Uses claude CLI subprocess for auth (OAuth/API key handled by CLI)
 import { spawn, execSync } from 'child_process';
 import { EventEmitter } from 'events';
+import { randomUUID } from 'crypto';
 import fs from 'fs/promises';
 import path from 'path';
 import { renderToolMenu } from './tool-catalog.js';
@@ -154,9 +155,10 @@ export class AgentState extends EventEmitter {
   }
 
   addTrade(trade) {
-    this.recentTrades.unshift({ ...trade, timestamp: new Date().toISOString() });
+    const record = { ...trade, id: randomUUID(), timestamp: new Date().toISOString() };
+    this.recentTrades.unshift(record);
     if (this.recentTrades.length > 50) this.recentTrades.pop();
-    this.emit('trade', trade);
+    this.emit('trade', record);
   }
 
   toJSON() {

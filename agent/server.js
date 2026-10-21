@@ -5,11 +5,10 @@ import 'dotenv/config';
 import express from 'express';
 import http from 'http';
 import fs from 'fs/promises';
-import { existsSync, rmSync } from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { spawn, execSync } from 'child_process';
-import { randomBytes, timingSafeEqual } from 'crypto';
+import { randomBytes } from 'crypto';
 import axios from 'axios';
 import { AgentHarness, buildSystemPrompt } from './harness.js';
 import { checkForUpdates, securityNotices, formatUpdateNotices } from './update-check.js';
@@ -17,6 +16,9 @@ import ChatStore from './chat-store.js';
 import AgentOrchestrator from './orchestrator.js';
 import { alpacaTradingUrl, DEFAULT_AGENT_MODEL } from './defaults.js';
 import { migrateLegacyDataForAccount } from './data-migration.js';
+import {
+  createAuthMiddleware, ensureGoBinary as ensureLifecycleGoBinary, addAccountAndActivate,
+} from './server-lifecycle.js';
 import {
   loadConfig, getConfig, saveConfig,
   addAccount, removeAccount, setActiveAccount, setActiveSandbox, getActiveAccount, getAccountById,
@@ -71,26 +73,10 @@ app.use(express.json({ limit: '1mb' }));
 
 // ── Auth Middleware ────────────────────────────────────────────────
 // Token-based auth. Set AGENT_AUTH_TOKEN env var to enable.
-// Without it, server is open (for local dev). With it, all API routes require the token.
+// Without it, server is open (for local dev). With it, all API routes except /api/health
+// require the token.
 const AUTH_TOKEN = process.env.AGENT_AUTH_TOKEN || '';
-function authMiddleware(req, res, next) {
-  if (!AUTH_TOKEN) return next(); // no token configured = open access
-  // Allow health check unauthenticated
-  if (req.path === '/api/health') return next();
-  // Check Authorization header or query param
-  const header = req.headers.authorization;
-  const token = header?.startsWith('Bearer ') ? header.slice(7) : req.query.token;
-  if (tokenMatches(token, AUTH_TOKEN)) return next();
-  res.status(401).json({ error: 'Unauthorized. Set Authorization: Bearer <token> header.' });
-}
-// Constant-time compare so a LAN attacker can't recover the token byte-by-byte via timing.
-function tokenMatches(presented, expected) {
-  if (typeof presented !== 'string' || !expected) return false;
-  const a = Buffer.from(presented);
-  const b = Buffer.from(expected);
-  return a.length === b.length && timingSafeEqual(a, b);
-}
-app.use('/api', authMiddleware);
+app.use('/api', createAuthMiddleware(AUTH_TOKEN));
 
 // ── Go Backend Manager ─────────────────────────────────────────────
 // Manages the Go trading bot lifecycle, supports restarting with different Alpaca keys
@@ -99,19 +85,10 @@ let goReady = false;
 let goRebuildAttempted = false; // guard so a broken binary rebuilds once, not in a loop
 
 // Build the Go binary if it is missing, or if `force` (e.g. the committed binary was built
-// for another OS/arch and cannot exec on this machine). Returns the binary path or throws.
+// for another OS/arch and cannot exec on this machine). A failed rebuild keeps the existing
+// binary. Returns the binary path or throws.
 function ensureGoBinary(force = false) {
-  const binaryPath = path.join(PROJECT_ROOT, 'prophet_bot');
-  if (force || !existsSync(binaryPath)) {
-    console.log(force ? '  Rebuilding Go binary for this platform...' : '  Building Go binary...');
-    // `go build -o` refuses to overwrite an existing file it doesn't recognize as its own
-    // output (e.g. a wrong-arch or corrupt binary), so remove it first when rebuilding.
-    if (force && existsSync(binaryPath)) {
-      try { rmSync(binaryPath, { force: true }); } catch { /* fall through to build */ }
-    }
-    execSync('go build -o prophet_bot ./cmd/bot', { cwd: PROJECT_ROOT, timeout: 120000 });
-  }
-  return binaryPath;
+  return ensureLifecycleGoBinary({ projectRoot: PROJECT_ROOT, force });
 }
 
 // When the binary can't run (spawn error / immediate crash), rebuild it once and retry.
@@ -385,7 +362,7 @@ const EVENTS = [
 function bindHarnessEvents(activeHarness) {
   for (const evt of EVENTS) {
     activeHarness.state.on(evt, (data) => {
-      broadcast(evt, { ...data, sandboxId: activeHarness.sandboxId || getActiveSandbox()?.id || null, timestamp: new Date().toISOString() });
+      broadcast(evt, { ...data, sandboxId: activeHarness.sandboxId || getActiveSandbox()?.id || null, timestamp: data.timestamp || new Date().toISOString() });
     });
   }
 }
@@ -394,7 +371,7 @@ bindHarnessEvents(harness);
 bindOperationalHooks(harness);
 for (const evt of EVENTS) {
   orchestrator.on(evt, (data) => {
-    broadcast(evt, { ...data, timestamp: new Date().toISOString() });
+    broadcast(evt, { ...data, timestamp: data.timestamp || new Date().toISOString() });
   });
 }
 
@@ -1211,9 +1188,18 @@ app.get('/api/accounts', (req, res) => {
 
 app.post('/api/accounts', async (req, res) => {
   try {
-    const account = await addAccount(req.body);
+    const { account, activated } = await addAccountAndActivate(req.body, {
+      addAccount,
+      getActiveAccount,
+      // The first account becomes active: bind the harness and start its trading backend.
+      activate: async (active) => {
+        rebindHarness();
+        await migrateLegacyDataForAccount(active.id);
+        await startGoBackend(active);
+      },
+    });
     broadcast('config', safeConfig());
-    res.json({ ok: true, account: { ...account, secretKey: '****' } });
+    res.json({ ok: true, account: { ...account, secretKey: '****' }, activated });
   } catch (err) { res.status(400).json({ error: err.message }); }
 });
 
