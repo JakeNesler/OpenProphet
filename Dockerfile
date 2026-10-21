@@ -13,7 +13,7 @@ COPY . .
 RUN CGO_ENABLED=1 go build -ldflags='-s -w' -o prophet_bot ./cmd/bot
 
 # ── Stage 2: build Node deps (native: better-sqlite3, sharp/onnx) ──
-FROM node:24.21.0-bookworm AS nodedeps
+FROM node:24.22.0-bookworm AS nodedeps
 WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends python3 make g++ ca-certificates \
     && rm -rf /var/lib/apt/lists/*
@@ -21,7 +21,7 @@ COPY package.json package-lock.json ./
 RUN npm ci --omit=dev
 
 # ── Stage 3: runtime ──
-FROM node:24.21.0-bookworm
+FROM node:24.22.0-bookworm
 WORKDIR /app
 # The image has no .git, so the startup update check reads the commit from this env instead:
 #   docker build --build-arg OPENPROPHET_COMMIT=$(git rev-parse HEAD) .
