@@ -191,7 +191,7 @@ OpenProphet
 
 ### Prerequisites
 
-- **Go 1.27.2** — For the trading backend. Pinned by the `toolchain` line in `go.mod` and the Docker build image; any Go 1.26+ with the default `GOTOOLCHAIN=auto` downloads 1.27.2 automatically
+- **Go 1.27.3** — For the trading backend. Pinned by the `toolchain` line in `go.mod` and the Docker build image; any Go 1.26+ with the default `GOTOOLCHAIN=auto` downloads 1.27.3 automatically
 - **C toolchain (gcc or clang)** — The SQLite driver (`mattn/go-sqlite3`) uses cgo, so the Go build needs `CGO_ENABLED=1` (the default when a C compiler is on `PATH`). On Debian/Ubuntu: `sudo apt install build-essential`; on macOS: `xcode-select --install`
 - **Node.js 22.13+** — For the agent server and MCP tools (Node.js 24 LTS recommended)
 - **[OpenCode CLI](https://opencode.ai)** — The AI harness that drives the autonomous agent

@@ -2,7 +2,7 @@ module prophet-trader
 
 go 1.26.0
 
-toolchain go1.27.2
+toolchain go1.27.3
 
 require (
 	github.com/alpacahq/alpaca-trade-api-go/v3 v3.11.0
