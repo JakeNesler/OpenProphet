@@ -3,6 +3,11 @@
 ## Unreleased
 
 ### Fixed
+- **The agent could loosen its own guardrails.** `update_permissions` forwarded any field to
+  `/api/permissions`, so the agent, or text injected into its context, could turn off
+  `requireConfirmation`, set `maxOrderValue` to 0 or re-enable live trading, and its next order
+  went through. The tool now only tightens guardrails; a change that would loosen one is refused
+  with a message pointing to the dashboard, where the operator can still change anything.
 - **Appliance launcher: Docker access is checked before downloading.** `openprophet install`
   / `update` only ran `docker compose version` (which never touches the daemon), so a user
   outside the `docker` group downloaded the whole appliance archive and then failed with an

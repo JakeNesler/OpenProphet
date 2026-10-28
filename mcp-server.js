@@ -12,7 +12,7 @@ import axios from 'axios';
 import fs from 'fs/promises';
 import path from 'path';
 import { storeTrade, findSimilarTrades, getTradeStats, getEmbeddingCount } from './vectorDB.js';
-import { ORDER_TOOLS, checkPermissions } from './permissions.js';
+import { ORDER_TOOLS, checkPermissions, checkPermissionUpdate } from './permissions.js';
 
 // Configuration
 const TRADING_BOT_URL = process.env.TRADING_BOT_URL || 'http://127.0.0.1:4534';
@@ -1017,9 +1017,10 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: 'update_permissions',
-        description: 'Update agent trading permissions/guardrails. Use this when the user asks to change risk limits, enable/disable trading types, etc.',
+        description: 'Tighten agent trading permissions/guardrails, e.g. lower a risk limit, disable a trading type, or require confirmation. Loosening a guardrail is refused; only the operator can do that in the dashboard.',
         inputSchema: {
           type: 'object',
+          additionalProperties: false,
           properties: {
             allowLiveTrading: { type: 'boolean', description: 'Allow placing live orders' },
             allowOptions: { type: 'boolean', description: 'Allow options trading' },
@@ -1029,6 +1030,9 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             maxDeployedPct: { type: 'number', description: 'Max total deployed capital %' },
             maxDailyLoss: { type: 'number', description: 'Max daily loss % before auto-pause' },
             maxOpenPositions: { type: 'number', description: 'Max simultaneous positions' },
+            maxOrderValue: { type: 'number', description: 'Max value of a single order in dollars' },
+            requireConfirmation: { type: 'boolean', description: 'Require operator confirmation before orders' },
+            blockedTools: { type: 'array', items: { type: 'string' }, description: 'Tools the agent may not call (can only be extended)' },
           },
         },
       },
@@ -2127,6 +2131,9 @@ Worst Trade: ${stats.worst_result_pct.toFixed(1)}% ($${stats.worst_result_dollar
       }
 
       case 'update_permissions': {
+        // The agent may tighten its own guardrails but never loosen them (see checkPermissionUpdate).
+        const current = (await agentAxios.get(`${AGENT_URL}/api/permissions`, { timeout: 3000, params: AGENT_QUERY })).data;
+        checkPermissionUpdate(args, current);
         await agentAxios.put(`${AGENT_URL}/api/permissions`, {
           ...args,
           sandboxId: OPENPROPHET_SANDBOX_ID,

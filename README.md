@@ -420,7 +420,7 @@ untouched and listed in the workflow summary.
 | `update_strategy_rules` | Update trading strategy rules |
 | `get_agent_config` | Read current agent config and permissions |
 | `set_heartbeat` | Override heartbeat interval dynamically |
-| `update_permissions` | Modify permission guardrails |
+| `update_permissions` | Tighten permission guardrails (loosening is dashboard-only) |
 
 ### Utilities
 
