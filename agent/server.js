@@ -609,7 +609,7 @@ You help the user:
 
 **System**:
 - get_heartbeat_profiles, apply_heartbeat_profile, set_heartbeat: Heartbeat config
-- update_permissions: Update trading permissions/guardrails
+- update_permissions: Tighten trading permissions/guardrails (only the operator can loosen them)
 - get_datetime: Current time and market status
 
 ## How Agents and Strategies Work
