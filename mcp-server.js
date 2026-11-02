@@ -1017,9 +1017,10 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: 'update_permissions',
-        description: 'Update agent trading permissions/guardrails. Use this when the user asks to change risk limits, enable/disable trading types, etc.',
+        description: 'Tighten agent trading permissions/guardrails, e.g. lower a risk limit, disable a trading type, or require confirmation. Loosening a guardrail is refused; only the operator can do that in the dashboard.',
         inputSchema: {
           type: 'object',
+          additionalProperties: false,
           properties: {
             allowLiveTrading: { type: 'boolean', description: 'Allow placing live orders' },
             allowOptions: { type: 'boolean', description: 'Allow options trading' },
@@ -1029,6 +1030,9 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             maxDeployedPct: { type: 'number', description: 'Max total deployed capital %' },
             maxDailyLoss: { type: 'number', description: 'Max daily loss % before auto-pause' },
             maxOpenPositions: { type: 'number', description: 'Max simultaneous positions' },
+            maxOrderValue: { type: 'number', description: 'Max value of a single order in dollars' },
+            requireConfirmation: { type: 'boolean', description: 'Require operator confirmation before orders' },
+            blockedTools: { type: 'array', items: { type: 'string' }, description: 'Tools the agent may not call (can only be extended)' },
           },
         },
       },
@@ -2127,10 +2131,17 @@ Worst Trade: ${stats.worst_result_pct.toFixed(1)}% ($${stats.worst_result_dollar
       }
 
       case 'update_permissions': {
-        await agentAxios.put(`${AGENT_URL}/api/permissions`, {
-          ...args,
-          sandboxId: OPENPROPHET_SANDBOX_ID,
-        });
+        // The agent may tighten its own guardrails but never loosen them. The agent server checks
+        // and applies the change in one step (checkPermissionUpdate against the stored permissions),
+        // so a cap the operator lowers in the meantime cannot be overwritten.
+        try {
+          await agentAxios.put(`${AGENT_URL}/api/permissions/agent`, {
+            ...args,
+            sandboxId: OPENPROPHET_SANDBOX_ID,
+          });
+        } catch (err) {
+          throw new Error(err.response?.data?.error || err.message);
+        }
         return {
           content: [{ type: 'text', text: `Updated permissions: ${Object.keys(args).join(', ')}. Changes take effect immediately.` }],
         };

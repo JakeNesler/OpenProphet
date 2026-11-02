@@ -13,6 +13,34 @@ export function isOptionSymbol(symbol) {
   return typeof symbol === 'string' && OCC_SYMBOL.test(symbol);
 }
 
+// Guardrails the agent may only tighten through update_permissions. Loosening one (enabling a
+// trading type, dropping confirmation, raising or removing a cap, unblocking a tool) is left to
+// the operator in the dashboard: text in the agent's context can ask it to loosen its own rules,
+// and the agent cannot tell that text from the operator.
+const LOOSEN_IF_TRUE = ['allowLiveTrading', 'allowOptions', 'allowStocks', 'allow0DTE'];
+const CAPS = ['maxPositionPct', 'maxDeployedPct', 'maxDailyLoss', 'maxOpenPositions', 'maxOrderValue']; // 0 = no cap
+
+function tightensCap(value, current) {
+  return typeof value === 'number' && value > 0 && (!(current > 0) || value <= current);
+}
+
+// Throws an Error naming every field of `update` that would loosen `current` (or that the agent
+// may not edit at all); returns undefined if the update only tightens or repeats current values.
+export function checkPermissionUpdate(update = {}, current = {}) {
+  const refused = [];
+  for (const [field, value] of Object.entries(update)) {
+    if (JSON.stringify(value) === JSON.stringify(current[field])) continue;
+    if (LOOSEN_IF_TRUE.includes(field) && value === false) continue;
+    if (field === 'requireConfirmation' && value === true) continue;
+    if (CAPS.includes(field) && tightensCap(value, current[field])) continue;
+    if (field === 'blockedTools' && Array.isArray(value) && (current.blockedTools || []).every(t => value.includes(t))) continue;
+    refused.push(field);
+  }
+  if (refused.length) {
+    throw new Error(`Permission change refused for ${refused.join(', ')}: the agent can only tighten guardrails. Ask the operator to loosen them in the dashboard.`);
+  }
+}
+
 // Throws an Error describing the violation if the call is not permitted; returns undefined if allowed.
 // `now` is injectable so the 0DTE (same-day expiry) rule is deterministic in tests.
 // `args.estimated_price` is an optional quote the MCP server attaches to market orders so
