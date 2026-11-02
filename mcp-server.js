@@ -12,7 +12,7 @@ import axios from 'axios';
 import fs from 'fs/promises';
 import path from 'path';
 import { storeTrade, findSimilarTrades, getTradeStats, getEmbeddingCount } from './vectorDB.js';
-import { ORDER_TOOLS, checkPermissions, checkPermissionUpdate } from './permissions.js';
+import { ORDER_TOOLS, checkPermissions } from './permissions.js';
 
 // Configuration
 const TRADING_BOT_URL = process.env.TRADING_BOT_URL || 'http://127.0.0.1:4534';
@@ -2131,13 +2131,17 @@ Worst Trade: ${stats.worst_result_pct.toFixed(1)}% ($${stats.worst_result_dollar
       }
 
       case 'update_permissions': {
-        // The agent may tighten its own guardrails but never loosen them (see checkPermissionUpdate).
-        const current = (await agentAxios.get(`${AGENT_URL}/api/permissions`, { timeout: 3000, params: AGENT_QUERY })).data;
-        checkPermissionUpdate(args, current);
-        await agentAxios.put(`${AGENT_URL}/api/permissions`, {
-          ...args,
-          sandboxId: OPENPROPHET_SANDBOX_ID,
-        });
+        // The agent may tighten its own guardrails but never loosen them. The agent server checks
+        // and applies the change in one step (checkPermissionUpdate against the stored permissions),
+        // so a cap the operator lowers in the meantime cannot be overwritten.
+        try {
+          await agentAxios.put(`${AGENT_URL}/api/permissions/agent`, {
+            ...args,
+            sandboxId: OPENPROPHET_SANDBOX_ID,
+          });
+        } catch (err) {
+          throw new Error(err.response?.data?.error || err.message);
+        }
         return {
           content: [{ type: 'text', text: `Updated permissions: ${Object.keys(args).join(', ')}. Changes take effect immediately.` }],
         };

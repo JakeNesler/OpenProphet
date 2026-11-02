@@ -1413,6 +1413,18 @@ app.put('/api/permissions', async (req, res) => {
   } catch (err) { res.status(400).json({ error: err.message }); }
 });
 
+// Agent-requested changes (the MCP update_permissions tool): tighten only, checked and applied in
+// one step against the sandbox's current permissions. The route above stays the operator's path.
+app.put('/api/permissions/agent', async (req, res) => {
+  try {
+    const { sandboxId, ...permBody } = req.body || {};
+    if (!sandboxId) return res.status(400).json({ error: 'sandboxId is required' });
+    await updatePermissionsForSandbox(sandboxId, permBody, { tightenOnly: true });
+    broadcast('config', safeConfig());
+    res.json({ ok: true });
+  } catch (err) { res.status(400).json({ error: err.message }); }
+});
+
 // ── Plugins ────────────────────────────────────────────────────────
 app.get('/api/plugins', (req, res) => {
   const config = getConfig();
