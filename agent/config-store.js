@@ -6,6 +6,7 @@ import { fileURLToPath } from 'url';
 import crypto from 'crypto';
 import { execSync } from 'child_process';
 import { DEFAULT_AGENT_MODEL, alpacaTradingUrl } from './defaults.js';
+import { checkPermissionUpdate } from '../permissions.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const CONFIG_PATH = process.env.OPENPROPHET_CONFIG_PATH || path.join(__dirname, '..', 'data', 'agent-config.json');
@@ -1260,9 +1261,13 @@ export async function updatePermissions(perms) {
   await saveConfig();
 }
 
-export async function updatePermissionsForSandbox(sandboxId, perms) {
+// `tightenOnly` is for changes the agent requests: they are checked against the sandbox's stored
+// permissions with no await between the check and the merge, so an operator change that lands while
+// the agent's request is in flight is checked against, never overwritten with a looser value.
+export async function updatePermissionsForSandbox(sandboxId, perms, { tightenOnly = false } = {}) {
   const sandbox = getSandbox(sandboxId);
   if (!sandbox) throw new Error('Sandbox not found');
+  if (tightenOnly) checkPermissionUpdate(perms, sandbox.permissions || DEFAULT_PERMISSIONS);
   _config.sandboxes[sandboxId] = mergeSandbox({
     ...sandbox,
     permissions: { ...sandbox.permissions, ...perms },

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { checkPermissions, ORDER_TOOLS } from '../permissions.js';
+import { checkPermissions, checkPermissionUpdate, ORDER_TOOLS } from '../permissions.js';
 
 // Baseline: everything permitted. Individual tests override one field to prove each gate.
 const ALLOW_ALL = {
@@ -79,4 +79,19 @@ test('maxOrderValue fails closed on an unpriced market order, accepts a quote hi
 test('fully-permitted order passes', () => {
   assert.doesNotThrow(() => checkPermissions('place_buy_order', { symbol: 'AAPL', quantity: 1, limit_price: 100 }, ALLOW_ALL));
   assert.doesNotThrow(() => checkPermissions('place_options_order', { symbol: 'AAPL261220C00400000', quantity: 1, limit_price: 2 }, ALLOW_ALL));
+});
+
+test('update_permissions: the agent can tighten guardrails but not loosen them', () => {
+  const current = { ...ALLOW_ALL, allow0DTE: false, requireConfirmation: true, maxOrderValue: 1000, maxDailyLoss: 5, maxPositionPct: 0, blockedTools: ['place_options_order'] };
+  // dropping confirmation and removing the order cap in one call
+  assert.throws(() => checkPermissionUpdate({ requireConfirmation: false, maxOrderValue: 0 }, current), /refused for requireConfirmation, maxOrderValue/);
+  assert.throws(() => checkPermissionUpdate({ maxOrderValue: 5000 }, current), /refused for maxOrderValue/);
+  assert.throws(() => checkPermissionUpdate({ allow0DTE: true }, current), /refused for allow0DTE/);
+  assert.throws(() => checkPermissionUpdate({ blockedTools: [] }, current), /refused for blockedTools/);
+  assert.throws(() => checkPermissionUpdate({ maxToolRoundsPerBeat: 100 }, current), /refused for maxToolRoundsPerBeat/);
+  // tightening, adding a cap where none was set, and repeating current values all pass
+  assert.doesNotThrow(() => checkPermissionUpdate({ maxOrderValue: 500, allowLiveTrading: false, maxDailyLoss: 2 }, current));
+  assert.doesNotThrow(() => checkPermissionUpdate({ requireConfirmation: true, blockedTools: ['place_options_order', 'place_buy_order'] }, current));
+  assert.doesNotThrow(() => checkPermissionUpdate({ maxPositionPct: 10, allowOptions: true }, current));
+  assert.doesNotThrow(() => checkPermissionUpdate(undefined, current));
 });
