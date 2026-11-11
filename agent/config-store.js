@@ -103,7 +103,7 @@ const DEFAULT_AGENT_OVERRIDES = {
   strategyId: undefined,
   customStrategyRules: null,
   heartbeatOverrides: {},
-  sessionMode: 'continuous', // 'continuous' or 'fresh' - 'fresh' starts new session each beat
+  sessionMode: null, // Inherit the agent mode unless the account explicitly selects one.
 };
 
 function defaultAgents() {
@@ -991,6 +991,7 @@ export async function addAgent(agent) {
     customSystemPrompt: agent.customSystemPrompt || '',
     strategyId: agent.strategyId || null,
     model: agent.model || _config.activeModel,
+    sessionMode: agent.sessionMode || 'continuous',
     heartbeatOverrides: agent.heartbeatOverrides || {},
     createdAt: new Date().toISOString(),
   };
@@ -1069,6 +1070,7 @@ export function getResolvedAgentForSandbox(sandboxId) {
     ...(baseAgent || {}),
     id: sandbox.agent.activeAgentId,
     model: sandbox.agent?.model || baseAgent?.model || _config.activeModel,
+    sessionMode: overrides.sessionMode ?? baseAgent?.sessionMode ?? 'continuous',
     heartbeatOverrides: {
       ...(baseAgent?.heartbeatOverrides || {}),
       ...(overrides.heartbeatOverrides || {}),

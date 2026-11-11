@@ -933,27 +933,28 @@
           <div class="config-card">
             <div class="section-title" style="font-size:12px;margin-bottom:12px">Trading Controls</div>
             <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:16px">
-              <label style="text-transform:none;font-weight:400;font-size:13px"><input type="checkbox" id="perm-live" onchange="savePermissions()"> Allow Live Trading</label>
-              <label style="text-transform:none;font-weight:400;font-size:13px"><input type="checkbox" id="perm-options" onchange="savePermissions()"> Allow Options</label>
-              <label style="text-transform:none;font-weight:400;font-size:13px"><input type="checkbox" id="perm-stocks" onchange="savePermissions()"> Allow Stocks</label>
-              <label style="text-transform:none;font-weight:400;font-size:13px"><input type="checkbox" id="perm-0dte" onchange="savePermissions()"> Allow 0DTE</label>
-              <label style="text-transform:none;font-weight:400;font-size:13px"><input type="checkbox" id="perm-confirm" onchange="savePermissions()"> Require Confirmation</label>
+              <label style="text-transform:none;font-weight:400;font-size:13px"><input type="checkbox" id="perm-live" onchange="savePermissions(this)"> Allow Live Trading</label>
+              <label style="text-transform:none;font-weight:400;font-size:13px"><input type="checkbox" id="perm-options" onchange="savePermissions(this)"> Allow Options</label>
+              <label style="text-transform:none;font-weight:400;font-size:13px"><input type="checkbox" id="perm-stocks" onchange="savePermissions(this)"> Allow Stocks</label>
+              <label style="text-transform:none;font-weight:400;font-size:13px"><input type="checkbox" id="perm-0dte" onchange="savePermissions(this)"> Allow 0DTE</label>
+              <label style="text-transform:none;font-weight:400;font-size:13px"><input type="checkbox" id="perm-confirm" onchange="savePermissions(this)"> Require Confirmation</label>
             </div>
             <div class="section-title" style="font-size:12px;margin-bottom:12px">Risk Limits</div>
             <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
-              <div class="form-group"><label>Max Position Size (%)</label><input type="number" id="perm-maxpos" min="1" max="100" onchange="savePermissions()"></div>
-              <div class="form-group"><label>Max Deployed (%)</label><input type="number" id="perm-maxdeploy" min="1" max="100" onchange="savePermissions()"></div>
-              <div class="form-group"><label>Max Daily Loss (%)</label><input type="number" id="perm-maxloss" min="1" max="50" onchange="savePermissions()"></div>
-              <div class="form-group"><label>Max Open Positions</label><input type="number" id="perm-maxopen" min="1" max="50" onchange="savePermissions()"></div>
-              <div class="form-group"><label>Max Order Value ($)</label><input type="number" id="perm-maxorder" min="0" max="1000000" step="100" onchange="savePermissions()"><div class="form-hint">0 = unlimited</div></div>
-              <div class="form-group"><label>Max Tool Rounds/Beat</label><input type="number" id="perm-maxtools" min="5" max="100" onchange="savePermissions()"></div>
+              <div class="form-group"><label>Max Position Size (%)</label><input type="number" id="perm-maxpos" min="1" max="100" oninput="savePermissions(this)"></div>
+              <div class="form-group"><label>Max Deployed (%)</label><input type="number" id="perm-maxdeploy" min="1" max="100" oninput="savePermissions(this)"></div>
+              <div class="form-group"><label>Max Daily Loss (%)</label><input type="number" id="perm-maxloss" min="1" max="50" oninput="savePermissions(this)"></div>
+              <div class="form-group"><label>Max Open Positions</label><input type="number" id="perm-maxopen" min="1" max="50" oninput="savePermissions(this)"></div>
+              <div class="form-group"><label>Max Order Value ($)</label><input type="number" id="perm-maxorder" min="0" max="1000000" step="100" oninput="savePermissions(this)"><div class="form-hint">0 = unlimited</div></div>
+              <div class="form-group"><label>Max Tool Rounds/Beat</label><input type="number" id="perm-maxtools" min="5" max="100" oninput="savePermissions(this)"></div>
             </div>
             <div class="section-title" style="font-size:12px;margin-top:16px;margin-bottom:8px">Tool Access</div>
             <div class="form-group">
               <label>Blocked Tools (comma-separated)</label>
-              <input type="text" id="perm-blocked" placeholder="e.g. place_order, close_position" onchange="savePermissions()">
+              <input type="text" id="perm-blocked" placeholder="e.g. place_order, close_position" oninput="savePermissions(this)">
               <div class="form-hint">Leave empty to allow all tools. Block specific tools by name.</div>
             </div>
+            <div id="permissions-save-status" class="form-hint" role="status" aria-live="polite"></div>
           </div>
         </div>
 
@@ -1211,13 +1212,16 @@ async function refreshSelectedSandboxView() {
   renderHistorySandboxes();
 }
 
+let _sandboxConfigRequestId = 0;
 async function refreshSelectedSandboxConfig() {
   const sid = getEffectiveSandboxId();
   if (!sid || sid === '_manager') return;
+  const requestId = ++_sandboxConfigRequestId;
   try {
     const resp = await fetch('/api/sandboxes/' + encodeURIComponent(sid) + '/dashboard');
     if (!resp.ok) throw new Error('Dashboard fetch failed');
     const data = await resp.json();
+    if (sid !== getEffectiveSandboxId() || requestId !== _sandboxConfigRequestId) return;
     sandboxScoped = {
       sandbox: data.sandbox || null,
       agent: data.agent || null,
@@ -1997,6 +2001,7 @@ function ensureSandboxTerminal(sandboxId, label) {
           <div class="stat-row"><span class="stat-label">Trades</span><span class="stat-value" data-stat="${sandboxId}-trades">0</span></div>
           <div class="stat-row"><span class="stat-label">Errors</span><span class="stat-value" data-stat="${sandboxId}-errors">0</span></div>
         </div>
+        <div class="section" data-ai-usage="${esc(sandboxId.replace(/^sbx_/, ''))}">${renderAiUsage(sandboxId.replace(/^sbx_/, ''))}</div>
         <div class="section">
           <div class="section-title">Session</div>
           <select data-stat="${sandboxId}-session-mode" onchange="setSessionMode('${sandboxId}', this.value)" style="width:100%;padding:4px;font-size:11px;background:var(--bg-dark);color:var(--text);border:1px solid var(--border);border-radius:3px">
@@ -2039,6 +2044,10 @@ function renderSandboxTabs() {
     const label = a.name || (a.paper ? 'Paper' : 'Live');
     const beats = runtime?.state?.beatCount || 0;
     ensureSandboxTerminal(sandboxId, label);
+    const sandbox = config.sandboxes?.[sandboxId];
+    const template = (config.agents || []).find(agent => agent.id === sandbox?.agent?.activeAgentId);
+    const sessionMode = document.querySelector('[data-stat="' + sandboxId + '-session-mode"]');
+    if (sessionMode) sessionMode.value = runtime?.state?.sessionMode || sandbox?.agent?.overrides?.sessionMode || template?.sessionMode || 'continuous';
     const statusText = running ? 'Beat #' + beats : 'Stopped';
     return '<div class="sandbox-tab ' + (active ? 'active' : '') + '" onclick="switchSandboxTab(\'' + sandboxId + '\')"><span class="dot ' + dotClass + '"></span><span>' + esc(label) + '</span><span style="font-size:10px;color:var(--ink-faint);margin-left:2px">' + statusText + '</span></div>';
   }).join('');
@@ -2286,11 +2295,15 @@ async function overrideHb(sandboxId) {
 
 async function setSessionMode(sandboxId, mode) {
   try {
-    await fetch('/api/sandboxes/' + encodeURIComponent(sandboxId) + '/agent/overrides', {
+    const response = await fetch('/api/sandboxes/' + encodeURIComponent(sandboxId) + '/agent/overrides', {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ sessionMode: mode }),
     });
+    const result = await response.json();
+    if (!response.ok || result.error) throw new Error(result.error || 'Failed to save session mode');
+    config = await fetch('/api/config').then(r => r.json());
+    await checkHealth();
     logToSandbox(sandboxId, `<div class="log-entry success"><span class="time">${fmtTime()}</span>Session mode: ${mode}</div>`);
   } catch (e) {
     logToSandbox(sandboxId, `<div class="log-entry error"><span class="time">${fmtTime()}</span>Error: ${esc(e.message)}</div>`);
@@ -2762,6 +2775,49 @@ function getSandboxPort(sandboxId) {
   return 4534 + (hash % 10) + 1;
 }
 
+const aiUsageByAccount = new Map();
+let _aiUsagePending = null;
+
+function aiCostLabel(period) {
+  if (!period?.turns) return 'No usage';
+  if (period.billing === 'subscription') return 'Subscription';
+  if (Number.isFinite(period.costUsd)) return '$' + period.costUsd.toFixed(4);
+  return period.reportedUsd > 0 ? '$' + period.reportedUsd.toFixed(4) + '+' : 'Unavailable';
+}
+
+function renderAiUsage(accountId) {
+  const usage = aiUsageByAccount.get(accountId);
+  if (!usage) return '<div class="form-hint">AI usage: loading…</div>';
+  const age = Date.now() - Date.parse(usage.updatedAt);
+  if (!usage.available || !Number.isFinite(age) || age > 60000) return '<div class="form-hint">AI usage unavailable</div>';
+  const number = value => new Intl.NumberFormat('en-US', { notation: 'compact', maximumFractionDigits: 1 }).format(value || 0);
+  const note = usage.total.billing === 'subscription'
+    ? 'Subscription usage; dollar cost is not reported.'
+    : usage.total.unpricedTurns ? 'Some usage has no reported price; + excludes that usage.'
+    : 'Model-reported cost; subscription fees are excluded.';
+  return '<div class="section-title" style="font-size:11px;margin:10px 0 6px">AI usage</div>'
+    + '<div class="stat-row"><span class="stat-label">Cost today (ET)</span><span class="stat-value">' + aiCostLabel(usage.today) + '</span></div>'
+    + '<div class="stat-row"><span class="stat-label">Recorded cost</span><span class="stat-value">' + aiCostLabel(usage.total) + '</span></div>'
+    + '<div class="stat-row"><span class="stat-label">Tokens today</span><span class="stat-value" title="' + esc(String(usage.today.totalTokens)) + '">' + number(usage.today.totalTokens) + '</span></div>'
+    + '<div class="stat-row"><span class="stat-label">Recorded tokens</span><span class="stat-value" title="' + esc(String(usage.total.totalTokens)) + '">' + number(usage.total.totalTokens) + '</span></div>'
+    + '<div class="form-hint" style="overflow-wrap:anywhere;margin-top:6px">' + note + ' Usage covers completed, retained sessions.</div>';
+}
+
+async function refreshAiUsage() {
+  if (_aiUsagePending) return _aiUsagePending;
+  _aiUsagePending = Promise.all((config.accounts || []).map(async account => {
+    try {
+      const response = await fetch('/api/ai-usage?accountId=' + encodeURIComponent(account.id));
+      if (!response.ok) throw new Error('Usage unavailable');
+      const usage = await response.json();
+      if (usage?.accountId !== account.id || !usage.updatedAt) throw new Error('Invalid usage snapshot');
+      aiUsageByAccount.set(account.id, usage);
+    } catch { aiUsageByAccount.set(account.id, { available: false }); }
+    for (const el of document.querySelectorAll('[data-ai-usage="' + account.id + '"]')) el.innerHTML = renderAiUsage(account.id);
+  })).finally(() => { _aiUsagePending = null; });
+  return _aiUsagePending;
+}
+
 function renderAccounts() {
   const el = document.getElementById('accounts-grid');
   if (!config.accounts?.length) { 
@@ -2795,6 +2851,7 @@ function renderAccounts() {
       + '<div class="config-card-meta">Key: ' + (a.publicKey ? a.publicKey.substring(0, 8) + '...' : '??') + ' | ' + (a.baseUrl || '') + '</div>'
       + '<div class="config-card-meta">Port: ' + port + ' | Agent: ' + agentId + (goReady ? ' | Backend: ok' : '') + '</div>'
       + (running ? '<div class="config-card-desc">Phase: ' + phase + ' | Beats: ' + beatCount + '</div>' : '')
+      + '<div data-ai-usage="' + esc(a.id) + '" style="margin-top:8px">' + renderAiUsage(a.id) + '</div>'
       + '<div class="config-card-actions" style="display:flex;flex-wrap:wrap;gap:8px;margin-top:10px">'
       + '<button class="btn sm" onclick="switchSandboxTab(\'' + sandboxId + '\');switchTab(\'terminal\')">View</button>'
       + '<button class="btn sm" onclick="configureSandbox(\'' + sandboxId + '\')">Configure</button>'
@@ -3457,46 +3514,93 @@ function saveHeartbeat() {
 }
 
 // ── Permissions Config ─────────────────────
+const PERMISSION_FIELDS = {
+  'perm-live': ['allowLiveTrading', true],
+  'perm-options': ['allowOptions', true],
+  'perm-stocks': ['allowStocks', true],
+  'perm-0dte': ['allow0DTE', false],
+  'perm-confirm': ['requireConfirmation', false],
+  'perm-maxpos': ['maxPositionPct', 15],
+  'perm-maxdeploy': ['maxDeployedPct', 80],
+  'perm-maxloss': ['maxDailyLoss', 5],
+  'perm-maxopen': ['maxOpenPositions', 10],
+  'perm-maxorder': ['maxOrderValue', 0],
+  'perm-maxtools': ['maxToolRoundsPerBeat', 25],
+  'perm-blocked': ['blockedTools', []],
+};
+const _permissionEdits = new Map();
+
 function renderPermissions() {
   const p = sandboxScoped.permissions || config.permissions || {};
-  document.getElementById('perm-live').checked = p.allowLiveTrading !== false;
-  document.getElementById('perm-options').checked = p.allowOptions !== false;
-  document.getElementById('perm-stocks').checked = p.allowStocks !== false;
-  document.getElementById('perm-0dte').checked = !!p.allow0DTE;
-  document.getElementById('perm-confirm').checked = !!p.requireConfirmation;
-  document.getElementById('perm-maxpos').value = p.maxPositionPct || 15;
-  document.getElementById('perm-maxdeploy').value = p.maxDeployedPct || 80;
-  document.getElementById('perm-maxloss').value = p.maxDailyLoss || 5;
-  document.getElementById('perm-maxopen').value = p.maxOpenPositions || 10;
-  document.getElementById('perm-maxorder').value = p.maxOrderValue || 0;
-  document.getElementById('perm-maxtools').value = p.maxToolRoundsPerBeat || 25;
-  document.getElementById('perm-blocked').value = (p.blockedTools || []).join(', ');
+  const edits = _permissionEdits.get(getEffectiveSandboxId());
+  for (const [id, [key, fallback]] of Object.entries(PERMISSION_FIELDS)) {
+    const input = document.getElementById(id);
+    const draft = edits?.values.get(key);
+    const value = draft ? draft.raw : (p[key] ?? fallback);
+    if (input.type === 'checkbox') input.checked = value;
+    else {
+      const text = Array.isArray(value) ? value.join(', ') : String(value);
+      if (input.value !== text) input.value = text;
+    }
+  }
+  document.getElementById('permissions-save-status').textContent = edits?.message || '';
 }
 
-let _permTimer = null;
-function savePermissions() {
-  clearTimeout(_permTimer);
-  _permTimer = setTimeout(async () => {
-    const blocked = document.getElementById('perm-blocked').value.split(',').map(s => s.trim()).filter(Boolean);
-    const body = {
-      allowLiveTrading: document.getElementById('perm-live').checked,
-      allowOptions: document.getElementById('perm-options').checked,
-      allowStocks: document.getElementById('perm-stocks').checked,
-      allow0DTE: document.getElementById('perm-0dte').checked,
-      requireConfirmation: document.getElementById('perm-confirm').checked,
-      maxPositionPct: parseInt(document.getElementById('perm-maxpos').value) || 15,
-      maxDeployedPct: parseInt(document.getElementById('perm-maxdeploy').value) || 80,
-      maxDailyLoss: parseInt(document.getElementById('perm-maxloss').value) || 5,
-      maxOpenPositions: parseInt(document.getElementById('perm-maxopen').value) || 10,
-      maxOrderValue: parseInt(document.getElementById('perm-maxorder').value) || 0,
-      maxToolRoundsPerBeat: parseInt(document.getElementById('perm-maxtools').value) || 25,
-      blockedTools: blocked,
-    };
-    const sid = getEffectiveSandboxId();
-    if (sid) body.sandboxId = sid;
-    await fetch('/api/permissions', { method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) });
-    await refreshSelectedSandboxConfig();
-  }, 600);
+function savePermissions(input) {
+  const sid = getEffectiveSandboxId();
+  const field = PERMISSION_FIELDS[input.id];
+  if (!sid || sid === '_manager' || !field) return;
+  const edits = _permissionEdits.get(sid) || { values: new Map(), saving: false, timer: null };
+  const raw = input.type === 'checkbox' ? input.checked : input.value;
+  const valid = input.type !== 'number' || (raw.trim() !== '' && input.checkValidity());
+  const value = input.type === 'number' ? Number(raw)
+    : field[0] === 'blockedTools' ? raw.split(',').map(s => s.trim()).filter(Boolean) : raw;
+  edits.values.set(field[0], { raw, value, valid });
+  edits.message = valid ? 'Unsaved changes' : 'Enter a valid value to save this field.';
+  clearTimeout(edits.timer);
+  edits.timer = setTimeout(() => flushPermissionEdits(sid), 600);
+  _permissionEdits.set(sid, edits);
+  document.getElementById('permissions-save-status').textContent = edits.message;
+}
+
+async function flushPermissionEdits(sid) {
+  const edits = _permissionEdits.get(sid);
+  if (!edits || edits.saving) return;
+  const submitted = new Map([...edits.values].filter(([, draft]) => draft.valid));
+  if (!submitted.size) return;
+  const patch = Object.fromEntries([...submitted].map(([key, draft]) => [key, draft.value]));
+  edits.saving = true;
+  edits.message = 'Saving…';
+  if (sid === getEffectiveSandboxId()) renderPermissions();
+  try {
+    const response = await fetch('/api/permissions', {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sandboxId: sid, ...patch }),
+    });
+    const result = await response.json();
+    if (!response.ok || result.error) throw new Error(result.error || 'Save failed (HTTP ' + response.status + ')');
+    for (const [key, draft] of submitted) {
+      if (edits.values.get(key) === draft) edits.values.delete(key);
+    }
+    const sandbox = config.sandboxes?.[sid];
+    if (sandbox) sandbox.permissions = { ...sandbox.permissions, ...patch };
+    edits.message = edits.values.size ? 'Unsaved changes' : 'Saved';
+    if (sid === getEffectiveSandboxId()) {
+      ++_sandboxConfigRequestId;
+      sandboxScoped.permissions = { ...sandboxScoped.permissions, ...patch };
+      await refreshSelectedSandboxConfig();
+    }
+  } catch (error) {
+    edits.message = 'Could not save: ' + error.message;
+    showToast(edits.message, 'error');
+  } finally {
+    edits.saving = false;
+    if ([...edits.values].some(([key, draft]) => draft.valid && submitted.get(key) !== draft)) {
+      clearTimeout(edits.timer);
+      edits.timer = setTimeout(() => flushPermissionEdits(sid), 600);
+    }
+    if (sid === getEffectiveSandboxId()) renderPermissions();
+  }
 }
 
 // ── Slack Plugin Config ────────────────────
@@ -3694,9 +3798,10 @@ function startPolling() {
     setInterval(refreshPortfolio, 30000),
     setInterval(checkHealth, 15000),
     setInterval(checkAuth, 30000),
+    setInterval(refreshAiUsage, 15000),
   ];
   // Run immediately on start
-  updateClock(); refreshPortfolio(); checkHealth(); checkAuth(); loadUpdateStatus();
+  updateClock(); refreshPortfolio(); checkHealth(); checkAuth(); loadUpdateStatus(); refreshAiUsage();
 }
 
 // ── Update / security notices ──────────────

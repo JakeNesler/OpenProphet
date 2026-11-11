@@ -7,6 +7,7 @@ import fs from 'fs/promises';
 import path from 'path';
 import { renderToolMenu } from './tool-catalog.js';
 import { DEFAULT_AGENT_MODEL, DEFAULT_MAX_TOOL_ROUNDS, BEAT_TIMEOUT_MS, SIGKILL_GRACE_MS, BEAT_BACKOFF } from './defaults.js';
+import { getMarketSession, marketWeekday } from './market-session.js';
 
 // Default max tool rounds; overridden by permissions config at runtime
 
@@ -20,12 +21,11 @@ export const PHASE_DEFAULTS = {
   closed:       { seconds: 3600, label: 'Markets Closed', range: null },
 };
 
-export function getCurrentPhase() {
-  const now = new Date();
+export function getCurrentPhase(now = new Date()) {
   const et = now.toLocaleTimeString('en-US', { timeZone: 'America/New_York', hour: '2-digit', minute: '2-digit', hour12: false });
   const [h, m] = et.split(':').map(Number);
   const mins = h * 60 + m;
-  const weekday = now.getDay() >= 1 && now.getDay() <= 5;
+  const weekday = !['Sat', 'Sun'].includes(marketWeekday(now));
   if (!weekday) return 'closed';
   for (const [phase, cfg] of Object.entries(PHASE_DEFAULTS)) {
     if (cfg.range && mins >= cfg.range[0] && mins < cfg.range[1]) return phase;
@@ -117,13 +117,19 @@ Tune cadence with apply_heartbeat_profile ("active" | "passive" | "long_horizon"
 }
 
 // ── Check CLI auth ─────────────────────────────────────────────────
-export function checkCliAuth() {
-  // API key in env takes precedence — OpenCode picks it up automatically
-  if (process.env.ANTHROPIC_API_KEY) return true;
+export function checkCliAuth(model = DEFAULT_AGENT_MODEL, { env = process.env, exec = execSync } = {}) {
+  const provider = model.split('/')[0];
+  const providers = {
+    anthropic: { key: 'ANTHROPIC_API_KEY', label: 'Anthropic' },
+    openai: { key: 'OPENAI_API_KEY', label: 'OpenAI' },
+    opencode: { key: 'OPENCODE_API_KEY', label: 'OpenCode' },
+    'opencode-go': { key: 'OPENCODE_API_KEY', label: 'OpenCode Go' },
+  };
+  const selected = providers[provider];
+  if (selected && env[selected.key]) return true;
   try {
-    const out = execSync('opencode auth list 2>&1', { timeout: 5000, encoding: 'utf-8' });
-    // Look for Anthropic credential (oauth or env) in the output
-    return out.includes('Anthropic');
+    const out = exec('opencode auth list 2>&1', { timeout: 5000, encoding: 'utf-8', env });
+    return out.includes(selected?.label || provider);
   } catch {
     return false;
   }
@@ -144,6 +150,7 @@ export class AgentState extends EventEmitter {
     this.activeAgentId = null;
     this.activeAccountId = null;
     this.activeModel = null;
+    this.sessionMode = null;
     this.recentTrades = [];
     this.stats = {
       totalBeats: 0,
@@ -175,6 +182,7 @@ export class AgentState extends EventEmitter {
       activeAgentId: this.activeAgentId,
       activeAccountId: this.activeAccountId,
       activeModel: this.activeModel,
+      sessionMode: this.sessionMode,
       recentTrades: this.recentTrades.slice(0, 10),
       stats: this.stats,
     };
@@ -198,6 +206,7 @@ export class AgentHarness {
       opencodeEnv = {},
       checkCliAuthFn = checkCliAuth,
       getCurrentPhaseFn = getCurrentPhase,
+      getMarketSessionFn = getMarketSession,
     } = options;
 
     this.state = new AgentState();
@@ -214,6 +223,7 @@ export class AgentHarness {
     this.opencodeEnv = opencodeEnv;
     this.checkCliAuthFn = checkCliAuthFn;
     this.getCurrentPhaseFn = getCurrentPhaseFn;
+    this.getMarketSessionFn = getMarketSessionFn;
     this.systemPrompt = '';
     this._timer = null;
     this._beating = false;
@@ -273,12 +283,11 @@ export class AgentHarness {
   async start() {
     if (this.state.running) return;
 
-    // Check CLI auth
-    if (!this.checkCliAuthFn()) {
-      throw new Error('OpenCode not authenticated. Run "opencode auth login" or set ANTHROPIC_API_KEY in .env');
-    }
-
     await this.reloadConfig({ resetSession: true, silent: true });
+
+    if (!this.checkCliAuthFn(this.state.activeModel)) {
+      throw new Error(`OpenCode not authenticated for ${this.state.activeModel}. Run "opencode auth login" for that provider.`);
+    }
 
     this.state.running = true;
     this.state.paused = false;
@@ -314,6 +323,7 @@ export class AgentHarness {
     this.state.activeAgentId = this._agentConfig.id;
     this.state.activeAccountId = account?.id || this._sandboxConfig.accountId || null;
     this.state.activeModel = model;
+    this.state.sessionMode = this._agentConfig.sessionMode || 'continuous';
     this.systemPrompt = await buildSystemPrompt(this._agentConfig, {
       getStrategyById: this.getStrategyById,
     });
@@ -526,6 +536,7 @@ ${userBlock}`;
 
     this.state.emit('beat_end', { beat: beatNum, phase, isMessage: true });
     this._isMessageBeat = false;
+    if (this._agentConfig?.sessionMode === 'fresh') this._sessionId = null;
     this._beating = false;
   }
 
@@ -559,7 +570,11 @@ ${userBlock}`;
     if (!this.state.running) return;
     // Always clear any existing timer first to prevent dual timers
     if (this._timer) { clearTimeout(this._timer); this._timer = null; }
-    const seconds = this._getHeartbeatSeconds();
+    let seconds = this._getHeartbeatSeconds();
+    if (this._nextMarketOpen) {
+      const untilOpen = Math.ceil((Date.parse(this._nextMarketOpen) - Date.now()) / 1000);
+      if (untilOpen > 0) seconds = Math.min(seconds, untilOpen);
+    }
     this.state.heartbeatSeconds = seconds;
     this.state.nextBeatTime = new Date(Date.now() + seconds * 1000).toISOString();
     this.state.emit('schedule', { seconds, nextBeat: this.state.nextBeatTime, phase: this.state.phase });
@@ -580,6 +595,25 @@ ${userBlock}`;
     if (this._beating) return;
     this._beating = true;
 
+    const perms = this._resolvePermissions();
+    if (perms.regularMarketHoursOnly) {
+      try {
+        const session = await this.getMarketSessionFn(this._resolveAccount());
+        this._nextMarketOpen = session.isOpen ? null : session.nextOpen;
+        if (!session.isOpen) {
+          this.state.phase = 'closed';
+          this.state.emit('agent_log', { message: `Exchange closed; next open: ${session.nextOpen}.`, level: 'info' });
+          this._beating = false;
+          return;
+        }
+      } catch {
+        this.state.stats.errors++;
+        this.state.emit('agent_log', { message: 'Cannot verify the broker market clock; skipping this heartbeat.', level: 'error' });
+        this._beating = false;
+        return;
+      }
+    }
+
     const beatNum = ++this.state.beatCount;
     this.state.stats.totalBeats = beatNum;
     this.state.lastBeatTime = new Date().toISOString();
@@ -594,7 +628,6 @@ ${userBlock}`;
     });
 
     // Build permissions context for the prompt
-    const perms = this._resolvePermissions();
     const permLines = [];
     if (!perms.allowLiveTrading) permLines.push('READ-ONLY MODE: Do NOT place any orders. Analysis and monitoring only.');
     if (!perms.allowOptions) permLines.push('Options trading is DISABLED.');
@@ -654,6 +687,7 @@ ${userBlock}`;
    */
   _runClaude(prompt, model) {
     return new Promise((resolve, reject) => {
+      if (this._agentConfig?.sessionMode === 'fresh') this._sessionId = null;
       const sessionEpoch = this._sessionEpoch;
       // OpenCode model format: anthropic/claude-sonnet-4-6
       const ocModel = model?.includes('/') ? model : `anthropic/${model || 'claude-sonnet-4-6'}`;
@@ -825,7 +859,7 @@ ${userBlock}`;
     const beatNum = this.state.beatCount;
 
     // Capture session ID from any event
-    if (event.sessionID && !this._sessionId) {
+    if (event.sessionID) {
       ctx.setSession(event.sessionID);
     }
 
