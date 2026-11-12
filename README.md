@@ -500,9 +500,15 @@ Each account's dashboard shows recorded AI costs and token usage from its linked
 OpenCode sessions. OAuth subscription usage is labeled separately when dollar
 charges are unavailable. The authenticated `/api/ai-usage?accountId=...` endpoint
 returns only usage summaries, excluding prompts, responses, and credentials.
+Usage is read from `$XDG_DATA_HOME/opencode/opencode.db`, defaulting to
+`~/.local/share/opencode/opencode.db`, with billing metadata from the adjacent
+`auth.json`.
 
 Fresh session mode starts a new conversation for every heartbeat and direct
 message. Each new conversation still receives the saved strategy and permissions.
+An existing account's explicit session-mode override takes priority over its agent
+template, including Continuous overrides saved before upgrading. Select Fresh on
+that account to change its mode.
 
 All runtime config is stored in `data/agent-config.json`. The dashboard provides a UI for everything, but the structure is:
 

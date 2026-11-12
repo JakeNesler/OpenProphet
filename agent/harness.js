@@ -5,6 +5,7 @@ import { EventEmitter } from 'events';
 import { randomUUID } from 'crypto';
 import fs from 'fs/promises';
 import path from 'path';
+import { stripVTControlCharacters } from 'node:util';
 import { renderToolMenu } from './tool-catalog.js';
 import { DEFAULT_AGENT_MODEL, DEFAULT_MAX_TOOL_ROUNDS, BEAT_TIMEOUT_MS, SIGKILL_GRACE_MS, BEAT_BACKOFF } from './defaults.js';
 import { getMarketSession, marketWeekday } from './market-session.js';
@@ -117,8 +118,12 @@ Tune cadence with apply_heartbeat_profile ("active" | "passive" | "long_horizon"
 }
 
 // ── Check CLI auth ─────────────────────────────────────────────────
+function openCodeModel(model) {
+  return model?.includes('/') ? model : `anthropic/${model || 'claude-sonnet-4-6'}`;
+}
+
 export function checkCliAuth(model = DEFAULT_AGENT_MODEL, { env = process.env, exec = execSync } = {}) {
-  const provider = model.split('/')[0];
+  const provider = openCodeModel(model).split('/')[0];
   const providers = {
     anthropic: { key: 'ANTHROPIC_API_KEY', label: 'Anthropic' },
     openai: { key: 'OPENAI_API_KEY', label: 'OpenAI' },
@@ -126,10 +131,16 @@ export function checkCliAuth(model = DEFAULT_AGENT_MODEL, { env = process.env, e
     'opencode-go': { key: 'OPENCODE_API_KEY', label: 'OpenCode Go' },
   };
   const selected = providers[provider];
-  if (selected && env[selected.key]) return true;
+  // Custom and SDK-backed providers can use credentials this preflight cannot see.
+  // OpenCode validates those when it runs the selected model.
+  if (!selected || env[selected.key]) return true;
   try {
     const out = exec('opencode auth list 2>&1', { timeout: 5000, encoding: 'utf-8', env });
-    return out.includes(selected?.label || provider);
+    const normalize = value => value.toLowerCase().replace(/[^a-z0-9]/g, '');
+    return out.split(/\r?\n/).some(line => {
+      const label = stripVTControlCharacters(line).trim().split(/\s+/).slice(0, -1).join(' ');
+      return normalize(label) === normalize(selected.label);
+    });
   } catch {
     return false;
   }
@@ -571,6 +582,7 @@ ${userBlock}`;
     // Always clear any existing timer first to prevent dual timers
     if (this._timer) { clearTimeout(this._timer); this._timer = null; }
     let seconds = this._getHeartbeatSeconds();
+    if (!this._resolvePermissions().regularMarketHoursOnly) this._nextMarketOpen = null;
     if (this._nextMarketOpen) {
       const untilOpen = Math.ceil((Date.parse(this._nextMarketOpen) - Date.now()) / 1000);
       if (untilOpen > 0) seconds = Math.min(seconds, untilOpen);
@@ -690,7 +702,7 @@ ${userBlock}`;
       if (this._agentConfig?.sessionMode === 'fresh') this._sessionId = null;
       const sessionEpoch = this._sessionEpoch;
       // OpenCode model format: anthropic/claude-sonnet-4-6
-      const ocModel = model?.includes('/') ? model : `anthropic/${model || 'claude-sonnet-4-6'}`;
+      const ocModel = openCodeModel(model);
 
       // Check max tool rounds from permissions
       const perms = this._resolvePermissions();
@@ -762,7 +774,7 @@ ${userBlock}`;
             this._handleOpenCodeEvent(event, {
               addToolCall: () => toolCalls++,
               addText: (t) => { fullText += t; },
-              setSession: (id) => { sessionId = id; },
+              setSession: (id) => { sessionId ||= id; },
               addCost: (c) => { totalCost += c; },
               addTokens: (t) => { totalTokens += t; },
             });

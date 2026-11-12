@@ -14,9 +14,10 @@ function setup() {
   const elements = new Map();
   for (const match of html.matchAll(/<input\b[^>]*\bid="(perm-[^"]+)"[^>]*>/g)) {
     const tag = match[0];
+    const step = tag.match(/step="([^"]+)"/)?.[1];
     elements.set(match[1], {
       id: match[1], type: tag.match(/type="([^"]+)"/)[1], value: '', checked: false,
-      valid: true, checkValidity() { return this.valid; },
+      valid: true, checkValidity() { return this.valid && (!step || step === 'any' || Number(this.value) % Number(step) === 0); },
     });
   }
   elements.set('permissions-save-status', { textContent: '' });
@@ -76,6 +77,15 @@ test('a background refresh cannot replace 100% with the stored 5% before save', 
   assert.equal(ui.stored.a.maxPositionPct, 100);
   assert.equal(Number(ui.elements.get('perm-maxpos').value), 100);
   assert.deepEqual(ui.writes, [{ sandboxId: 'a', maxPositionPct: 100 }]);
+});
+
+test('order values between hundred-dollar increments are saved', async () => {
+  const ui = setup();
+  ui.edit('perm-maxorder', 1250.5);
+  await ui.flush();
+  assert.equal(ui.stored.a.maxOrderValue, 1250.5);
+  assert.equal(ui.writes.length, 1);
+  assert.equal(ui.writes[0].maxOrderValue, 1250.5);
 });
 
 test('switching accounts during the debounce saves only the original account', async () => {

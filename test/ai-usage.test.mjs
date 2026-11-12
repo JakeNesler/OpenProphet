@@ -4,6 +4,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import vm from 'node:vm';
+import { execFileSync } from 'node:child_process';
 import Database from 'better-sqlite3';
 import { createAiUsageReader, summarizeAiUsage } from '../agent/ai-usage.js';
 
@@ -90,6 +91,28 @@ test('reader recognizes OAuth billing from auth metadata without returning crede
   assert.equal(usage.total.costUsd, null);
   assert.doesNotMatch(JSON.stringify(usage), /PRIVATE_TEST_TOKEN/);
 });
+
+for (const useXdg of [false, true]) {
+  test(`default reader locates database and OAuth metadata via ${useXdg ? 'XDG_DATA_HOME' : 'HOME'}`, async t => {
+    const { dir, dbPath } = await fixture(t);
+    const home = path.join(dir, 'user-home');
+    const xdg = path.join(dir, 'xdg-data');
+    const dbDir = path.join(useXdg ? xdg : path.join(home, '.local', 'share'), 'opencode');
+    await fs.mkdir(dbDir, { recursive: true });
+    await fs.copyFile(dbPath, path.join(dbDir, 'opencode.db'));
+    await fs.writeFile(path.join(dbDir, 'auth.json'), JSON.stringify({ openai: { type: 'oauth', access: 'PRIVATE_TEST_TOKEN' } }));
+    const env = { ...process.env, HOME: home, XDG_DATA_HOME: useXdg ? xdg : '' };
+    delete env.OPENCODE_DB;
+    const moduleUrl = new URL('../agent/ai-usage.js', import.meta.url).href;
+    const source = `import { createAiUsageReader } from ${JSON.stringify(moduleUrl)}; console.log(JSON.stringify(await createAiUsageReader({ dataDir: ${JSON.stringify(dir)} }).get('a')));`;
+    const usage = JSON.parse(execFileSync(process.execPath, ['--input-type=module', '-e', source], { env, encoding: 'utf8' }));
+    assert.equal(usage.available, true);
+    assert.equal(usage.total.turns, 2);
+    assert.equal(usage.total.billing, 'subscription');
+    assert.equal(usage.total.costUsd, null);
+    assert.doesNotMatch(JSON.stringify(usage), /PRIVATE_TEST_TOKEN/);
+  });
+}
 
 test('missing usage database is unavailable and is never created by a read', async t => {
   const { dir } = await fixture(t);

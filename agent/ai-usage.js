@@ -1,6 +1,7 @@
 import Database from 'better-sqlite3';
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import os from 'node:os';
 
 const safeId = /^[A-Za-z0-9_-]{1,128}$/;
 const count = value => Number.isFinite(value) && value >= 0 ? value : 0;
@@ -52,7 +53,7 @@ export function summarizeAiUsage(rows, { now = new Date(), oauthProviders = new 
   return { available: true, updatedAt: now.toISOString(), timeZone: 'America/New_York', today, total };
 }
 
-export function createAiUsageReader({ dataDir, dbPath = path.join(process.env.XDG_DATA_HOME || path.join(dataDir, 'opencode-home'), 'opencode', 'opencode.db'), now = () => new Date(), cacheMs = 15000 }) {
+export function createAiUsageReader({ dataDir, dbPath = path.join(process.env.XDG_DATA_HOME || path.join(os.homedir(), '.local', 'share'), 'opencode', 'opencode.db'), now = () => new Date(), cacheMs = 15000 }) {
   const cache = new Map();
   return {
     async get(accountId) {

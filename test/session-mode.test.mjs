@@ -42,7 +42,7 @@ test('new agents preserve their mode; explicit account mode overrides the templa
   assert.equal(store.getResolvedAgentForSandbox(sandbox.id).sessionMode, 'continuous');
 });
 
-async function fakeCli(t, mode) {
+async function fakeCli(t, mode, emitChildEvents = false) {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'openprophet-fake-cli-'));
   const log = path.join(dir, 'calls.jsonl');
   const cli = `#!/usr/bin/env node
@@ -59,11 +59,12 @@ process.stdin.on('data', c => prompt += c);
 process.stdin.on('end', () => {
  fs.appendFileSync(file, JSON.stringify({ continued, hasSystemPrompt: prompt.includes('[SYSTEM INSTRUCTIONS') }) + '\\n');
  process.stdout.write(JSON.stringify({ type: 'text', sessionID: id, part: { text: 'Test response' } }) + '\\n');
+ if (process.env.SESSION_TEST_CHILD_EVENTS) process.stdout.write(JSON.stringify({ type: 'step_finish', sessionID: 'ses_child', part: {} }) + '\\n');
 });
 `;
   await fs.writeFile(path.join(dir, 'opencode'), cli, { mode: 0o755 });
   t.after(() => fs.rm(dir, { recursive: true, force: true }));
-  const harness = new AgentHarness({ getPermissions: () => ({}), opencodeEnv: { PATH: dir + path.delimiter + process.env.PATH, SESSION_TEST_LOG: log } });
+  const harness = new AgentHarness({ getPermissions: () => ({}), opencodeEnv: { PATH: dir + path.delimiter + process.env.PATH, SESSION_TEST_LOG: log, SESSION_TEST_CHILD_EVENTS: emitChildEvents ? '1' : '' } });
   harness._agentConfig = { sessionMode: mode };
   harness.systemPrompt = 'Test system prompt';
   return { harness, readCalls: async () => (await fs.readFile(log, 'utf8')).trim().split('\n').map(JSON.parse) };
@@ -86,6 +87,15 @@ test('Continuous runs resume the same session and still retain its ID for histor
   const second = await harness._runClaude('Test heartbeat two', 'openai/test');
   assert.equal(second.sessionId, first.sessionId);
   assert.deepEqual(await readCalls(), [{ continued: null, hasSystemPrompt: true }, { continued: first.sessionId, hasSystemPrompt: false }]);
+});
+
+test('later child-session events cannot replace the run session used for continuation', async t => {
+  const { harness } = await fakeCli(t, 'continuous', true);
+  const first = await harness._runClaude('Test heartbeat one', 'openai/test');
+  assert.equal(first.sessionId, 'ses_test_1');
+  harness._sessionId = first.sessionId;
+  const second = await harness._runClaude('Test heartbeat two', 'openai/test');
+  assert.equal(second.sessionId, first.sessionId);
 });
 
 test('consecutive Fresh heartbeats use distinct sessions and retain both in history', async t => {

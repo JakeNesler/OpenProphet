@@ -39,6 +39,16 @@ test('OpenAI OAuth satisfies the selected provider without Anthropic credentials
   assert.equal(checkCliAuth('openai/gpt-6.1-sol', { env: { OPENAI_API_KEY: 'test' }, exec: () => { throw new Error('should not run'); } }), true);
 });
 
+test('provider preflight handles legacy models, CLI formatting, and custom providers', () => {
+  const noExec = () => { throw new Error('CLI lookup should not be needed'); };
+  assert.equal(checkCliAuth('claude-sonnet-4-6', { env: { ANTHROPIC_API_KEY: 'test' }, exec: noExec }), true);
+  assert.equal(checkCliAuth('openai/test', { env: {}, exec: () => '\u001b[32m●\u001b[0m open ai oauth' }), true);
+  assert.equal(checkCliAuth('opencode/test', { env: {}, exec: () => '● OpenCode Go api' }), false);
+  for (const provider of ['google', 'openrouter', 'xai', 'custom-provider']) {
+    assert.equal(checkCliAuth(`${provider}/test`, { env: {}, exec: noExec }), true);
+  }
+});
+
 test('closed market skips the model and records the next opening; clock failure skips too', async () => {
   const harness = new AgentHarness({
     getPermissions: () => ({ regularMarketHoursOnly: true }),
@@ -55,4 +65,19 @@ test('closed market skips the model and records the next opening; clock failure 
   assert.equal(harness.state.stats.errors, 1);
   assert.equal(harness.state.beatCount, 0);
   assert.equal(harness._beating, false);
+});
+
+test('disabling market-hours gating clears its cached opening before rescheduling', t => {
+  let enabled = true;
+  const harness = new AgentHarness({ getPermissions: () => ({ regularMarketHoursOnly: enabled }) });
+  t.after(() => clearTimeout(harness._timer));
+  harness.state.running = true;
+  harness._getHeartbeatSeconds = () => 900;
+  harness._nextMarketOpen = new Date(Date.now() + 30000).toISOString();
+  harness._scheduleNext();
+  assert.ok(harness.state.heartbeatSeconds <= 30);
+  enabled = false;
+  harness._scheduleNext();
+  assert.equal(harness._nextMarketOpen, null);
+  assert.equal(harness.state.heartbeatSeconds, 900);
 });
