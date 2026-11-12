@@ -9,7 +9,9 @@ activity_logs
 decisive_actions
 *.log
 .env
+.env.*
 .env.example
+.mcp.json
 .claude
 test
 # Operator OpenCode config (gitignored, may hold personal MCP servers/keys); the image builds

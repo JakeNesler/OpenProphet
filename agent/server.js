@@ -11,11 +11,14 @@ import { spawn, execSync } from 'child_process';
 import { randomBytes } from 'crypto';
 import axios from 'axios';
 import { AgentHarness, buildSystemPrompt } from './harness.js';
+import { createAiUsageReader } from './ai-usage.js';
 import { checkForUpdates, securityNotices, formatUpdateNotices } from './update-check.js';
 import ChatStore from './chat-store.js';
 import AgentOrchestrator from './orchestrator.js';
 import { alpacaTradingUrl, DEFAULT_AGENT_MODEL } from './defaults.js';
 import { migrateLegacyDataForAccount } from './data-migration.js';
+import { getMarketSession } from './market-session.js';
+import { createTradingMetrics, metricsTokenMatches } from './metrics.js';
 import {
   createAuthMiddleware, ensureGoBinary as ensureLifecycleGoBinary, addAccountAndActivate,
 } from './server-lifecycle.js';
@@ -1139,6 +1142,14 @@ app.get('/api/agent/prompt-preview', async (req, res) => {
 });
 
 // Chat history
+const aiUsageReader = createAiUsageReader({ dataDir: path.join(PROJECT_ROOT, 'data') });
+app.get('/api/ai-usage', async (req, res) => {
+  const accountId = req.query.accountId || getActiveAccount()?.id;
+  if (!accountId || !getAccountById(accountId)) return res.status(404).json({ error: 'Account not found' });
+  try { res.json(await aiUsageReader.get(accountId)); }
+  catch { res.status(400).json({ error: 'Invalid account id' }); }
+});
+
 app.get('/api/chats', async (req, res) => {
   try {
     const accountId = req.query.accountId || getActiveAccount()?.id;
@@ -1605,6 +1616,38 @@ async function runStartupChecks() {
 }
 
 // ── Health ──────────────────────────────────────────────────────────
+app.get('/api/market-session', async (req, res) => {
+  try {
+    const sandbox = req.query.sandboxId ? getSandbox(req.query.sandboxId) : getActiveSandbox();
+    if (!sandbox) return res.status(404).json({ error: 'Sandbox not found' });
+    res.json(await getMarketSession(getAccountById(sandbox.accountId)));
+  } catch {
+    res.status(503).json({ error: 'Cannot verify broker market session' });
+  }
+});
+
+const tradingMetrics = createTradingMetrics({
+  getSandboxes,
+  getAccount: getAccountById,
+  getState: sandboxId => getHarnessForSandbox(sandboxId)?.state.toJSON(),
+});
+
+// Financial metrics use a separate scrape credential; never expose them anonymously.
+app.get('/metrics', async (req, res) => {
+  const token = process.env.OPENPROPHET_METRICS_TOKEN;
+  if (!token) return res.status(503).type('text/plain').send('Metrics are not configured\n');
+  const presented = req.headers.authorization?.startsWith('Bearer ') ? req.headers.authorization.slice(7) : null;
+  if (!metricsTokenMatches(presented, token)) {
+    return res.status(401).type('text/plain').send('Unauthorized\n');
+  }
+  try {
+    res.set('Cache-Control', 'no-store');
+    res.type('text/plain; version=0.0.4; charset=utf-8').send(await tradingMetrics.render());
+  } catch {
+    res.status(503).type('text/plain').send('Metrics unavailable\n');
+  }
+});
+
 app.get('/api/health', async (req, res) => {
   let botHealthy = false;
   try {
@@ -1683,4 +1726,7 @@ app.listen(PORT, HOST, () => {
   // Security posture + "are you behind upstream / any advisories" reminders. Never blocks boot.
   runStartupChecks().catch(err => console.warn(`  [update] startup checks failed: ${err.message}`));
   setInterval(() => runStartupChecks().catch(() => {}), 24 * 60 * 60 * 1000).unref();
+  if (process.env.OPENPROPHET_AUTOSTART === '1' && activeAccount?.paper && goReady) {
+    harness.start().catch(err => console.error(`  Agent autostart failed: ${err.message}`));
+  }
 });

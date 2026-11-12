@@ -1,8 +1,12 @@
 # Secrets (use .env.example as template)
 .env
+.env.*
+!.env.example
 .mcp.json
 .claude/settings.local.json
 opencode.jsonc
+opencode.json
+.opencode/
 
 # Runtime config (contains account secrets - use dashboard to configure)
 data/agent-config.json

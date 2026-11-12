@@ -1163,6 +1163,14 @@ async function enforcePermissions(toolName, args) {
 
   // Delegate the actual policy decision to the pure, unit-tested checker.
   checkPermissions(toolName, await withPriceHint(toolName, args, perms), perms);
+  if (ORDER_TOOLS.includes(toolName) && perms.regularMarketHoursOnly) {
+    try {
+      const response = await agentAxios.get(`${AGENT_URL}/api/market-session`, { timeout: 6000, params: AGENT_QUERY });
+      if (response.data.isOpen !== true) throw new Error('Exchange is closed');
+    } catch {
+      throw new Error('Order blocked: cannot verify an open weekday exchange session.');
+    }
+  }
 }
 
 // A market order carries no price, so maxOrderValue could not value it and silently passed.

@@ -191,7 +191,7 @@ OpenProphet
 
 ### Prerequisites
 
-- **Go 1.27.3** — For the trading backend. Pinned by the `toolchain` line in `go.mod` and the Docker build image; any Go 1.26+ with the default `GOTOOLCHAIN=auto` downloads 1.27.3 automatically
+- **Go 1.27.4** — For the trading backend. Pinned by the `go` line in `go.mod` and the Docker build image; any older Go (1.21+) with the default `GOTOOLCHAIN=auto` downloads 1.27.4 automatically
 - **C toolchain (gcc or clang)** — The SQLite driver (`mattn/go-sqlite3`) uses cgo, so the Go build needs `CGO_ENABLED=1` (the default when a C compiler is on `PATH`). On Debian/Ubuntu: `sudo apt install build-essential`; on macOS: `xcode-select --install`
 - **Node.js 22.13+** — For the agent server and MCP tools (Node.js 24 LTS recommended)
 - **[OpenCode CLI](https://opencode.ai)** — The AI harness that drives the autonomous agent
@@ -478,6 +478,37 @@ The agent server exposes 40 REST endpoints under `/api/`:
 ---
 
 ## Configuration
+
+Authenticate the selected model provider through OpenCode (`opencode auth login`)
+and keep its credential directory on private persistent storage. Set
+`regularMarketHoursOnly: true` in the sandbox permissions to check Alpaca's clock
+before model heartbeats and orders, including holidays and early closes. If the
+clock cannot be verified, the heartbeat or order is skipped.
+
+`OPENPROPHET_AUTOSTART=1` resumes the active paper agent after a server restart.
+Its configured heartbeat intervals and strategy rules still apply. Live accounts
+are excluded from this automatic startup.
+
+Set `OPENPROPHET_METRICS_TOKEN` to enable the bearer-authenticated `/metrics`
+endpoint for Prometheus. It exports account equity, equity change, exposure,
+positions, open orders, and agent health, labeled by sandbox, mode, and model.
+Equity change includes cash transfers; it is not realized trading profit. Broker
+credentials and account numbers are excluded. Configure the scrape token through
+your secret store, keeping credentials out of source and container build inputs.
+
+Each account's dashboard shows recorded AI costs and token usage from its linked
+OpenCode sessions. OAuth subscription usage is labeled separately when dollar
+charges are unavailable. The authenticated `/api/ai-usage?accountId=...` endpoint
+returns only usage summaries, excluding prompts, responses, and credentials.
+Usage is read from `$XDG_DATA_HOME/opencode/opencode.db`, defaulting to
+`~/.local/share/opencode/opencode.db`, with billing metadata from the adjacent
+`auth.json`.
+
+Fresh session mode starts a new conversation for every heartbeat and direct
+message. Each new conversation still receives the saved strategy and permissions.
+An existing account's explicit session-mode override takes priority over its agent
+template, including Continuous overrides saved before upgrading. Select Fresh on
+that account to change its mode.
 
 All runtime config is stored in `data/agent-config.json`. The dashboard provides a UI for everything, but the structure is:
 
