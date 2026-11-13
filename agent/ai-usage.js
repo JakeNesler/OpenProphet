@@ -56,6 +56,12 @@ export function summarizeAiUsage(rows, { now = new Date(), oauthProviders = new 
 export function createAiUsageReader({ dataDir, dbPath = path.join(process.env.XDG_DATA_HOME || path.join(os.homedir(), '.local', 'share'), 'opencode', 'opencode.db'), now = () => new Date(), cacheMs = 15000 }) {
   const cache = new Map();
   return {
+    async getProviderBilling(provider) {
+      try {
+        const auth = JSON.parse(await fs.readFile(path.join(path.dirname(dbPath), 'auth.json'), 'utf8'));
+        return auth[provider]?.type === 'oauth' ? 'subscription' : auth[provider]?.type === 'api' ? 'reported' : null;
+      } catch { return null; }
+    },
     async get(accountId) {
       if (!safeId.test(accountId)) throw new Error('Invalid account id');
       const cached = cache.get(accountId);

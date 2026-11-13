@@ -9,6 +9,8 @@ import { stripVTControlCharacters } from 'node:util';
 import { renderToolMenu } from './tool-catalog.js';
 import { DEFAULT_AGENT_MODEL, DEFAULT_MAX_TOOL_ROUNDS, BEAT_TIMEOUT_MS, SIGKILL_GRACE_MS, BEAT_BACKOFF } from './defaults.js';
 import { getMarketSession, marketWeekday } from './market-session.js';
+import { confirmedOrder } from './order-receipts.js';
+const processRunning = proc => proc && proc.exitCode == null && proc.signalCode == null;
 
 // Default max tool rounds; overridden by permissions config at runtime
 
@@ -214,10 +216,15 @@ export class AgentHarness {
       getHeartbeatForPhase = () => null,
       getPermissions = () => ({}),
       chatStore = null,
+      runStore = null,
+      getProviderBilling = async () => null,
       opencodeEnv = {},
       checkCliAuthFn = checkCliAuth,
       getCurrentPhaseFn = getCurrentPhase,
       getMarketSessionFn = getMarketSession,
+      spawnFn = spawn,
+      beatTimeoutMs = BEAT_TIMEOUT_MS,
+      sigkillGraceMs = SIGKILL_GRACE_MS,
     } = options;
 
     this.state = new AgentState();
@@ -231,10 +238,15 @@ export class AgentHarness {
     this.getHeartbeatForPhase = getHeartbeatForPhase;
     this.getPermissions = getPermissions;
     this.chatStore = chatStore;
+    this.runStore = runStore;
+    this.getProviderBilling = getProviderBilling;
     this.opencodeEnv = opencodeEnv;
     this.checkCliAuthFn = checkCliAuthFn;
     this.getCurrentPhaseFn = getCurrentPhaseFn;
     this.getMarketSessionFn = getMarketSessionFn;
+    this.spawnFn = spawnFn;
+    this.beatTimeoutMs = beatTimeoutMs;
+    this.sigkillGraceMs = sigkillGraceMs;
     this.systemPrompt = '';
     this._timer = null;
     this._beating = false;
@@ -271,6 +283,46 @@ export class AgentHarness {
     return this.getPermissions(this.sandboxId) || {};
   }
 
+  _newRun(kind) {
+    return {
+      id: randomUUID(), accountId: this.accountId || this._resolveAccount()?.id || this.state.activeAccountId,
+      sandboxId: this.sandboxId, kind, model: this.state.activeModel,
+      phase: this.getCurrentPhaseFn(), sessionMode: this._agentConfig?.sessionMode || 'continuous',
+      startedAt: new Date().toISOString(), _started: performance.now(), status: 'running', reason: 'running',
+    };
+  }
+
+  async _saveRun(run) {
+    if (!this.runStore || !run.accountId) return;
+    try {
+      const saved = await this.runStore.record(run.accountId, run);
+      this.state.emit('run_update', { accountId: run.accountId, run: saved });
+    } catch {
+      this.state.emit('agent_log', { message: 'Run history could not be saved.', level: 'error' });
+    }
+  }
+
+  async _finishRun(run, { result, status, reason } = {}) {
+    const usage = result?.usage;
+    let providerBilling;
+    if (usage) {
+      try { providerBilling = await this.getProviderBilling(openCodeModel(run.model).split('/')[0]); } catch { /* Unknown billing stays unpriced. */ }
+    }
+    const reportedUsd = usage?.reportedUsd || 0;
+    const subscription = providerBilling === 'subscription';
+    const priced = !subscription && usage?.costUsd != null && (providerBilling === 'reported' || usage.costUsd > 0);
+    const record = {
+      ...run, finishedAt: new Date().toISOString(), durationMs: Math.max(0, performance.now() - run._started),
+      status: status || (result?.interrupted ? 'interrupted' : run.kind === 'message' || result?.orders ? 'completed' : 'no_action'),
+      reason: reason || (result?.interrupted ? 'interrupted' : result?.orders ? 'order_confirmed' : run.kind === 'message' ? 'message_completed' : 'no_order_confirmation'),
+      sessionId: result?.sessionId, toolCalls: result?.toolCalls || 0, orders: result?.orders || 0,
+      tokens: usage?.tokens ?? null, costUsd: priced ? usage.costUsd : null, reportedUsd: subscription ? 0 : reportedUsd,
+      billing: subscription ? 'subscription' : priced ? 'reported' : reportedUsd > 0 ? 'partial' : 'unavailable',
+    };
+    await this._saveRun(record);
+    return { status: record.status, reason: record.reason, runId: record.id };
+  }
+
   async _persistSession(sessionId, metadata = {}) {
     if (!this.chatStore || !sessionId || !this.state.activeAccountId) return;
     await this.chatStore.startSession(this.state.activeAccountId, sessionId, {
@@ -297,6 +349,7 @@ export class AgentHarness {
     await this.reloadConfig({ resetSession: true, silent: true });
 
     if (!this.checkCliAuthFn(this.state.activeModel)) {
+      await this._finishRun(this._newRun('startup'), { status: 'failed', reason: 'auth_missing' });
       throw new Error(`OpenCode not authenticated for ${this.state.activeModel}. Run "opencode auth login" for that provider.`);
     }
 
@@ -359,17 +412,20 @@ export class AgentHarness {
     this._sessionId = null;
 
     const procToKill = this._proc;
-    if (procToKill && !procToKill.killed) {
-      procToKill.kill('SIGTERM');
+    if (procToKill) {
+      this._interrupted = true;
+      if (processRunning(procToKill)) procToKill.kill('SIGTERM');
       setTimeout(() => {
-        if (!procToKill.killed) procToKill.kill('SIGKILL');
-      }, 2000);
+        if (processRunning(procToKill)) procToKill.kill('SIGKILL');
+        procToKill.stdout?.destroy();
+        procToKill.stderr?.destroy();
+      }, 2000).unref();
     }
 
     await new Promise((resolve) => {
       const started = Date.now();
       const check = () => {
-        if (!this._beating && (!procToKill || procToKill.killed || this._proc !== procToKill)) return resolve();
+        if (!this._beating && (!processRunning(procToKill) || this._proc !== procToKill)) return resolve();
         if (Date.now() - started > 5000) return resolve();
         setTimeout(check, 100);
       };
@@ -444,13 +500,15 @@ export class AgentHarness {
       // Kill the running opencode subprocess — capture ref so the
       // SIGKILL fallback targets THIS process, not a future one.
       const procToKill = this._proc;
-      if (procToKill && !procToKill.killed) {
-        procToKill.kill('SIGTERM');
+      if (procToKill) {
+        if (processRunning(procToKill)) procToKill.kill('SIGTERM');
         setTimeout(() => {
-          if (!procToKill.killed) {
+          if (processRunning(procToKill)) {
             procToKill.kill('SIGKILL');
           }
-        }, 2000);
+          procToKill.stdout?.destroy();
+          procToKill.stderr?.destroy();
+        }, 2000).unref();
       }
 
       // Fire the follow-up beat asynchronously (don't await — return immediately)
@@ -495,6 +553,8 @@ export class AgentHarness {
     if (!this.state.running) return;
     if (this._beating) return;
     this._beating = true;
+    const run = this._newRun('message');
+    await this._saveRun(run);
 
     const beatNum = ++this.state.beatCount;
     this.state.stats.totalBeats = beatNum;
@@ -528,11 +588,10 @@ ${renderToolMenu()}
 
 ${userBlock}`;
 
+    let result, failure;
     try {
-      const result = await this._runClaude(prompt, model);
-      if (result.error) throw new Error(result.error);
+      result = await this._runClaude(prompt, model);
       // Text already streamed via _handleOpenCodeEvent agent_text events
-      if (result.toolCalls) this.state.stats.toolCalls += result.toolCalls;
       const effectiveSessionId = result.sessionEpoch === this._sessionEpoch ? result.sessionId : null;
       if (effectiveSessionId) this._sessionId = effectiveSessionId;
       await this._persistSession(effectiveSessionId, { mode: 'message' });
@@ -540,12 +599,15 @@ ${userBlock}`;
         ...allMessages.map(content => ({ role: 'user', kind: 'message', beat: beatNum, content })),
         { role: 'assistant', kind: 'message', beat: beatNum, toolCalls: result.toolCalls || 0, content: result.text || '' },
       ]);
+      if (result.error) throw Object.assign(new Error(result.error), { reason: result.reason });
     } catch (err) {
+      failure = err;
       this.state.stats.errors++;
       this.state.emit('agent_log', { message: `Message beat error: ${err.message}`, level: 'error' });
     }
 
-    this.state.emit('beat_end', { beat: beatNum, phase, isMessage: true });
+    const outcome = await this._finishRun(run, { result, ...(failure ? { status: 'failed', reason: failure.reason || result?.reason || 'run_failed' } : {}) });
+    this.state.emit('beat_end', { beat: beatNum, phase, isMessage: true, ...outcome });
     this._isMessageBeat = false;
     if (this._agentConfig?.sessionMode === 'fresh') this._sessionId = null;
     this._beating = false;
@@ -595,6 +657,7 @@ ${userBlock}`;
       if (!this.state.running) return;
       if (this.state.paused) {
         this.state.emit('agent_log', { message: 'Beat skipped (paused)', level: 'info' });
+        await this._finishRun(this._newRun('heartbeat'), { status: 'skipped', reason: 'paused' });
         this._scheduleNext();
         return;
       }
@@ -606,6 +669,8 @@ ${userBlock}`;
   async _beat() {
     if (this._beating) return;
     this._beating = true;
+    const run = this._newRun('heartbeat');
+    await this._saveRun(run);
 
     const perms = this._resolvePermissions();
     if (perms.regularMarketHoursOnly) {
@@ -614,13 +679,16 @@ ${userBlock}`;
         this._nextMarketOpen = session.isOpen ? null : session.nextOpen;
         if (!session.isOpen) {
           this.state.phase = 'closed';
+          run.phase = 'closed';
           this.state.emit('agent_log', { message: `Exchange closed; next open: ${session.nextOpen}.`, level: 'info' });
+          await this._finishRun(run, { status: 'skipped', reason: 'market_closed' });
           this._beating = false;
           return;
         }
       } catch {
         this.state.stats.errors++;
         this.state.emit('agent_log', { message: 'Cannot verify the broker market clock; skipping this heartbeat.', level: 'error' });
+        await this._finishRun(run, { status: 'skipped', reason: 'market_clock_unavailable' });
         this._beating = false;
         return;
       }
@@ -655,13 +723,10 @@ ${userBlock}`;
 
     const prompt = `[HEARTBEAT #${beatNum}] Phase: ${PHASE_DEFAULTS[phase].label}. Time: ${new Date().toLocaleString('en-US', { timeZone: 'America/New_York' })} ET. Current heartbeat interval: ${this.state.heartbeatSeconds}s.${permStr}\n\nPerform your duties for this phase.`;
 
+    let result, failure;
     try {
-      const result = await this._runClaude(prompt, model);
-      if (result.error) {
-        throw new Error(result.error);
-      }
+      result = await this._runClaude(prompt, model);
       // Text already streamed via _handleOpenCodeEvent agent_text events
-      if (result.toolCalls) this.state.stats.toolCalls += result.toolCalls;
 
       // Save session ID for continuation
       const effectiveSessionId = result.sessionEpoch === this._sessionEpoch ? result.sessionId : null;
@@ -670,10 +735,12 @@ ${userBlock}`;
       await this._persistMessages(effectiveSessionId, [
         { role: 'assistant', kind: 'heartbeat', beat: beatNum, phase, toolCalls: result.toolCalls || 0, content: result.text || '' },
       ]);
+      if (result.error) throw Object.assign(new Error(result.error), { reason: result.reason });
 
-      this._consecutiveErrors = 0; // clean beat clears any backoff
+      if (!result.interrupted) this._consecutiveErrors = 0; // clean beat clears any backoff
 
     } catch (err) {
+      failure = err;
       this.state.stats.errors++;
       this._consecutiveErrors++;
       this.state.emit('agent_log', { message: `Beat #${beatNum} error: ${err.message}`, level: 'error' });
@@ -683,7 +750,8 @@ ${userBlock}`;
       console.error(`Beat #${beatNum} error:`, err);
     }
 
-    this.state.emit('beat_end', { beat: beatNum, phase });
+    const outcome = await this._finishRun(run, { result, ...(failure ? { status: 'failed', reason: failure.reason || result?.reason || 'run_failed' } : {}) });
+    this.state.emit('beat_end', { beat: beatNum, phase, ...outcome });
     
     // Reset session if sessionMode is 'fresh' - start fresh each beat
     if (this._agentConfig?.sessionMode === 'fresh') {
@@ -733,7 +801,7 @@ ${userBlock}`;
         });
       }
 
-      const proc = spawn('opencode', args, {
+      const proc = this.spawnFn('opencode', args, {
         cwd: process.cwd(),
         env: {
           ...process.env,
@@ -761,25 +829,48 @@ ${userBlock}`;
       let buffer = '';
       let totalCost = 0;
       let totalTokens = 0;
+      let orders = 0;
+      let streamError = false;
+      let timedOut = false;
+      let killTimer = null;
+      let settled = false;
+      let finishSteps = 0, pricedSteps = 0, hasTokens = false;
+      const seen = new Set();
+      const context = {
+        addToolCall: () => toolCalls++,
+        addText: text => { fullText += text; },
+        setSession: id => { sessionId ||= id; },
+        addCost: cost => { totalCost += cost; },
+        addTokens: tokens => { totalTokens += tokens; },
+        addOrder: () => orders++,
+        addUsage: part => {
+          finishSteps++;
+          if (Number.isFinite(part.cost) && part.cost >= 0) pricedSteps++;
+          const tokens = part.tokens;
+          if (tokens && [tokens.total, tokens.input, tokens.output, tokens.reasoning, tokens.cache?.read, tokens.cache?.write].some(value => Number.isFinite(value) && value >= 0)) hasTokens = true;
+        },
+      };
+      const consume = line => {
+        if (settled || !line.trim()) return;
+        let event;
+        try { event = JSON.parse(line); } catch { return; }
+        if (!event || typeof event !== 'object' || Array.isArray(event)) return;
+        if (event.type === 'error') streamError = true;
+        if (event.type === 'tool_use' && event.part?.state?.status && !['completed', 'error'].includes(event.part.state.status)) return;
+        if (event.part?.id && ['tool_use', 'step_finish'].includes(event.type)) {
+          const key = event.type + ':' + event.part.id;
+          if (seen.has(key)) return;
+          seen.add(key);
+        }
+        this._handleOpenCodeEvent(event, context);
+      };
 
       proc.stdout.on('data', (chunk) => {
         buffer += chunk.toString();
         const lines = buffer.split('\n');
         buffer = lines.pop(); // keep incomplete line in buffer
 
-        for (const line of lines) {
-          if (!line.trim()) continue;
-          try {
-            const event = JSON.parse(line);
-            this._handleOpenCodeEvent(event, {
-              addToolCall: () => toolCalls++,
-              addText: (t) => { fullText += t; },
-              setSession: (id) => { sessionId ||= id; },
-              addCost: (c) => { totalCost += c; },
-              addTokens: (t) => { totalTokens += t; },
-            });
-          } catch { /* skip unparseable lines */ }
-        }
+        for (const line of lines) consume(line);
       });
 
       proc.stderr.on('data', (chunk) => {
@@ -790,31 +881,37 @@ ${userBlock}`;
       });
 
       proc.on('error', (err) => {
-        reject(new Error(`Failed to spawn opencode: ${err.message}`));
+        if (settled) return;
+        settled = true;
+        clearTimeout(beatTimer);
+        clearTimeout(killTimer);
+        if (this._proc === proc) this._proc = null;
+        if (this._beatTimeout === beatTimer) this._beatTimeout = null;
+        reject(Object.assign(new Error(`Failed to spawn opencode: ${err.message}`), { reason: 'spawn_failed' }));
       });
 
-      proc.on('exit', (code, signal) => {
+      // 'close' follows stdout/stderr drain; 'exit' can lose the final JSON event.
+      const finish = (code, signal) => {
+        if (settled) return;
         // Clear proc reference and cancel safety timeout
-        this._proc = null;
-        if (this._beatTimeout) { clearTimeout(this._beatTimeout); this._beatTimeout = null; }
+        if (this._proc === proc) this._proc = null;
+        clearTimeout(beatTimer);
+        clearTimeout(killTimer);
+        if (this._beatTimeout === beatTimer) this._beatTimeout = null;
 
         // Process remaining buffer
-        if (buffer.trim()) {
-          try {
-            const event = JSON.parse(buffer);
-            this._handleOpenCodeEvent(event, {
-              addToolCall: () => toolCalls++,
-              addText: (t) => { fullText += t; },
-              setSession: (id) => { sessionId = id; },
-              addCost: (c) => { totalCost += c; },
-              addTokens: (t) => { totalTokens += t; },
-            });
-          } catch {}
-        }
+        consume(buffer);
+        settled = true;
+        const usage = {
+          tokens: hasTokens ? totalTokens : null,
+          reportedUsd: totalCost,
+          costUsd: finishSteps && pricedSteps === finishSteps ? totalCost : null,
+        };
+        const result = { text: fullText, toolCalls, orders, sessionId, sessionEpoch, usage };
 
         if (totalCost > 0) {
           this.state.emit('agent_log', {
-            message: `Beat cost: $${totalCost.toFixed(4)} | Tokens: ${totalTokens}`,
+            message: `Provider-reported cost: $${totalCost.toFixed(4)} | Tokens: ${totalTokens}`,
             level: 'info',
           });
         }
@@ -825,38 +922,51 @@ ${userBlock}`;
             message: `Beat interrupted by user (collected ${fullText.length} chars, ${toolCalls} tools before interrupt)`,
             level: 'warning',
           });
-          resolve({ text: fullText, toolCalls, sessionId, interrupted: true, sessionEpoch });
+          resolve({ ...result, interrupted: true, reason: 'interrupted' });
           return;
         }
 
         this.state.emit('agent_log', {
           message: `opencode exited (code: ${code}, signal: ${signal}, text: ${fullText.length} chars, tools: ${toolCalls})`,
-          level: code === 0 ? 'info' : 'warning',
+          level: code === 0 && !streamError && !timedOut ? 'info' : 'warning',
         });
 
-        if (code !== 0 && code !== null && !fullText) {
-          resolve({ error: `opencode exited with code ${code} signal ${signal}`, text: fullText, toolCalls, sessionId, sessionEpoch });
-        } else if (signal && !fullText) {
-          resolve({ error: `opencode killed by ${signal}`, text: fullText, toolCalls, sessionId, sessionEpoch });
+        if (timedOut) {
+          resolve({ ...result, error: 'OpenCode run timed out', reason: 'timeout' });
+        } else if (code !== 0 && code !== null) {
+          resolve({ ...result, error: `opencode exited with code ${code} signal ${signal}`, reason: 'cli_exit' });
+        } else if (signal) {
+          resolve({ ...result, error: `opencode killed by ${signal}`, reason: 'cli_signal' });
+        } else if (streamError) {
+          resolve({ ...result, error: 'OpenCode reported a provider error', reason: 'provider_error' });
         } else {
-          resolve({ text: fullText, toolCalls, sessionId, sessionEpoch });
+          resolve(result);
         }
-      });
+      };
+      proc.on('close', finish);
 
       // Safety timeout - 5 minutes max per beat
-      this._beatTimeout = setTimeout(() => {
-        if (proc && !proc.killed) {
-          this.state.emit('agent_log', { message: 'Beat timed out (5 min max), killing process.', level: 'warning' });
+      const beatTimer = setTimeout(() => {
+        timedOut = true;
+        this.state.emit('agent_log', { message: 'Beat exceeded its timeout; terminating the model process.', level: 'warning' });
+        const discardPipes = () => {
+          proc.stdout.destroy();
+          proc.stderr.destroy();
+          finish(proc.exitCode, proc.signalCode);
+        };
+        if (proc.exitCode === null && proc.signalCode === null) {
           proc.kill('SIGTERM');
           // Escalate to SIGKILL if the process ignores SIGTERM (otherwise the beat hangs forever).
-          setTimeout(() => {
-            if (proc && !proc.killed) {
+          killTimer = setTimeout(() => {
+            if (proc.exitCode === null && proc.signalCode === null) {
               this.state.emit('agent_log', { message: 'Process ignored SIGTERM after timeout — sending SIGKILL.', level: 'error' });
               proc.kill('SIGKILL');
             }
-          }, SIGKILL_GRACE_MS);
-        }
-      }, BEAT_TIMEOUT_MS);
+            discardPipes();
+          }, this.sigkillGraceMs);
+        } else discardPipes();
+      }, this.beatTimeoutMs);
+      this._beatTimeout = beatTimer;
     });
   }
 
@@ -887,10 +997,9 @@ ${userBlock}`;
 
       case 'tool_use': {
         const part = event.part || {};
-        const toolName = (part.tool || '??').replace('prophet_', ''); // strip MCP prefix for display
+        const toolName = String(part.tool || '??').replace('prophet_', ''); // strip MCP prefix for display
         const toolInput = part.state?.input || {};
         const toolOutput = part.state?.output || '';
-        const fullToolName = part.tool || toolName;
 
         ctx.addToolCall();
         this.state.stats.toolCalls++;
@@ -902,25 +1011,25 @@ ${userBlock}`;
         const resultStr = typeof toolOutput === 'string' ? toolOutput : JSON.stringify(toolOutput);
         this.state.emit('tool_result', { name: toolName, result: resultStr.substring(0, 500), beat: beatNum });
 
-        // Track trades
-        if (fullToolName.includes('buy') || fullToolName.includes('sell') || fullToolName.includes('order') || fullToolName.includes('managed')) {
+        const order = confirmedOrder(toolName, toolInput, toolOutput, part.state);
+        if (order) {
           this.state.stats.trades++;
-          this.state.addTrade({
-            type: 'order',
-            tool: toolName,
-            symbol: toolInput.symbol || '??',
-            side: toolInput.side || (fullToolName.includes('buy') ? 'buy' : 'sell'),
-            quantity: toolInput.quantity || toolInput.qty,
-            price: toolInput.limit_price,
-          });
+          ctx.addOrder?.();
+          this.state.addTrade(order);
         }
         break;
       }
 
       case 'step_finish': {
         const part = event.part || {};
-        if (part.cost) ctx.addCost(part.cost);
-        if (part.tokens?.total) ctx.addTokens(part.tokens.total);
+        ctx.addUsage?.(part);
+        if (Number.isFinite(part.cost) && part.cost >= 0) ctx.addCost(part.cost);
+        if (part.tokens && typeof part.tokens === 'object') {
+          const count = value => Number.isFinite(value) && value >= 0 ? value : 0;
+          const tokens = part.tokens;
+          ctx.addTokens(Number.isFinite(tokens.total) && tokens.total >= 0 ? tokens.total
+            : count(tokens.input) + count(tokens.output) + count(tokens.cache?.read) + count(tokens.cache?.write));
+        }
         break;
       }
 

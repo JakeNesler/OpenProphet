@@ -34,7 +34,9 @@ test('financial scrape requires its own bearer token; disabled scrapes return 50
     });
     const url = `http://127.0.0.1:${port}/metrics`;
     let ready = false;
-    for (let attempt = 0; attempt < 100; attempt++) {
+    // Startup shares CPU with subprocess and cgo tests in the full suite.
+    for (let attempt = 0; attempt < 300; attempt++) {
+      assert.equal(child.exitCode, null, 'dashboard exited before readiness');
       try { await fetch(url); ready = true; break; } catch { await new Promise(resolve => setTimeout(resolve, 50)); }
     }
     assert.ok(ready, 'dashboard started');

@@ -24,7 +24,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = path.join(__dirname, '..');
 const HARNESS_EVENTS = [
   'status', 'agent_log', 'agent_text', 'beat_start', 'beat_end',
-  'tool_call', 'tool_result', 'heartbeat_change', 'schedule', 'trade',
+  'tool_call', 'tool_result', 'heartbeat_change', 'schedule', 'trade', 'run_update',
 ];
 
 function portOffsetForSandbox(sandboxId) {
@@ -42,6 +42,8 @@ export class AgentOrchestrator extends EventEmitter {
     this.agentUrl = options.agentUrl || process.env.AGENT_URL || 'http://127.0.0.1:3737';
     this.tradingBotBasePort = Number(options.tradingBotBasePort || process.env.TRADING_BOT_PORT || 4534);
     this.chatStore = options.chatStore || null;
+    this.runStore = options.runStore || null;
+    this.getProviderBilling = options.getProviderBilling;
     this.runtimes = new Map();
     this._binaryReady = false;
   }
@@ -100,6 +102,8 @@ export class AgentOrchestrator extends EventEmitter {
       getHeartbeatForPhase: getHeartbeatForSandboxPhase,
       getPermissions: getPermissionsForSandbox,
       chatStore: this.chatStore,
+      runStore: this.runStore,
+      getProviderBilling: this.getProviderBilling,
       opencodeEnv: {
         TRADING_BOT_URL: tradingBotUrl,
         TRADING_BOT_TOKEN: tradingBotToken,

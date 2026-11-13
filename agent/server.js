@@ -12,6 +12,7 @@ import { randomBytes } from 'crypto';
 import axios from 'axios';
 import { AgentHarness, buildSystemPrompt } from './harness.js';
 import { createAiUsageReader } from './ai-usage.js';
+import { RunStore, runHistoryHandler } from './run-store.js';
 import { checkForUpdates, securityNotices, formatUpdateNotices } from './update-check.js';
 import ChatStore from './chat-store.js';
 import AgentOrchestrator from './orchestrator.js';
@@ -271,8 +272,13 @@ if (initialActiveAccount?.id) {
 
 // ── Agent Instance ─────────────────────────────────────────────────
 const chatStore = new ChatStore();
+const aiUsageReader = createAiUsageReader({ dataDir: path.join(PROJECT_ROOT, 'data') });
+const runStore = new RunStore({ dbPath: process.env.OPENPROPHET_RUN_HISTORY_DB || path.join(PROJECT_ROOT, 'data', 'run-history.db') });
+const getProviderBilling = provider => aiUsageReader.getProviderBilling(provider);
 const orchestrator = new AgentOrchestrator({
   chatStore,
+  runStore,
+  getProviderBilling,
   agentUrl: `http://127.0.0.1:${PORT}`,
   tradingBotBasePort: Number(TRADING_BOT_PORT),
 });
@@ -294,6 +300,8 @@ function createHarnessForActiveSandbox() {
     getHeartbeatForPhase: getHeartbeatForSandboxPhase,
     getPermissions: getPermissionsForSandbox,
     chatStore,
+    runStore,
+    getProviderBilling,
     opencodeEnv: {
       TRADING_BOT_URL,
       TRADING_BOT_TOKEN,
@@ -359,7 +367,7 @@ function broadcast(event, data) {
 
 const EVENTS = [
   'status', 'agent_log', 'agent_text', 'beat_start', 'beat_end',
-  'tool_call', 'tool_result', 'heartbeat_change', 'schedule', 'trade',
+  'tool_call', 'tool_result', 'heartbeat_change', 'schedule', 'trade', 'run_update',
 ];
 
 function bindHarnessEvents(activeHarness) {
@@ -450,10 +458,12 @@ function bindOperationalHooks(targetHarness) {
     }
     const sideLower = (trade.side || '').toLowerCase();
     if (sideLower === 'buy' && slackEnabled('positionOpened', sandboxId)) {
-      notifySlack(`:new: *Position Opened*\n${trade.symbol || '??'} | ${trade.quantity || '?'} contracts${trade.price ? ' @ $' + trade.price : ''}`, sandboxId);
+      const outcome = trade.status === 'filled' ? 'Position Opened' : 'Buy Order Confirmed';
+      notifySlack(`:new: *${outcome}*\n${trade.symbol || '??'} | Qty: ${trade.quantity || '?'}${trade.price ? ' @ $' + trade.price : ''}`, sandboxId);
     }
     if (sideLower === 'sell' && slackEnabled('positionClosed', sandboxId)) {
-      notifySlack(`:checkered_flag: *Position Closed*\n${trade.symbol || '??'} | ${trade.quantity || '?'} contracts${trade.price ? ' @ $' + trade.price : ''}`, sandboxId);
+      const outcome = trade.status === 'filled' ? 'Position Closed' : 'Sell Order Confirmed';
+      notifySlack(`:checkered_flag: *${outcome}*\n${trade.symbol || '??'} | Qty: ${trade.quantity || '?'}${trade.price ? ' @ $' + trade.price : ''}`, sandboxId);
     }
   });
 
@@ -1142,7 +1152,7 @@ app.get('/api/agent/prompt-preview', async (req, res) => {
 });
 
 // Chat history
-const aiUsageReader = createAiUsageReader({ dataDir: path.join(PROJECT_ROOT, 'data') });
+app.get('/api/runs', runHistoryHandler({ runStore, getAccountById, getActiveAccount }));
 app.get('/api/ai-usage', async (req, res) => {
   const accountId = req.query.accountId || getActiveAccount()?.id;
   if (!accountId || !getAccountById(accountId)) return res.status(404).json({ error: 'Account not found' });
@@ -1708,6 +1718,7 @@ process.on('SIGTERM', async () => {
   await harness.stop();
   await orchestrator.shutdown();
   await stopGoBackend();
+  runStore.close();
   process.exit(0);
 });
 process.on('SIGINT', async () => {
@@ -1715,6 +1726,7 @@ process.on('SIGINT', async () => {
   await harness.stop();
   await orchestrator.shutdown();
   await stopGoBackend();
+  runStore.close();
   process.exit(0);
 });
 

@@ -504,6 +504,19 @@ Usage is read from `$XDG_DATA_HOME/opencode/opencode.db`, defaulting to
 `~/.local/share/opencode/opencode.db`, with billing metadata from the adjacent
 `auth.json`.
 
+History → Agent Runs shows the viewed account's latest 50 runs from the last
+30 days, including skipped, failed, interrupted, and no-order outcomes. Each run
+records its duration, tool calls, confirmed orders, tokens, and available AI cost;
+subscription usage remains unpriced. Runs are saved before the model starts, so
+an interrupted service can leave a visible unfinished record. Prompts, tool
+arguments, and raw provider errors are excluded from run records.
+
+The authenticated `/api/runs?accountId=...&limit=50` endpoint serves this history.
+Records are stored locally in `data/run-history.db`; set
+`OPENPROPHET_RUN_HISTORY_DB` to use another database path. Order activity counts
+broker-confirmed submissions, not fills. Read-only queries and failed submissions
+do not create order activity.
+
 Fresh session mode starts a new conversation for every heartbeat and direct
 message. Each new conversation still receives the saved strategy and permissions.
 An existing account's explicit session-mode override takes priority over its agent
