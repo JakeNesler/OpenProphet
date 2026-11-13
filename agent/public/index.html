@@ -683,6 +683,33 @@
     .notice-bar .notice-close { background: none; border: none; color: inherit; cursor: pointer; font-size: 14px; line-height: 1; padding: 0 2px; }
     [data-theme="dark"] .notice-bar { background: #2a2416; color: #e0c27a; border-bottom-color: #3a3222; }
     [data-theme="dark"] .notice-bar.info { background: #10131b; color: #9aa3b2; }
+    .run-history-head { display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap; }
+    .run-history-head .section-title { margin:0; }
+    .run-history-controls { display:grid; grid-template-columns:minmax(0,1fr) auto; align-items:end; gap:10px; width:min(100%,360px); }
+    .run-history-filter { display:grid; gap:4px; color:var(--ink-muted); font-size:11px; min-width:0; }
+    .run-history-filter select { width:100%; min-width:0; min-height:36px; }
+    .run-history-note { color:var(--ink-muted); font-size:12px; margin:10px 0; }
+    .run-history-list { list-style:none; padding:0; margin:0; }
+    .run-history-item { padding:16px 0; border-top:1px solid var(--border); min-width:0; }
+    .run-history-title { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+    .run-history-title time { color:var(--ink-muted); font-size:12px; }
+    .run-outcome { font-size:12px; font-weight:600; padding:3px 7px; border:1px solid currentColor; border-radius:4px; }
+    .run-outcome.failed { color:var(--error); }
+    .run-outcome.completed { color:var(--success); }
+    .run-outcome.skipped,.run-outcome.no_action,.run-outcome.interrupted { color:var(--ink-muted); }
+    .run-history-reason { margin:8px 0; font-size:14px; }
+    .run-history-model { color:var(--ink-muted); font-family:var(--font-mono,monospace); font-size:11px; overflow-wrap:anywhere; }
+    .run-history-meta { display:flex; flex-wrap:wrap; gap:10px 24px; margin:10px 0 0; }
+    .run-history-meta div { min-width:64px; }
+    .run-history-meta dt { color:var(--ink-muted); font-size:11px; }
+    .run-history-meta dd { margin:3px 0 0; font-size:13px; font-variant-numeric:tabular-nums; }
+    .run-history-refresh { min-height:36px; }
+    @media (max-width:600px) {
+      .run-history-refresh { min-height:44px; }
+      .run-history-filter select { min-height:44px; }
+      .run-history-meta { gap:12px 20px; }
+      .run-history-title { align-items:flex-start; }
+    }
   </style>
 </head>
 <body>
@@ -757,8 +784,8 @@
     <!-- Trades Panel -->
     <div class="panel" id="panel-trades">
       <div class="settings-content">
-        <h2>Live Trades</h2>
-        <p class="subtitle">Real-time order activity from the agent</p>
+        <h2>Order Activity</h2>
+        <p class="subtitle">Broker-confirmed orders; acceptance does not mean an order has filled.</p>
         <div id="trades-feed"><div class="no-data">No trades yet. Start the agent to see live activity.</div></div>
       </div>
     </div>
@@ -767,7 +794,19 @@
     <div class="panel" id="panel-history">
       <div class="settings-content">
         <h2>History</h2>
-        <p class="subtitle">Browse sandboxes and reopen old chat context</p>
+        <p class="subtitle">Run outcomes and saved conversations</p>
+        <div class="section">
+          <div class="run-history-head">
+            <div class="section-title" id="run-history-heading">Agent Runs</div>
+            <div class="run-history-controls">
+              <label class="run-history-filter">Account<select id="run-history-account" onchange="selectRunHistoryAccount(this.value)"></select></label>
+              <button type="button" class="btn sm run-history-refresh" id="run-history-refresh" onclick="refreshRunHistory()">Refresh runs</button>
+            </div>
+          </div>
+          <p class="run-history-note">Latest 50 runs for the selected account, from the last 30 days.</p>
+          <div id="run-history-status" role="status" aria-live="polite"></div>
+          <ol id="run-history-list" class="run-history-list" aria-labelledby="run-history-heading"></ol>
+        </div>
         <div class="section">
           <div class="section-title">Sandboxes</div>
           <div id="history-sandboxes"><div class="no-data">No sandbox data loaded yet.</div></div>
@@ -1200,10 +1239,15 @@ function switchTab(id) {
   document.querySelectorAll('.panel, .terminal-panel').forEach(p => p.classList.remove('active'));
   const panel = document.getElementById('panel-' + id);
   if (panel) panel.classList.add('active');
-  if (id === 'history' && !historyState.loaded) loadHistoryPanel();
+  if (id === 'history') {
+    if (!historyState.loaded) loadHistoryPanel();
+    else refreshRunHistory();
+  }
 }
 
 async function refreshSelectedSandboxView() {
+  runHistorySelectedAccount = null;
+  if (document.getElementById('panel-history').classList.contains('active')) refreshRunHistory();
   await Promise.all([
     refreshSelectedSandboxConfig(),
     refreshPortfolio(),
@@ -1394,9 +1438,15 @@ function connectSSE() {
   es.addEventListener('beat_end', e => {
     const d = JSON.parse(e.data);
     const sid = d.sandboxId || getEffectiveSandboxId();
-    logToSandbox(sid, `<div class="log-entry info"><span class="time">${fmtTime()}</span>Beat #${d.beat} complete</div>`);
-    log(formatSandboxPrefix(d) + 'Beat #' + d.beat + ' complete', 'info');
+    const outcome = d.status === 'failed' ? 'failed' : d.status === 'interrupted' ? 'interrupted' : d.status === 'no_action' ? 'completed without a confirmed order' : 'complete';
+    const level = d.status === 'failed' ? 'error' : d.status === 'interrupted' ? 'warning' : 'info';
+    logToSandbox(sid, `<div class="log-entry ${level}"><span class="time">${fmtTime()}</span>Beat #${d.beat} ${outcome}</div>`);
+    log(formatSandboxPrefix(d) + 'Beat #' + d.beat + ' ' + outcome, level);
     if (!d.sandboxId || d.sandboxId === getEffectiveSandboxId()) refreshPortfolio();
+  });
+  es.addEventListener('run_update', e => {
+    const data = JSON.parse(e.data);
+    if (data.accountId === runHistoryAccountId() && document.getElementById('panel-history').classList.contains('active')) refreshRunHistory(false);
   });
   es.addEventListener('tool_call', e => {
     const d = JSON.parse(e.data);
@@ -1624,6 +1674,90 @@ async function overrideHeartbeat() {
   document.getElementById('hb-override').value = '';
 }
 
+// ── Run history ────────────────────────────
+let runHistoryRequestId = 0;
+let runHistorySelectedAccount = null;
+function runHistoryAccountId() {
+  return runHistorySelectedAccount || getSelectedSandbox()?.accountId || null;
+}
+
+function selectRunHistoryAccount(value) {
+  runHistorySelectedAccount = value ? decodeURIComponent(value) : null;
+  return refreshRunHistory();
+}
+
+function renderRunHistoryAccounts() {
+  const select = document.getElementById('run-history-account');
+  if (!select) return;
+  const accounts = config.accounts || [];
+  const options = accounts.length ? accounts.map(account => '<option value="' + encodeURIComponent(account.id) + '">' + esc(account.name || account.id) + '</option>').join('') : '<option value="">No accounts</option>';
+  if (select.innerHTML !== options) select.innerHTML = options;
+  select.value = encodeURIComponent(runHistoryAccountId() || '');
+  select.disabled = !accounts.length;
+}
+
+function runCostLabel(run) {
+  if (run.billing === 'subscription') return 'Subscription';
+  const usd = amount => '$' + amount.toFixed(4);
+  if (run.costUsd != null && Number.isFinite(run.costUsd)) return usd(run.costUsd);
+  if (run.reportedUsd > 0) return usd(run.reportedUsd) + '+';
+  return run.status === 'skipped' || run.status === 'running' ? '—' : 'Unpriced';
+}
+
+function renderRunHistory(runs) {
+  const reasons = {
+    running: 'Awaiting a completion record.', order_confirmed: 'Broker confirmed an order submission.',
+    no_order_confirmation: 'Run completed without a confirmed order.', message_completed: 'Direct message completed.',
+    market_closed: 'Exchange was closed.', market_clock_unavailable: 'Could not verify the exchange clock.',
+    auth_missing: 'The selected model provider is not authenticated.', paused: 'Agent was paused.',
+    cli_exit: 'Model process exited with an error.', cli_signal: 'Model process ended unexpectedly.',
+    spawn_failed: 'Could not start the model process.', timeout: 'Model run exceeded its time limit.',
+    provider_error: 'The model provider reported an error.', interrupted: 'Run was interrupted.', run_failed: 'Run did not complete successfully.',
+  };
+  const outcomes = { running: 'Started', completed: 'Completed', no_action: 'No order', skipped: 'Skipped', failed: 'Failed', interrupted: 'Interrupted' };
+  document.getElementById('run-history-list').innerHTML = runs.map(run => {
+    const unfinished = run.status === 'running' && Date.now() - Date.parse(run.startedAt) > 365000;
+    const outcome = unfinished ? 'Unfinished' : outcomes[run.status] || 'Unknown';
+    const reason = unfinished ? 'No completion was recorded.' : reasons[run.reason] || 'Outcome unavailable.';
+    const duration = run.durationMs == null ? '—' : (run.durationMs / 1000).toFixed(1) + 's';
+    const tokens = run.tokens == null ? '—' : Number(run.tokens).toLocaleString();
+    const statusClass = Object.hasOwn(outcomes, run.status) ? run.status : 'unknown';
+    return '<li class="run-history-item"><div class="run-history-title"><span class="run-outcome ' + statusClass + '">' + outcome + '</span><time datetime="' + esc(run.startedAt) + '">' + esc(new Date(run.startedAt).toLocaleString()) + '</time></div>'
+      + '<p class="run-history-reason">' + esc(reason) + '</p><div class="run-history-model">' + esc(run.kind) + ' · ' + esc(run.model || 'No model') + ' · ' + esc(run.sessionMode) + '</div>'
+      + '<dl class="run-history-meta"><div><dt>Duration</dt><dd>' + esc(duration) + '</dd></div><div><dt>Tools</dt><dd>' + esc(String(run.toolCalls)) + '</dd></div><div><dt>Orders</dt><dd>' + esc(String(run.orders)) + '</dd></div><div><dt>Tokens</dt><dd>' + esc(tokens) + '</dd></div><div><dt>AI cost</dt><dd>' + esc(runCostLabel(run)) + '</dd></div></dl></li>';
+  }).join('');
+}
+
+async function refreshRunHistory(showLoading = true) {
+  const requestId = ++runHistoryRequestId;
+  const accountId = runHistoryAccountId();
+  renderRunHistoryAccounts();
+  const status = document.getElementById('run-history-status');
+  const list = document.getElementById('run-history-list');
+  document.getElementById('run-history-refresh').disabled = !accountId;
+  if (!accountId) {
+    list.innerHTML = '';
+    status.textContent = 'Select an account to view its runs.';
+    return;
+  }
+  if (showLoading) { list.innerHTML = ''; status.textContent = 'Loading runs…'; }
+  try {
+    const response = await fetch('/api/runs?accountId=' + encodeURIComponent(accountId) + '&limit=50');
+    if (!response.ok) throw new Error('Run history unavailable');
+    const data = await response.json();
+    if (requestId !== runHistoryRequestId || accountId !== runHistoryAccountId()) return;
+    if (data.accountId !== accountId || !Array.isArray(data.runs)) throw new Error('Unexpected account');
+    const runs = data.runs.filter(run => run.accountId === accountId);
+    renderRunHistory(runs);
+    status.textContent = runs.length ? '' : 'No runs recorded yet. The next heartbeat or direct message will appear here.';
+  } catch {
+    if (requestId !== runHistoryRequestId || accountId !== runHistoryAccountId()) return;
+    list.innerHTML = '';
+    status.textContent = 'Run history is unavailable. Use Refresh runs to try again.';
+  }
+}
+
+// ── Chat history ───────────────────────────
 async function loadHistoryPanel() {
   try {
     const [sandboxesResp, chatsResp] = await Promise.all([
@@ -1637,6 +1771,7 @@ async function loadHistoryPanel() {
     historyState.loaded = true;
     renderHistorySandboxes();
     renderHistorySessions();
+    await refreshRunHistory();
   } catch (e) {
     log('History load failed: ' + e.message, 'error');
   }
@@ -1998,7 +2133,7 @@ function ensureSandboxTerminal(sandboxId, label) {
           <div class="section-title">Stats</div>
           <div class="stat-row"><span class="stat-label">Beats</span><span class="stat-value" data-stat="${sandboxId}-beats">0</span></div>
           <div class="stat-row"><span class="stat-label">Tool Calls</span><span class="stat-value" data-stat="${sandboxId}-tools">0</span></div>
-          <div class="stat-row"><span class="stat-label">Trades</span><span class="stat-value" data-stat="${sandboxId}-trades">0</span></div>
+          <div class="stat-row"><span class="stat-label">Confirmed orders</span><span class="stat-value" data-stat="${sandboxId}-trades">0</span></div>
           <div class="stat-row"><span class="stat-label">Errors</span><span class="stat-value" data-stat="${sandboxId}-errors">0</span></div>
         </div>
         <div class="section" data-ai-usage="${esc(sandboxId.replace(/^sbx_/, ''))}">${renderAiUsage(sandboxId.replace(/^sbx_/, ''))}</div>
