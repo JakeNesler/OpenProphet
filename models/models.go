@@ -46,7 +46,7 @@ type DBBar struct {
 // DBPosition represents a position snapshot in the database
 type DBPosition struct {
 	gorm.Model
-	Symbol         string `gorm:"uniqueIndex"`
+	Symbol         string `gorm:"index"`
 	Qty            float64
 	AvgEntryPrice  float64
 	MarketValue    float64
