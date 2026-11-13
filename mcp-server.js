@@ -1885,19 +1885,32 @@ ${allNews.map((article, i) =>
             hour12: false,
           });
           const [hours, minutes] = etTime.split(':').map(Number);
+          // NYSE calendar checks use the New York date, not the caller's timezone
+          const nyDate = now.toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+
+          // NYSE early closes (1:00 PM ET regular session, 5:00 PM ET after-hours)
+          const marketEarlyCloses = [
+            '2025-07-03', '2025-11-28', '2025-12-24',
+            '2026-11-27', '2026-12-24',
+            '2027-11-26',
+          ];
+          const isEarlyClose = marketEarlyCloses.includes(nyDate);
+          const closeMinutes = isEarlyClose ? 780 : 960; // 1:00 PM or 4:00 PM
+          const afterHoursEnd = isEarlyClose ? 1020 : 1200; // 5:00 PM or 8:00 PM
+
           const marketMinutes = hours * 60 + minutes;
-          const marketOpen = marketMinutes >= 570 && marketMinutes < 960; // 9:30 AM to 4:00 PM
+          const marketOpen = marketMinutes >= 570 && marketMinutes < closeMinutes; // 9:30 AM to close
           const preMarket = marketMinutes >= 240 && marketMinutes < 570; // 4:00 AM to 9:30 AM
-          const afterHours = marketMinutes >= 960 && marketMinutes < 1200; // 4:00 PM to 8:00 PM
+          const afterHours = marketMinutes >= closeMinutes && marketMinutes < afterHoursEnd;
 
           // Check if it's a weekday
-          const actualDay = now.getDay();
+          const actualDay = new Date(`${nyDate}T12:00:00Z`).getUTCDay(); // weekday in New York, not server time
           const marketDay = actualDay >= 1 && actualDay <= 5;
 
           // US market holidays (NYSE observed) — 2025-2027
           const marketHolidays = [
             // 2025
-            '2025-01-01', '2025-01-20', '2025-02-17', '2025-04-18',
+            '2025-01-01', '2025-01-09', '2025-01-20', '2025-02-17', '2025-04-18',
             '2025-05-26', '2025-06-19', '2025-07-04', '2025-09-01',
             '2025-11-27', '2025-12-25',
             // 2026
@@ -1909,7 +1922,7 @@ ${allNews.map((article, i) =>
             '2027-05-31', '2027-06-18', '2027-07-05', '2027-09-06',
             '2027-11-25', '2027-12-24',
           ];
-          const isHoliday = marketHolidays.includes(isoDate);
+          const isHoliday = marketHolidays.includes(nyDate);
 
           // Determine market status
           let marketStatus = 'CLOSED';
@@ -1934,6 +1947,7 @@ ${allNews.map((article, i) =>
                   unix: Math.floor(now.getTime() / 1000),
                   is_weekday: marketDay,
                   is_market_holiday: isHoliday,
+                  is_early_close: isEarlyClose,
                   market_status: marketStatus,
                   markets_open_today: marketDay && !isHoliday,
                 }, null, 2),
