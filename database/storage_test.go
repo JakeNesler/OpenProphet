@@ -6,6 +6,9 @@ import (
 	"prophet-trader/models"
 	"testing"
 	"time"
+
+	"gorm.io/driver/sqlite"
+	"gorm.io/gorm"
 )
 
 func TestSaveOrderUpsertsByClientOrderID(t *testing.T) {
@@ -112,5 +115,57 @@ func TestGetOrdersNeedingReconciliation(t *testing.T) {
 	}
 	if !clientOrderIDs["op-pending"] || !clientOrderIDs["op-submit-failed"] {
 		t.Fatalf("GetOrdersNeedingReconciliation() client order IDs = %v, want pending and submit_failed orders", clientOrderIDs)
+	}
+}
+
+func TestSavePositionKeepsSnapshotHistory(t *testing.T) {
+	storage, err := NewLocalStorage(filepath.Join(t.TempDir(), "positions.db"))
+	if err != nil {
+		t.Fatalf("NewLocalStorage() error = %v", err)
+	}
+
+	for i := 0; i < 3; i++ {
+		if err := storage.SavePosition(&interfaces.Position{Symbol: "NVDA", Qty: 10, CurrentPrice: float64(100 + i)}); err != nil {
+			t.Fatalf("SavePosition() snapshot %d error = %v", i, err)
+		}
+	}
+
+	var count int64
+	storage.db.Model(&models.DBPosition{}).Where("symbol = ?", "NVDA").Count(&count)
+	if count != 3 {
+		t.Fatalf("snapshot count = %d, want 3", count)
+	}
+}
+
+func TestNewLocalStorageMigratesLegacyUniquePositionIndex(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "legacy.db")
+	legacy, err := gorm.Open(sqlite.Open(dbPath), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open legacy db: %v", err)
+	}
+	if err := legacy.AutoMigrate(&models.DBPosition{}); err != nil {
+		t.Fatalf("migrate legacy db: %v", err)
+	}
+	if err := legacy.Exec("DROP INDEX idx_positions_symbol").Error; err != nil {
+		t.Fatalf("drop index: %v", err)
+	}
+	if err := legacy.Exec("CREATE UNIQUE INDEX idx_positions_symbol ON positions(symbol)").Error; err != nil {
+		t.Fatalf("create legacy unique index: %v", err)
+	}
+	if err := legacy.Create(&models.DBPosition{Symbol: "NVDA"}).Error; err != nil {
+		t.Fatalf("seed legacy row: %v", err)
+	}
+	sqlDB, _ := legacy.DB()
+	sqlDB.Close()
+
+	storage, err := NewLocalStorage(dbPath)
+	if err != nil {
+		t.Fatalf("NewLocalStorage() error = %v", err)
+	}
+	if err := storage.SavePosition(&interfaces.Position{Symbol: "NVDA", Qty: 1}); err != nil {
+		t.Fatalf("SavePosition() after migration error = %v", err)
+	}
+	if !storage.db.Migrator().HasIndex(&models.DBPosition{}, "idx_positions_symbol") {
+		t.Fatal("expected non-unique idx_positions_symbol to exist after migration")
 	}
 }

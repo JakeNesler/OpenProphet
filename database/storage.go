@@ -58,6 +58,9 @@ func NewLocalStorage(dbPath string) (*LocalStorage, error) {
 			return nil, fmt.Errorf("failed to migrate order ID index: %w", err)
 		}
 	}
+	if err := migratePositionSymbolIndex(db); err != nil {
+		return nil, fmt.Errorf("failed to migrate position symbol index: %w", err)
+	}
 
 	logger := logrus.New()
 	logger.SetFormatter(&logrus.TextFormatter{
@@ -68,6 +71,25 @@ func NewLocalStorage(dbPath string) (*LocalStorage, error) {
 		db:     db,
 		logger: logger,
 	}, nil
+}
+
+// migratePositionSymbolIndex replaces the legacy unique index on positions.symbol
+// with a plain index. Position rows are periodic snapshots, so one symbol has
+// many rows; the unique index made every snapshot after the first fail.
+// AutoMigrate keeps an existing index with the same name, so drop it explicitly.
+func migratePositionSymbolIndex(db *gorm.DB) error {
+	const name = "idx_positions_symbol"
+	var unique []bool
+	if err := db.Raw(`SELECT "unique" FROM pragma_index_list('positions') WHERE name = ?`, name).Scan(&unique).Error; err != nil {
+		return err
+	}
+	if len(unique) == 0 || !unique[0] {
+		return nil
+	}
+	if err := db.Migrator().DropIndex(&models.DBPosition{}, name); err != nil {
+		return err
+	}
+	return db.Migrator().CreateIndex(&models.DBPosition{}, "Symbol")
 }
 
 // SaveBars saves multiple bars to the database
@@ -313,6 +335,11 @@ func (s *LocalStorage) CleanupOldData(before time.Time) error {
 		return fmt.Errorf("failed to delete old snapshots: %w", err)
 	}
 
+	// Delete old position snapshots
+	if err := s.db.Where("snapshot_time < ?", before).Delete(&models.DBPosition{}).Error; err != nil {
+		return fmt.Errorf("failed to delete old position snapshots: %w", err)
+	}
+
 	// Delete old signals
 	if err := s.db.Where("created_at < ?", before).Delete(&models.DBSignal{}).Error; err != nil {
 		return fmt.Errorf("failed to delete old signals: %w", err)
@@ -339,7 +366,7 @@ func (s *LocalStorage) SavePosition(position *interfaces.Position) error {
 		SnapshotTime:   time.Now(),
 	}
 
-	result := s.db.Save(dbPosition)
+	result := s.db.Create(dbPosition)
 	if result.Error != nil {
 		return fmt.Errorf("failed to save position: %w", result.Error)
 	}
